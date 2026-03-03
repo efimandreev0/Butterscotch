@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "stb_ds.h"
+#include "utils.h"
 
 Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, double x, double y, uint32_t selfVarCount) {
     Instance* inst = calloc(1, sizeof(Instance));
@@ -27,7 +28,7 @@ Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, double x, do
     inst->selfArrayMap = nullptr;
 
     // Initialize alarms to -1 (inactive)
-    for (int i = 0; 12 > i; i++) {
+    repeat(GML_ALARM_COUNT, i) {
         inst->alarm[i] = -1;
     }
 

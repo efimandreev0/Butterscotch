@@ -87,6 +87,10 @@ static int extractArgumentNumber(const char* name) {
     return -1;
 }
 
+static bool isValidAlarmIndex(int alarmIndex) {
+    return alarmIndex >= 0 && GML_ALARM_COUNT > alarmIndex;
+}
+
 RValue VMBuiltins_getVariable(VMContext* ctx, const char* name, int32_t arrayIndex) {
     Instance* inst = (Instance*) ctx->currentInstance;
     Runner* runner = (Runner*) ctx->runner;
@@ -118,7 +122,7 @@ RValue VMBuiltins_getVariable(VMContext* ctx, const char* name, int32_t arrayInd
         if (strcmp(name, "persistent") == 0) return RValue_makeBool(inst->persistent);
         if (strcmp(name, "solid") == 0) return RValue_makeBool(inst->solid);
         if (strcmp(name, "alarm") == 0) {
-            if (arrayIndex >= 0 && 12 > arrayIndex) {
+            if (isValidAlarmIndex(arrayIndex)) {
                 return RValue_makeReal((double) inst->alarm[arrayIndex]);
             }
             return RValue_makeReal(-1.0);
@@ -196,7 +200,7 @@ void VMBuiltins_setVariable(VMContext* ctx, const char* name, RValue val, int32_
         if (strcmp(name, "persistent") == 0) { inst->persistent = RValue_toBool(val); return; }
         if (strcmp(name, "solid") == 0) { inst->solid = RValue_toBool(val); return; }
         if (strcmp(name, "alarm") == 0) {
-            if (arrayIndex >= 0 && 12 > arrayIndex) {
+            if (isValidAlarmIndex(arrayIndex)) {
                 inst->alarm[arrayIndex] = RValue_toInt32(val);
             }
             return;

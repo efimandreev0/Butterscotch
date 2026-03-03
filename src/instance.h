@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include "rvalue.h"
 
+#define GML_ALARM_COUNT 12
+
 typedef struct Instance {
     uint32_t instanceId;
     int32_t objectIndex;
@@ -20,7 +22,7 @@ typedef struct Instance {
     double imageXscale, imageYscale, imageAngle, imageAlpha;
     uint32_t imageBlend;
     int32_t depth;
-    int32_t alarm[12];
+    int32_t alarm[GML_ALARM_COUNT];
 } Instance;
 
 Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, double x, double y, uint32_t selfVarCount);
