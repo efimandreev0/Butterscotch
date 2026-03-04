@@ -501,17 +501,54 @@ static float getKerningOffset(FontGlyph* glyph, uint16_t nextCh) {
     return 0;
 }
 
+// Decodes a single UTF-8 codepoint from str at *pos, advances *pos past the consumed bytes.
+// Returns the codepoint as uint16_t (sufficient for BMP glyphs). Returns 0xFFFD for invalid sequences.
+static uint16_t decodeUtf8(const char* str, int32_t len, int32_t* pos) {
+    uint8_t b = (uint8_t) str[*pos];
+    if (128 > b) {
+        // ASCII (0xxxxxxx)
+        (*pos)++;
+        return b;
+    } else if ((b & 0xE0) == 0xC0) {
+        // 2-byte sequence (110xxxxx 10xxxxxx)
+        if (len > *pos + 1 && ((uint8_t) str[*pos + 1] & 0xC0) == 0x80) {
+            uint16_t cp = ((b & 0x1F) << 6) | ((uint8_t) str[*pos + 1] & 0x3F);
+            *pos += 2;
+            return cp;
+        }
+    } else if ((b & 0xF0) == 0xE0) {
+        // 3-byte sequence (1110xxxx 10xxxxxx 10xxxxxx)
+        if (len > *pos + 2 && ((uint8_t) str[*pos + 1] & 0xC0) == 0x80 && ((uint8_t) str[*pos + 2] & 0xC0) == 0x80) {
+            uint16_t cp = ((b & 0x0F) << 12) | (((uint8_t) str[*pos + 1] & 0x3F) << 6) | ((uint8_t) str[*pos + 2] & 0x3F);
+            *pos += 3;
+            return cp;
+        }
+    } else if ((b & 0xF8) == 0xF0) {
+        // 4-byte sequence (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx) - truncated to uint16_t
+        if (len > *pos + 3 && ((uint8_t) str[*pos + 1] & 0xC0) == 0x80 && ((uint8_t) str[*pos + 2] & 0xC0) == 0x80 && ((uint8_t) str[*pos + 3] & 0xC0) == 0x80) {
+            *pos += 4;
+            return 0xFFFD; // Beyond BMP, return replacement character
+        }
+    }
+    // Invalid or truncated sequence
+    (*pos)++;
+    return 0xFFFD;
+}
+
 static float measureLineWidth(Font* font, const char* line, int32_t len) {
     float width = 0;
-    repeat(len, i) {
-        uint16_t ch = (uint8_t) line[i];
+    int32_t pos = 0;
+    while (len > pos) {
+        uint16_t ch = decodeUtf8(line, len, &pos);
         FontGlyph* glyph = findGlyph(font, ch);
         if (glyph == nullptr) continue;
 
         width += glyph->shift;
 
-        if (len > i + 1) {
-            uint16_t nextCh = (uint8_t) line[i + 1];
+        if (len > pos) {
+            int32_t savedPos = pos;
+            uint16_t nextCh = decodeUtf8(line, len, &pos);
+            pos = savedPos;
             width += getKerningOffset(glyph, nextCh);
         }
     }
@@ -637,8 +674,9 @@ static void glDrawText(Renderer* renderer, const char* text, float x, float y, f
         float cursorX = halignOffset;
 
         // Render each glyph in the line
-        repeat(lineLen, i) {
-            uint16_t ch = (uint8_t) processed[lineStart + i];
+        int32_t pos = 0;
+        while (lineLen > pos) {
+            uint16_t ch = decodeUtf8(processed + lineStart, lineLen, &pos);
             FontGlyph* glyph = findGlyph(font, ch);
             if (glyph == nullptr) continue;
             if (glyph->sourceWidth == 0 || glyph->sourceHeight == 0) {
@@ -689,8 +727,10 @@ static void glDrawText(Renderer* renderer, const char* text, float x, float y, f
 
             // Advance cursor by glyph shift + kerning
             cursorX += glyph->shift;
-            if (lineLen > i + 1) {
-                uint16_t nextCh = (uint8_t) processed[lineStart + i + 1];
+            if (lineLen > pos) {
+                int32_t savedPos = pos;
+                uint16_t nextCh = decodeUtf8(processed + lineStart, lineLen, &pos);
+                pos = savedPos;
                 cursorX += getKerningOffset(glyph, nextCh);
             }
         }
