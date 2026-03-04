@@ -186,6 +186,14 @@ static void glInit(Renderer* renderer, DataWin* dataWin) {
         fprintf(stderr, "GL: Loaded TXTR page %u (%dx%d)\n", i, w, h);
     }
 
+    // Create 1x1 white pixel texture for primitive drawing (rectangles, lines, etc.)
+    glGenTextures(1, &gl->whiteTexture);
+    glBindTexture(GL_TEXTURE_2D, gl->whiteTexture);
+    uint8_t whitePixel[4] = {255, 255, 255, 255};
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, whitePixel);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
     // Enable blending
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -207,6 +215,7 @@ static void glDestroy(Renderer* renderer) {
 
     if (gl->fboTexture != 0) glDeleteTextures(1, &gl->fboTexture);
     glDeleteFramebuffers(1, &gl->fbo);
+    glDeleteTextures(1, &gl->whiteTexture);
 
     glDeleteTextures((GLsizei) gl->textureCount, gl->glTextures);
     glDeleteProgram(gl->shaderProgram);
@@ -364,6 +373,57 @@ static void glDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y
     gl->quadCount++;
 }
 
+// Emits a single colored quad into the batch using the white pixel texture
+static void emitColoredQuad(GLRenderer* gl, float x0, float y0, float x1, float y1, float r, float g, float b, float a) {
+    if (gl->quadCount > 0 && gl->currentTextureId != gl->whiteTexture) {
+        flushBatch(gl);
+    }
+    if (gl->quadCount >= MAX_QUADS) {
+        flushBatch(gl);
+    }
+    gl->currentTextureId = gl->whiteTexture;
+
+    float* verts = gl->vertexData + gl->quadCount * VERTICES_PER_QUAD * FLOATS_PER_VERTEX;
+
+    // All UVs point to (0.5, 0.5) center of the 1x1 white texture
+    // Vertex 0: top-left
+    verts[0] = x0; verts[1] = y0; verts[2] = 0.5f; verts[3] = 0.5f;
+    verts[4] = r;  verts[5] = g;  verts[6] = b;    verts[7] = a;
+
+    // Vertex 1: top-right
+    verts[8]  = x1; verts[9]  = y0; verts[10] = 0.5f; verts[11] = 0.5f;
+    verts[12] = r;  verts[13] = g;  verts[14] = b;    verts[15] = a;
+
+    // Vertex 2: bottom-right
+    verts[16] = x1; verts[17] = y1; verts[18] = 0.5f; verts[19] = 0.5f;
+    verts[20] = r;  verts[21] = g;  verts[22] = b;    verts[23] = a;
+
+    // Vertex 3: bottom-left
+    verts[24] = x0; verts[25] = y1; verts[26] = 0.5f; verts[27] = 0.5f;
+    verts[28] = r;  verts[29] = g;  verts[30] = b;    verts[31] = a;
+
+    gl->quadCount++;
+}
+
+static void glDrawRectangle(Renderer* renderer, float x1, float y1, float x2, float y2, uint32_t color, float alpha, bool outline) {
+    GLRenderer* gl = (GLRenderer*) renderer;
+
+    float r = (float) BGR_R(color) / 255.0f;
+    float g = (float) BGR_G(color) / 255.0f;
+    float b = (float) BGR_B(color) / 255.0f;
+
+    if (outline) {
+        // Draw 4 one-pixel-wide edges: top, bottom, left, right
+        emitColoredQuad(gl, x1, y1, x2 + 1, y1 + 1, r, g, b, alpha); // top
+        emitColoredQuad(gl, x1, y2, x2 + 1, y2 + 1, r, g, b, alpha); // bottom
+        emitColoredQuad(gl, x1, y1 + 1, x1 + 1, y2, r, g, b, alpha); // left
+        emitColoredQuad(gl, x2, y1 + 1, x2 + 1, y2, r, g, b, alpha); // right
+    } else {
+        // Filled rectangle: GML adds +1 to width/height for filled rects
+        emitColoredQuad(gl, x1, y1, x2 + 1, y2 + 1, r, g, b, alpha);
+    }
+}
+
 // ===[ Vtable ]===
 
 static RendererVtable glVtable = {
@@ -372,6 +432,7 @@ static RendererVtable glVtable = {
     .beginFrame = glBeginFrame,
     .endFrame = glEndFrame,
     .drawSprite = glDrawSprite,
+    .drawRectangle = glDrawRectangle,
     .flush = glRendererFlush,
 };
 

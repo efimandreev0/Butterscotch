@@ -23,6 +23,8 @@ typedef struct {
     int32_t* textureHeights;
     uint32_t textureCount;
 
+    GLuint whiteTexture; // 1x1 white pixel for drawing primitives (rectangles, lines, etc.)
+
     // FBO for render-to-texture (game renders here, then blitted to screen)
     GLuint fbo;
     GLuint fboTexture;

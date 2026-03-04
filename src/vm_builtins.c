@@ -1295,7 +1295,19 @@ static RValue builtin_drawSpriteExt(VMContext* ctx, RValue* args, [[maybe_unused
     return RValue_makeUndefined();
 }
 
-STUB_RETURN_UNDEFINED(draw_rectangle)
+static RValue builtin_drawRectangle(VMContext* ctx, RValue* args, [[maybe_unused]] int32_t argCount) {
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer == nullptr) return RValue_makeUndefined();
+
+    float x1 = (float) RValue_toReal(args[0]);
+    float y1 = (float) RValue_toReal(args[1]);
+    float x2 = (float) RValue_toReal(args[2]);
+    float y2 = (float) RValue_toReal(args[3]);
+    bool outline = RValue_toBool(args[4]);
+
+    runner->renderer->vtable->drawRectangle(runner->renderer, x1, y1, x2, y2, runner->renderer->drawColor, runner->renderer->drawAlpha, outline);
+    return RValue_makeUndefined();
+}
 
 static RValue builtin_drawSetColor(VMContext* ctx, RValue* args, [[maybe_unused]] int32_t argCount) {
     Runner* runner = (Runner*) ctx->runner;
@@ -1649,7 +1661,7 @@ void VMBuiltins_registerAll(void) {
     // Draw
     registerBuiltin("draw_sprite", builtin_drawSprite);
     registerBuiltin("draw_sprite_ext", builtin_drawSpriteExt);
-    registerBuiltin("draw_rectangle", builtin_draw_rectangle);
+    registerBuiltin("draw_rectangle", builtin_drawRectangle);
     registerBuiltin("draw_set_color", builtin_drawSetColor);
     registerBuiltin("draw_set_alpha", builtin_drawSetAlpha);
     registerBuiltin("draw_set_font", builtin_draw_set_font);
