@@ -407,7 +407,13 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     arrfree(runner->instances);
     runner->instances = keptInstances;
 
-    // Create new instances from room definition
+    // Two-pass instance creation (matches HTML5 runner behavior):
+    // Pass 1: Create all instance objects so they exist for cross-references
+    // Pass 2: Fire preCreateCode, CREATE events, and creationCode
+    // This ensures that when an instance's Create event reads another instance
+    // (e.g. obj_mainchara reading obj_markerA.x), the target already exists.
+
+    // Pass 1: Create all instances without firing events
     repeat(room->gameObjectCount, i) {
         RoomGameObject* roomObj = &room->gameObjects[i];
 
@@ -425,6 +431,25 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         inst->imageXscale = (double) roomObj->scaleX;
         inst->imageYscale = (double) roomObj->scaleY;
         inst->imageAngle = (double) roomObj->rotation;
+    }
+
+    // Pass 2: Fire events for newly created instances (in room definition order)
+    repeat(room->gameObjectCount, i) {
+        RoomGameObject* roomObj = &room->gameObjects[i];
+
+        // Find the instance we created (skip persistent ones that were kept)
+        Instance* inst = nullptr;
+        repeat(arrlen(runner->instances), j) {
+            if (runner->instances[j]->instanceId == roomObj->instanceID) {
+                inst = runner->instances[j];
+                break;
+            }
+        }
+        if (inst == nullptr) continue;
+
+        // Skip instances that already had their Create event fired (persistent carry-overs)
+        if (inst->createEventFired) continue;
+        inst->createEventFired = true;
 
         executeCode(runner, inst, roomObj->preCreateCode);
         Runner_executeEvent(runner, inst, EVENT_CREATE, 0);
@@ -464,6 +489,7 @@ Runner* Runner_create(DataWin* dataWin, VMContext* vm) {
 
 Instance* Runner_createInstance(Runner* runner, double x, double y, int32_t objectIndex) {
     Instance* inst = createAndInitInstance(runner, runner->nextInstanceId++, objectIndex, x, y);
+    inst->createEventFired = true;
     Runner_executeEvent(runner, inst, EVENT_CREATE, 0);
     return inst;
 }
