@@ -9,7 +9,9 @@ typedef struct Instance {
     uint32_t instanceId;
     int32_t objectIndex;
     double x, y;
+    double xprevious, yprevious;
     bool persistent, solid, active, visible;
+    int32_t maskIndex; // collision mask sprite override (-1 = use spriteIndex)
 
     // Per-instance self variable storage
     RValue* selfVars;

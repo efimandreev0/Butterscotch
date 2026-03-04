@@ -151,6 +151,8 @@ typedef struct {
     int32_t originY;
     uint32_t textureCount;
     uint32_t* textureOffsets; // absolute file offsets to TexturePageItems
+    uint32_t maskCount;       // number of collision masks (one per frame, or 0)
+    uint8_t** masks;          // array of maskCount packed bit arrays (nullptr if none)
 } Sprite;
 
 typedef struct {

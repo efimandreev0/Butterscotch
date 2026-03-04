@@ -1272,7 +1272,7 @@ static void handleCall(VMContext* ctx, uint32_t instr, const uint8_t* extraData)
 // ===[ With-Statement Helpers (PushEnv/PopEnv) ]===
 
 // Checks if objectIndex is or inherits from targetObjectIndex by walking the parent chain.
-static bool isObjectOrDescendant(DataWin* dataWin, int32_t objectIndex, int32_t targetObjectIndex) {
+bool VM_isObjectOrDescendant(DataWin* dataWin, int32_t objectIndex, int32_t targetObjectIndex) {
     int32_t currentObj = objectIndex;
     int depth = 0;
     while (currentObj >= 0 && (uint32_t) currentObj < dataWin->objt.count && 32 > depth) {
@@ -1282,6 +1282,7 @@ static bool isObjectOrDescendant(DataWin* dataWin, int32_t objectIndex, int32_t 
     }
     return false;
 }
+
 
 // Sets the VM instance context (selfVars, selfVarCount, currentInstance) from an Instance.
 static void switchToInstance(VMContext* ctx, Instance* inst) {
@@ -1327,9 +1328,11 @@ static void handlePushEnv(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
         // For nested with-blocks, other refers to the saved instance from the parent env frame
         if (frame->parent != nullptr) {
             switchToInstance(ctx, frame->parent->savedInstance);
+        } else if (ctx->otherInstance != nullptr) {
+            // No parent env frame, but we have an otherInstance (e.g., from collision events)
+            switchToInstance(ctx, (Instance*) ctx->otherInstance);
         }
-        // If no parent frame, other is the same as the saved instance (no outer with-block)
-        // which is already saved in frame->savedInstance
+        // If no parent frame and no otherInstance, keep the saved instance (no-op)
         return;
     }
 
@@ -1365,7 +1368,7 @@ static void handlePushEnv(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
         int32_t instanceCount = (int32_t) arrlen(runner->instances);
         for (int32_t i = 0; instanceCount > i; i++) {
             Instance* inst = runner->instances[i];
-            if (inst->active && isObjectOrDescendant(ctx->dataWin, inst->objectIndex, target)) {
+            if (inst->active && VM_isObjectOrDescendant(ctx->dataWin, inst->objectIndex, target)) {
                 arrput(frame->instanceList, inst);
             }
         }

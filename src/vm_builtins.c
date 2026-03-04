@@ -11,6 +11,7 @@
 
 #include "stb_ds.h"
 #include "text_utils.h"
+#include "collision.h"
 
 // ===[ BUILTIN FUNCTION REGISTRY ]===
 typedef struct {
@@ -134,18 +135,14 @@ RValue VMBuiltins_getVariable(VMContext* ctx, const char* name, int32_t arrayInd
             return RValue_makeReal(0.0);
         }
         if (strcmp(name, "bbox_left") == 0 || strcmp(name, "bbox_right") == 0 || strcmp(name, "bbox_top") == 0 || strcmp(name, "bbox_bottom") == 0) {
-            if (inst->spriteIndex >= 0 && runner != nullptr && runner->dataWin->sprt.count > (uint32_t) inst->spriteIndex) {
-                Sprite* spr = &runner->dataWin->sprt.sprites[inst->spriteIndex];
-                double left = inst->x + inst->imageXscale * (spr->marginLeft - spr->originX);
-                double right = left + inst->imageXscale * ((spr->marginRight + 1) - spr->marginLeft);
-                double top = inst->y + inst->imageYscale * (spr->marginTop - spr->originY);
-                double bottom = top + inst->imageYscale * ((spr->marginBottom + 1) - spr->marginTop);
-                if (left > right) { double tmp = left; left = right; right = tmp; }
-                if (top > bottom) { double tmp = top; top = bottom; bottom = tmp; }
-                if (strcmp(name, "bbox_left") == 0) return RValue_makeReal(round(left));
-                if (strcmp(name, "bbox_right") == 0) return RValue_makeReal(round(right));
-                if (strcmp(name, "bbox_top") == 0) return RValue_makeReal(round(top));
-                return RValue_makeReal(round(bottom));
+            if (runner != nullptr) {
+                InstanceBBox bbox = Collision_computeBBox(runner->dataWin, inst);
+                if (bbox.valid) {
+                    if (strcmp(name, "bbox_left") == 0) return RValue_makeReal(round(bbox.left));
+                    if (strcmp(name, "bbox_right") == 0) return RValue_makeReal(round(bbox.right));
+                    if (strcmp(name, "bbox_top") == 0) return RValue_makeReal(round(bbox.top));
+                    return RValue_makeReal(round(bbox.bottom));
+                }
             }
             if (strcmp(name, "bbox_left") == 0 || strcmp(name, "bbox_right") == 0) return RValue_makeReal(inst->x);
             return RValue_makeReal(inst->y);
@@ -154,6 +151,9 @@ RValue VMBuiltins_getVariable(VMContext* ctx, const char* name, int32_t arrayInd
         if (strcmp(name, "depth") == 0) return RValue_makeReal((double) inst->depth);
         if (strcmp(name, "x") == 0) return RValue_makeReal(inst->x);
         if (strcmp(name, "y") == 0) return RValue_makeReal(inst->y);
+        if (strcmp(name, "xprevious") == 0) return RValue_makeReal(inst->xprevious);
+        if (strcmp(name, "yprevious") == 0) return RValue_makeReal(inst->yprevious);
+        if (strcmp(name, "mask_index") == 0) return RValue_makeReal((double) inst->maskIndex);
         if (strcmp(name, "id") == 0) return RValue_makeReal((double) inst->instanceId);
         if (strcmp(name, "object_index") == 0) return RValue_makeReal((double) inst->objectIndex);
         if (strcmp(name, "persistent") == 0) return RValue_makeBool(inst->persistent);
@@ -313,6 +313,9 @@ void VMBuiltins_setVariable(VMContext* ctx, const char* name, RValue val, int32_
         if (strcmp(name, "y") == 0) { inst->y = RValue_toReal(val); return; }
         if (strcmp(name, "persistent") == 0) { inst->persistent = RValue_toBool(val); return; }
         if (strcmp(name, "solid") == 0) { inst->solid = RValue_toBool(val); return; }
+        if (strcmp(name, "xprevious") == 0) { inst->xprevious = RValue_toReal(val); return; }
+        if (strcmp(name, "yprevious") == 0) { inst->yprevious = RValue_toReal(val); return; }
+        if (strcmp(name, "mask_index") == 0) { inst->maskIndex = RValue_toInt32(val); return; }
         if (strcmp(name, "alarm") == 0) {
             if (isValidAlarmIndex(arrayIndex)) {
                 int32_t newValue = RValue_toInt32(val);
@@ -1769,9 +1772,146 @@ STUB_RETURN_ZERO(display_get_height)
 
 // Collision stubs
 STUB_RETURN_ZERO(place_meeting)
-STUB_RETURN_ZERO(collision_rectangle)
 STUB_RETURN_ZERO(collision_line)
-STUB_RETURN_ZERO(collision_point)
+
+// collision_rectangle(x1, y1, x2, y2, obj, prec, notme)
+static RValue builtinCollisionRectangle(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (7 > argCount) return RValue_makeReal((double) INSTANCE_NOONE);
+
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner == nullptr) return RValue_makeReal((double) INSTANCE_NOONE);
+
+    double x1 = RValue_toReal(args[0]);
+    double y1 = RValue_toReal(args[1]);
+    double x2 = RValue_toReal(args[2]);
+    double y2 = RValue_toReal(args[3]);
+    int32_t targetObjIndex = RValue_toInt32(args[4]);
+    int32_t prec = RValue_toInt32(args[5]);
+    int32_t notme = RValue_toInt32(args[6]);
+
+    // Normalize rect
+    if (x1 > x2) { double tmp = x1; x1 = x2; x2 = tmp; }
+    if (y1 > y2) { double tmp = y1; y1 = y2; y2 = tmp; }
+
+    Instance* self = (Instance*) ctx->currentInstance;
+    int32_t count = (int32_t) arrlen(runner->instances);
+
+    repeat(count, i) {
+        Instance* inst = runner->instances[i];
+        if (!inst->active) continue;
+        if (notme && inst == self) continue;
+        if (!VM_isObjectOrDescendant(ctx->dataWin, inst->objectIndex, targetObjIndex)) continue;
+
+        InstanceBBox bbox = Collision_computeBBox(ctx->dataWin, inst);
+        if (!bbox.valid) continue;
+
+        // AABB overlap test
+        if (x1 >= bbox.right || bbox.left >= x2 || y1 >= bbox.bottom || bbox.top >= y2) continue;
+
+        // Precise check if requested and sprite has precise masks
+        if (prec != 0) {
+            Sprite* spr = Collision_getSprite(ctx->dataWin, inst);
+            if (spr != nullptr && spr->sepMasks == 1 && spr->masks != nullptr && spr->maskCount > 0) {
+                // Check if any pixel in the overlap region hits the mask
+                double iLeft   = fmax(x1, bbox.left);
+                double iRight  = fmin(x2, bbox.right);
+                double iTop    = fmax(y1, bbox.top);
+                double iBottom = fmin(y2, bbox.bottom);
+
+                bool found = false;
+                int32_t startX = (int32_t) floor(iLeft);
+                int32_t endX   = (int32_t) ceil(iRight);
+                int32_t startY = (int32_t) floor(iTop);
+                int32_t endY   = (int32_t) ceil(iBottom);
+
+                for (int32_t py = startY; endY > py && !found; py++) {
+                    for (int32_t px = startX; endX > px && !found; px++) {
+                        if (Collision_pointInMask(spr, inst, (double) px + 0.5, (double) py + 0.5)) {
+                            found = true;
+                        }
+                    }
+                }
+                if (!found) continue;
+            }
+        }
+
+        return RValue_makeReal((double) inst->instanceId);
+    }
+
+    return RValue_makeReal((double) INSTANCE_NOONE);
+}
+
+// collision_point(x, y, obj, prec, notme)
+static RValue builtinCollisionPoint(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (5 > argCount) return RValue_makeReal((double) INSTANCE_NOONE);
+
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner == nullptr) return RValue_makeReal((double) INSTANCE_NOONE);
+
+    double px = RValue_toReal(args[0]);
+    double py = RValue_toReal(args[1]);
+    int32_t targetObjIndex = RValue_toInt32(args[2]);
+    int32_t prec = RValue_toInt32(args[3]);
+    int32_t notme = RValue_toInt32(args[4]);
+
+    Instance* self = (Instance*) ctx->currentInstance;
+    int32_t count = (int32_t) arrlen(runner->instances);
+
+    repeat(count, i) {
+        Instance* inst = runner->instances[i];
+        if (!inst->active) continue;
+        if (notme && inst == self) continue;
+        if (!VM_isObjectOrDescendant(ctx->dataWin, inst->objectIndex, targetObjIndex)) continue;
+
+        InstanceBBox bbox = Collision_computeBBox(ctx->dataWin, inst);
+        if (!bbox.valid) continue;
+
+        // Point-in-AABB test
+        if (bbox.left > px || px >= bbox.right || bbox.top > py || py >= bbox.bottom) continue;
+
+        // Precise check if requested
+        if (prec != 0) {
+            Sprite* spr = Collision_getSprite(ctx->dataWin, inst);
+            if (spr != nullptr && spr->sepMasks == 1 && spr->masks != nullptr && spr->maskCount > 0) {
+                if (!Collision_pointInMask(spr, inst, px, py)) continue;
+            }
+        }
+
+        return RValue_makeReal((double) inst->instanceId);
+    }
+
+    return RValue_makeReal((double) INSTANCE_NOONE);
+}
+
+// instance_position(x, y, obj)
+static RValue builtinInstancePosition(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (3 > argCount) return RValue_makeReal((double) INSTANCE_NOONE);
+
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner == nullptr) return RValue_makeReal((double) INSTANCE_NOONE);
+
+    double px = RValue_toReal(args[0]);
+    double py = RValue_toReal(args[1]);
+    int32_t targetObjIndex = RValue_toInt32(args[2]);
+
+    int32_t count = (int32_t) arrlen(runner->instances);
+
+    repeat(count, i) {
+        Instance* inst = runner->instances[i];
+        if (!inst->active) continue;
+        if (!VM_isObjectOrDescendant(ctx->dataWin, inst->objectIndex, targetObjIndex)) continue;
+
+        InstanceBBox bbox = Collision_computeBBox(ctx->dataWin, inst);
+        if (!bbox.valid) continue;
+
+        // Point-in-AABB test (no precise, no notme)
+        if (bbox.left > px || px >= bbox.right || bbox.top > py || py >= bbox.bottom) continue;
+
+        return RValue_makeReal((double) inst->instanceId);
+    }
+
+    return RValue_makeReal((double) INSTANCE_NOONE);
+}
 
 // Misc stubs
 STUB_RETURN_ZERO(get_timer)
@@ -2053,9 +2193,10 @@ void VMBuiltins_registerAll(void) {
 
     // Collision
     registerBuiltin("place_meeting", builtin_place_meeting);
-    registerBuiltin("collision_rectangle", builtin_collision_rectangle);
+    registerBuiltin("collision_rectangle", builtinCollisionRectangle);
     registerBuiltin("collision_line", builtin_collision_line);
-    registerBuiltin("collision_point", builtin_collision_point);
+    registerBuiltin("collision_point", builtinCollisionPoint);
+    registerBuiltin("instance_position", builtinInstancePosition);
 
     // Misc
     registerBuiltin("get_timer", builtin_get_timer);

@@ -11,6 +11,7 @@
 #define EVENT_DESTROY    1
 #define EVENT_ALARM      2
 #define EVENT_STEP       3
+#define EVENT_COLLISION  4
 #define EVENT_KEYBOARD   5
 #define EVENT_OTHER      7
 #define EVENT_DRAW       8

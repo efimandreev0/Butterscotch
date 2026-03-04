@@ -125,6 +125,7 @@ typedef struct VMContext {
     int32_t selfId;
     int32_t otherId;
     struct Instance* currentInstance;
+    struct Instance* otherInstance; // "other" instance for collision events
     CallFrame* callStack;
     int32_t callDepth;
     EnvFrame* envStack; // Environment stack for with-statements (PushEnv/PopEnv)
@@ -170,6 +171,7 @@ RValue VM_executeCode(VMContext* ctx, int32_t codeIndex);
 RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t argCount);
 CodeLocals* VM_resolveCodeLocals(VMContext* ctx, const char* codeName);
 void VM_free(VMContext* ctx);
+bool VM_isObjectOrDescendant(DataWin* dataWin, int32_t objectIndex, int32_t targetObjectIndex);
 
 static const char* VM_getCallerName(VMContext* ctx) {
     return ctx->currentCodeName != nullptr ? ctx->currentCodeName : "<unknown>";

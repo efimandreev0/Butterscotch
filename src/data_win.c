@@ -342,7 +342,31 @@ static void parseSPRT(BinaryReader* reader, DataWin* dw) {
             spr->textureOffsets = nullptr;
         }
 
-        // Collision mask data follows but we skip it (pointer list seeking handles position)
+        // Collision mask data
+        // sepMasks: 0 = axis-aligned rect (no mask data stored in some cases)
+        //           1 = precise per-frame masks
+        //           2 = rotated rect (no mask data)
+        // Mask format: each bit = 1 pixel, MSB first, row-major
+        // Width in bytes = (spriteWidth + 7) / 8, total = widthInBytes * spriteHeight
+        // After all masks, data is padded to 4-byte alignment
+        uint32_t maskDataCount = BinaryReader_readUint32(reader);
+        spr->maskCount = maskDataCount;
+        if (maskDataCount > 0 && spr->width > 0 && spr->height > 0) {
+            uint32_t bytesPerRow = (spr->width + 7) / 8;
+            uint32_t bytesPerMask = bytesPerRow * spr->height;
+            spr->masks = malloc(maskDataCount * sizeof(uint8_t*));
+            repeat(maskDataCount, j) {
+                spr->masks[j] = malloc(bytesPerMask);
+                BinaryReader_readBytes(reader, spr->masks[j], bytesPerMask);
+                // Skip padding to 4-byte alignment
+                uint32_t remainder = bytesPerMask % 4;
+                if (remainder != 0) {
+                    BinaryReader_skip(reader, 4 - remainder);
+                }
+            }
+        } else {
+            spr->masks = nullptr;
+        }
     }
     free(ptrs);
 }
@@ -1219,6 +1243,12 @@ void DataWin_free(DataWin* dw) {
     if (dw->sprt.sprites) {
         repeat(dw->sprt.count, i) {
             free(dw->sprt.sprites[i].textureOffsets);
+            if (dw->sprt.sprites[i].masks != nullptr) {
+                repeat(dw->sprt.sprites[i].maskCount, j) {
+                    free(dw->sprt.sprites[i].masks[j]);
+                }
+                free(dw->sprt.sprites[i].masks);
+            }
         }
         free(dw->sprt.sprites);
     }

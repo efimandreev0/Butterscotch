@@ -12,6 +12,9 @@ Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, double x, do
     inst->objectIndex = objectIndex;
     inst->x = x;
     inst->y = y;
+    inst->xprevious = x;
+    inst->yprevious = y;
+    inst->maskIndex = -1;
     inst->persistent = false;
     inst->solid = false;
     inst->active = true;

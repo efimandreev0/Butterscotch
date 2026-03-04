@@ -2,6 +2,7 @@
 #include "vm.h"
 #include "utils.h"
 #include "json_writer.h"
+#include "collision.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -122,6 +123,7 @@ static const char* getEventName(int32_t eventType, int32_t eventSubtype) {
         case EVENT_CREATE:  return "Create";
         case EVENT_DESTROY: return "Destroy";
         case EVENT_ALARM:   return "Alarm";
+        case EVENT_COLLISION: return "Collision";
         case EVENT_STEP:
             switch (eventSubtype) {
                 case STEP_BEGIN:  return "BeginStep";
@@ -343,6 +345,7 @@ static Instance* createAndInitInstance(Runner* runner, int32_t instanceId, int32
     inst->solid = objDef->solid;
     inst->persistent = objDef->persistent;
     inst->depth = objDef->depth;
+    inst->maskIndex = objDef->textureMaskId;
 
     arrput(runner->instances, inst);
 
@@ -517,7 +520,122 @@ void Runner_initFirstRoom(Runner* runner) {
     Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ROOM_START);
 }
 
+// ===[ Collision Event Dispatch ]===
+
+static void executeCollisionEvent(Runner* runner, Instance* self, Instance* other, int32_t targetObjectIndex) {
+    VMContext* vm = runner->vmContext;
+
+    // Save event context
+    int32_t savedEventType = vm->currentEventType;
+    int32_t savedEventSubtype = vm->currentEventSubtype;
+    int32_t savedEventObjectIndex = vm->currentEventObjectIndex;
+    struct Instance* savedOtherInstance = vm->otherInstance;
+
+    // Set collision event context
+    vm->currentEventType = EVENT_COLLISION;
+    vm->currentEventSubtype = targetObjectIndex;
+    vm->otherInstance = other;
+
+    int32_t ownerObjectIndex = -1;
+    int32_t codeId = findEventCodeIdAndOwner(runner->dataWin, self->objectIndex, EVENT_COLLISION, targetObjectIndex, &ownerObjectIndex);
+
+    vm->currentEventObjectIndex = ownerObjectIndex;
+
+    if (codeId >= 0 && shlen(vm->eventsToBeTraced) != -1) {
+        const char* selfName = runner->dataWin->objt.objects[self->objectIndex].name;
+        const char* targetName = runner->dataWin->objt.objects[targetObjectIndex].name;
+        bool shouldTrace = shgeti(vm->eventsToBeTraced, "*") != -1 || shgeti(vm->eventsToBeTraced, "Collision") != -1 || shgeti(vm->eventsToBeTraced, selfName) != -1;
+        if (shouldTrace) {
+            printf("Runner: [%s] Collision with %s (instanceId=%d, otherId=%d)\n", selfName, targetName, self->instanceId, other->instanceId);
+        }
+    }
+
+    executeCode(runner, self, codeId);
+
+    // Restore event context
+    vm->currentEventType = savedEventType;
+    vm->currentEventSubtype = savedEventSubtype;
+    vm->currentEventObjectIndex = savedEventObjectIndex;
+    vm->otherInstance = savedOtherInstance;
+}
+
+static void dispatchCollisionEvents(Runner* runner) {
+    DataWin* dataWin = runner->dataWin;
+    int32_t count = (int32_t) arrlen(runner->instances);
+
+    repeat(count, i) {
+        Instance* self = runner->instances[i];
+        if (!self->active) continue;
+
+        // Walk the parent chain to find all collision event handlers for this object
+        int32_t currentObj = self->objectIndex;
+        int depth = 0;
+        while (currentObj >= 0 && dataWin->objt.count > (uint32_t) currentObj && 32 > depth) {
+            GameObject* obj = &dataWin->objt.objects[currentObj];
+
+            if (OBJT_EVENT_TYPE_COUNT > EVENT_COLLISION) {
+                ObjectEventList* eventList = &obj->eventLists[EVENT_COLLISION];
+                repeat(eventList->eventCount, evtIdx) {
+                    ObjectEvent* evt = &eventList->events[evtIdx];
+                    int32_t targetObjIndex = (int32_t) evt->eventSubtype;
+
+                    if (evt->actionCount == 0 || 0 > evt->actions[0].codeId) continue;
+
+                    // Check all instances of the target object
+                    repeat(count, j) {
+                        Instance* other = runner->instances[j];
+                        if (!other->active) continue;
+                        if (other == self) continue;
+                        if (!VM_isObjectOrDescendant(dataWin, other->objectIndex, targetObjIndex)) continue;
+
+                        // Compute bboxes
+                        InstanceBBox bboxSelf = Collision_computeBBox(dataWin, self);
+                        InstanceBBox bboxOther = Collision_computeBBox(dataWin, other);
+                        if (!bboxSelf.valid || !bboxOther.valid) continue;
+
+                        // AABB overlap test
+                        if (bboxSelf.left >= bboxOther.right || bboxOther.left >= bboxSelf.right ||
+                            bboxSelf.top >= bboxOther.bottom || bboxOther.top >= bboxSelf.bottom) continue;
+
+                        // Precise collision check if either sprite needs it
+                        Sprite* sprSelf = Collision_getSprite(dataWin, self);
+                        Sprite* sprOther = Collision_getSprite(dataWin, other);
+                        bool needsPrecise = (sprSelf != nullptr && sprSelf->sepMasks == 1) || (sprOther != nullptr && sprOther->sepMasks == 1);
+
+                        if (needsPrecise) {
+                            if (!Collision_instancesOverlapPrecise(dataWin, self, other, bboxSelf, bboxOther)) continue;
+                        }
+
+                        // Collision detected! If either instance is solid, restore to xprevious/yprevious
+                        if (self->solid || other->solid) {
+                            self->x = self->xprevious;
+                            self->y = self->yprevious;
+                            other->x = other->xprevious;
+                            other->y = other->yprevious;
+                        }
+
+                        executeCollisionEvent(runner, self, other, targetObjIndex);
+                    }
+                }
+            }
+
+            currentObj = obj->parentId;
+            depth++;
+        }
+    }
+}
+
 void Runner_step(Runner* runner) {
+    // Save xprevious/yprevious for all active instances
+    int32_t prevCount = (int32_t) arrlen(runner->instances);
+    repeat(prevCount, i) {
+        Instance* inst = runner->instances[i];
+        if (inst->active) {
+            inst->xprevious = inst->x;
+            inst->yprevious = inst->y;
+        }
+    }
+
     // Scroll backgrounds
     Runner_scrollBackgrounds(runner);
 
@@ -572,6 +690,9 @@ void Runner_step(Runner* runner) {
 
     // Execute Normal Step for all instances
     Runner_executeEventForAll(runner, EVENT_STEP, STEP_NORMAL);
+
+    // Dispatch collision events
+    dispatchCollisionEvents(runner);
 
     // Execute End Step for all instances
     Runner_executeEventForAll(runner, EVENT_STEP, STEP_END);
