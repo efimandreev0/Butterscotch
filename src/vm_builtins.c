@@ -1305,8 +1305,20 @@ static RValue builtinGameEnd(VMContext* ctx, [[maybe_unused]] RValue* args, [[ma
 STUB_RETURN_UNDEFINED(game_save)
 STUB_RETURN_UNDEFINED(game_load)
 
-// Instance stubs
-STUB_RETURN_ZERO(instance_number)
+static RValue builtinInstanceNumber(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (1 > argCount) return RValue_makeReal(0.0);
+    Runner* runner = (Runner*) ctx->runner;
+    int32_t objectIndex = RValue_toInt32(args[0]);
+    int32_t count = 0;
+    int32_t instanceCount = (int32_t) arrlen(runner->instances);
+    repeat(instanceCount, i) {
+        Instance* inst = runner->instances[i];
+        if (inst->active && VM_isObjectOrDescendant(ctx->dataWin, inst->objectIndex, objectIndex)) {
+            count++;
+        }
+    }
+    return RValue_makeReal((double) count);
+}
 
 static RValue builtinInstanceExists(VMContext* ctx, RValue* args, int32_t argCount) {
     if (1 > argCount) return RValue_makeBool(false);
@@ -2247,7 +2259,7 @@ void VMBuiltins_registerAll(void) {
 
     // Instance
     registerBuiltin("instance_exists", builtinInstanceExists);
-    registerBuiltin("instance_number", builtin_instance_number);
+    registerBuiltin("instance_number", builtinInstanceNumber);
     registerBuiltin("instance_destroy", builtinInstanceDestroy);
     registerBuiltin("instance_create", builtinInstanceCreate);
     registerBuiltin("action_kill_object", builtinActionKillObject);
