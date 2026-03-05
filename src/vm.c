@@ -392,6 +392,31 @@ static RValue resolveVariableRead(VMContext* ctx, int32_t instanceType, uint32_t
         if (needsInstanceSwap) ctx->currentInstance = targetInstance;
         RValue result = VMBuiltins_getVariable(ctx, varDef->name, access.arrayIndex);
         if (needsInstanceSwap) ctx->currentInstance = savedInstance;
+
+        // Trace built-in variable reads
+        if (instanceType == INSTANCE_GLOBAL) {
+            if (shouldTraceVariable(ctx->varReadsToBeTraced, "global", nullptr, varDef->name)) {
+                char* rvalueAsString = RValue_toStringTyped(result);
+                if (access.arrayIndex != -1) {
+                    fprintf(stderr, "VM: [%s] READ global.%s[%d] -> %s (builtin)\n", ctx->currentCodeName, varDef->name, access.arrayIndex, rvalueAsString);
+                } else {
+                    fprintf(stderr, "VM: [%s] READ global.%s -> %s (builtin)\n", ctx->currentCodeName, varDef->name, rvalueAsString);
+                }
+                free(rvalueAsString);
+            }
+        } else if (targetInstance != nullptr) {
+            const char* objName = ctx->dataWin->objt.objects[targetInstance->objectIndex].name;
+            if (shouldTraceVariable(ctx->varReadsToBeTraced, objName, "self", varDef->name)) {
+                char* rvalueAsString = RValue_toStringTyped(result);
+                if (access.arrayIndex != -1) {
+                    fprintf(stderr, "VM: [%s] READ %s.%s[%d] -> %s (instanceId=%d) (builtin)\n", ctx->currentCodeName, objName, varDef->name, access.arrayIndex, rvalueAsString, targetInstance->instanceId);
+                } else {
+                    fprintf(stderr, "VM: [%s] READ %s.%s -> %s (instanceId=%d) (builtin)\n", ctx->currentCodeName, objName, varDef->name, rvalueAsString, targetInstance->instanceId);
+                }
+                free(rvalueAsString);
+            }
+        }
+
         return result;
     }
 
@@ -598,6 +623,31 @@ static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t 
         if (needsInstanceSwap) ctx->currentInstance = targetInstance;
         VMBuiltins_setVariable(ctx, varDef->name, val, access.arrayIndex);
         if (needsInstanceSwap) ctx->currentInstance = savedInstance;
+
+        // Trace built-in variable writes
+        if (instanceType == INSTANCE_GLOBAL) {
+            if (shouldTraceVariable(ctx->varWritesToBeTraced, "global", nullptr, varDef->name)) {
+                char* rvalueAsString = RValue_toStringTyped(val);
+                if (access.arrayIndex != -1) {
+                    fprintf(stderr, "VM: [%s] WRITE global.%s[%d] = %s (builtin)\n", ctx->currentCodeName, varDef->name, access.arrayIndex, rvalueAsString);
+                } else {
+                    fprintf(stderr, "VM: [%s] WRITE global.%s = %s (builtin)\n", ctx->currentCodeName, varDef->name, rvalueAsString);
+                }
+                free(rvalueAsString);
+            }
+        } else if (targetInstance != nullptr) {
+            const char* objName = ctx->dataWin->objt.objects[targetInstance->objectIndex].name;
+            if (shouldTraceVariable(ctx->varWritesToBeTraced, objName, "self", varDef->name)) {
+                char* rvalueAsString = RValue_toStringTyped(val);
+                if (access.arrayIndex != -1) {
+                    fprintf(stderr, "VM: [%s] WRITE %s.%s[%d] = %s (instanceId=%d) (builtin)\n", ctx->currentCodeName, objName, varDef->name, access.arrayIndex, rvalueAsString, targetInstance->instanceId);
+                } else {
+                    fprintf(stderr, "VM: [%s] WRITE %s.%s = %s (instanceId=%d) (builtin)\n", ctx->currentCodeName, objName, varDef->name, rvalueAsString, targetInstance->instanceId);
+                }
+                free(rvalueAsString);
+            }
+        }
+
         return;
     }
 
