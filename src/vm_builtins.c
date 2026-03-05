@@ -802,6 +802,21 @@ static RValue builtinPointDirection([[maybe_unused]] VMContext* ctx, RValue* arg
     return RValue_makeReal(atan2(-dy, dx) * (180.0 / M_PI));
 }
 
+static RValue builtinMoveTowardsPoint(VMContext* ctx, RValue* args, [[maybe_unused]] int32_t argCount) {
+    double targetX = RValue_toReal(args[0]);
+    double targetY = RValue_toReal(args[1]);
+    double spd = RValue_toReal(args[2]);
+    Instance* inst = ctx->currentInstance;
+    double dx = targetX - inst->x;
+    double dy = targetY - inst->y;
+    double dir = atan2(-dy, dx) * (180.0 / M_PI);
+    if (dir < 0.0) dir += 360.0;
+    inst->direction = dir;
+    inst->speed = spd;
+    Instance_computeComponentsFromSpeed(inst);
+    return RValue_makeReal(0.0);
+}
+
 static RValue builtinLengthdir_x([[maybe_unused]] VMContext* ctx, RValue* args, int32_t argCount) {
     if (2 > argCount) return RValue_makeReal(0.0);
     double len = RValue_toReal(args[0]);
@@ -2250,6 +2265,7 @@ void VMBuiltins_registerAll(void) {
     registerBuiltin("point_distance", builtinPointDistance);
     registerBuiltin("point_direction", builtinPointDirection);
     registerBuiltin("distance_to_point", builtinDistanceToPoint);
+    registerBuiltin("move_towards_point", builtinMoveTowardsPoint);
     registerBuiltin("lengthdir_x", builtinLengthdir_x);
     registerBuiltin("lengthdir_y", builtinLengthdir_y);
 
