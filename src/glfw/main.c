@@ -350,7 +350,34 @@ int main(int argc, char* argv[]) {
 
     printf("Loading %s...\n", args.dataWinPath);
 
-    DataWin* dataWin = DataWin_parse(args.dataWinPath);
+    DataWin* dataWin = DataWin_parse(
+        args.dataWinPath,
+        (DataWinParserOptions) {
+            .parseGen8 = true,
+            .parseOptn = true,
+            .parseLang = true,
+            .parseExtn = true,
+            .parseSond = true,
+            .parseAgrp = true,
+            .parseSprt = true,
+            .parseBgnd = true,
+            .parsePath = true,
+            .parseScpt = true,
+            .parseGlob = true,
+            .parseShdr = true,
+            .parseFont = true,
+            .parseTmln = true,
+            .parseObjt = true,
+            .parseRoom = true,
+            .parseTpag = true,
+            .parseCode = true,
+            .parseVari = true,
+            .parseFunc = true,
+            .parseStrg = true,
+            .parseTxtr = true,
+            .parseAudo = true
+        }
+    );
 
     Gen8* gen8 = &dataWin->gen8;
     printf("Loaded \"%s\" (%d) successfully!\n", gen8->name, gen8->gameID);

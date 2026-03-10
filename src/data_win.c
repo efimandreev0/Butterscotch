@@ -1268,7 +1268,7 @@ static void parseAUDO(BinaryReader* reader, DataWin* dw) {
 
 // ===[ MAIN PARSE FUNCTION ]===
 
-DataWin* DataWin_parse(const char* filePath) {
+DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
     FILE* file = fopen(filePath, "rb");
     if (!file) {
         fprintf(stderr, "Failed to open file: %s\n", filePath);
@@ -1305,21 +1305,23 @@ DataWin* DataWin_parse(const char* filePath) {
 
     // Pass 1: Scan chunk headers to find and pre-load STRG chunk.
     // All other chunks reference strings from STRG, so it must be loaded first.
-    while ((size_t) fileSize > BinaryReader_getPosition(&reader)) {
-        if (BinaryReader_getPosition(&reader) + 8 > (size_t) fileSize) break;
+    if (options.parseStrg) {
+        while ((size_t) fileSize > BinaryReader_getPosition(&reader)) {
+            if (BinaryReader_getPosition(&reader) + 8 > (size_t) fileSize) break;
 
-        char chunkName[5] = {0};
-        BinaryReader_readBytes(&reader, chunkName, 4);
-        uint32_t chunkLength = BinaryReader_readUint32(&reader);
-        size_t chunkDataStart = BinaryReader_getPosition(&reader);
+            char chunkName[5] = {0};
+            BinaryReader_readBytes(&reader, chunkName, 4);
+            uint32_t chunkLength = BinaryReader_readUint32(&reader);
+            size_t chunkDataStart = BinaryReader_getPosition(&reader);
 
-        if (memcmp(chunkName, "STRG", 4) == 0) {
-            dw->strgBufferBase = chunkDataStart;
-            dw->strgBuffer = BinaryReader_readBytesAt(&reader, chunkDataStart, chunkLength);
-            break;
+            if (memcmp(chunkName, "STRG", 4) == 0) {
+                dw->strgBufferBase = chunkDataStart;
+                dw->strgBuffer = BinaryReader_readBytesAt(&reader, chunkDataStart, chunkLength);
+                break;
+            }
+
+            BinaryReader_seek(&reader, chunkDataStart + chunkLength);
         }
-
-        BinaryReader_seek(&reader, chunkDataStart + chunkLength);
     }
 
     // Pass 2: Parse all chunks
@@ -1333,53 +1335,53 @@ DataWin* DataWin_parse(const char* filePath) {
         size_t chunkDataStart = BinaryReader_getPosition(&reader);
         size_t chunkEnd = chunkDataStart + chunkLength;
 
-        if (memcmp(chunkName, "GEN8", 4) == 0) {
+        if (options.parseGen8 && memcmp(chunkName, "GEN8", 4) == 0) {
             parseGEN8(&reader, dw);
-        } else if (memcmp(chunkName, "OPTN", 4) == 0) {
+        } else if (options.parseOptn && memcmp(chunkName, "OPTN", 4) == 0) {
             parseOPTN(&reader, dw);
-        } else if (memcmp(chunkName, "LANG", 4) == 0) {
+        } else if (options.parseLang && memcmp(chunkName, "LANG", 4) == 0) {
             parseLANG(&reader, dw);
-        } else if (memcmp(chunkName, "EXTN", 4) == 0) {
+        } else if (options.parseExtn && memcmp(chunkName, "EXTN", 4) == 0) {
             parseEXTN(&reader, dw);
-        } else if (memcmp(chunkName, "SOND", 4) == 0) {
+        } else if (options.parseSond && memcmp(chunkName, "SOND", 4) == 0) {
             parseSOND(&reader, dw);
-        } else if (memcmp(chunkName, "AGRP", 4) == 0) {
+        } else if (options.parseAgrp && memcmp(chunkName, "AGRP", 4) == 0) {
             parseAGRP(&reader, dw);
-        } else if (memcmp(chunkName, "SPRT", 4) == 0) {
+        } else if (options.parseSprt && memcmp(chunkName, "SPRT", 4) == 0) {
             parseSPRT(&reader, dw);
-        } else if (memcmp(chunkName, "BGND", 4) == 0) {
+        } else if (options.parseBgnd && memcmp(chunkName, "BGND", 4) == 0) {
             parseBGND(&reader, dw);
-        } else if (memcmp(chunkName, "PATH", 4) == 0) {
+        } else if (options.parsePath && memcmp(chunkName, "PATH", 4) == 0) {
             parsePATH(&reader, dw);
-        } else if (memcmp(chunkName, "SCPT", 4) == 0) {
+        } else if (options.parseScpt && memcmp(chunkName, "SCPT", 4) == 0) {
             parseSCPT(&reader, dw);
-        } else if (memcmp(chunkName, "GLOB", 4) == 0) {
+        } else if (options.parseGlob && memcmp(chunkName, "GLOB", 4) == 0) {
             parseGLOB(&reader, dw);
-        } else if (memcmp(chunkName, "SHDR", 4) == 0) {
+        } else if (options.parseShdr && memcmp(chunkName, "SHDR", 4) == 0) {
             parseSHDR(&reader, dw);
-        } else if (memcmp(chunkName, "FONT", 4) == 0) {
+        } else if (options.parseFont && memcmp(chunkName, "FONT", 4) == 0) {
             parseFONT(&reader, dw);
-        } else if (memcmp(chunkName, "TMLN", 4) == 0) {
+        } else if (options.parseTmln && memcmp(chunkName, "TMLN", 4) == 0) {
             parseTMLN(&reader, dw);
-        } else if (memcmp(chunkName, "OBJT", 4) == 0) {
+        } else if (options.parseObjt && memcmp(chunkName, "OBJT", 4) == 0) {
             parseOBJT(&reader, dw);
-        } else if (memcmp(chunkName, "ROOM", 4) == 0) {
+        } else if (options.parseRoom && memcmp(chunkName, "ROOM", 4) == 0) {
             parseROOM(&reader, dw);
         } else if (memcmp(chunkName, "DAFL", 4) == 0) {
             // Empty chunk, nothing to parse
-        } else if (memcmp(chunkName, "TPAG", 4) == 0) {
+        } else if (options.parseTpag && memcmp(chunkName, "TPAG", 4) == 0) {
             parseTPAG(&reader, dw);
-        } else if (memcmp(chunkName, "CODE", 4) == 0) {
+        } else if (options.parseCode && memcmp(chunkName, "CODE", 4) == 0) {
             parseCODE(&reader, dw, chunkLength, chunkDataStart);
-        } else if (memcmp(chunkName, "VARI", 4) == 0) {
+        } else if (options.parseVari && memcmp(chunkName, "VARI", 4) == 0) {
             parseVARI(&reader, dw, chunkLength);
-        } else if (memcmp(chunkName, "FUNC", 4) == 0) {
+        } else if (options.parseFunc && memcmp(chunkName, "FUNC", 4) == 0) {
             parseFUNC(&reader, dw);
-        } else if (memcmp(chunkName, "STRG", 4) == 0) {
+        } else if (options.parseStrg && memcmp(chunkName, "STRG", 4) == 0) {
             parseSTRG(&reader, dw);
-        } else if (memcmp(chunkName, "TXTR", 4) == 0) {
+        } else if (options.parseTxtr && memcmp(chunkName, "TXTR", 4) == 0) {
             parseTXTR(&reader, dw, chunkEnd);
-        } else if (memcmp(chunkName, "AUDO", 4) == 0) {
+        } else if (options.parseAudo && memcmp(chunkName, "AUDO", 4) == 0) {
             parseAUDO(&reader, dw);
         } else {
             printf("Unknown chunk: %.4s (length %u at offset 0x%zX)\n", chunkName, chunkLength, chunkDataStart - 8);

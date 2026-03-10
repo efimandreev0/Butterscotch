@@ -3,6 +3,32 @@
 #include <stdint.h>
 #include <stddef.h>
 
+typedef struct {
+    bool parseGen8;
+    bool parseOptn;
+    bool parseLang;
+    bool parseExtn;
+    bool parseSond;
+    bool parseAgrp;
+    bool parseSprt;
+    bool parseBgnd;
+    bool parsePath;
+    bool parseScpt;
+    bool parseGlob;
+    bool parseShdr;
+    bool parseFont;
+    bool parseTmln;
+    bool parseObjt;
+    bool parseRoom;
+    bool parseTpag;
+    bool parseCode;
+    bool parseVari;
+    bool parseFunc;
+    bool parseStrg;
+    bool parseTxtr;
+    bool parseAudo;
+} DataWinParserOptions;
+
 // ===[ GEN8 - General Info ]===
 typedef struct {
     uint8_t isDebuggerDisabled;
@@ -625,7 +651,7 @@ typedef struct DataWin {
     struct { uint32_t key; int32_t value; }* tpagOffsetMap;
 } DataWin;
 
-DataWin* DataWin_parse(const char* filePath);
+DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options);
 void DataWin_free(DataWin* dataWin);
 void DataWin_printDebugSummary(DataWin* dataWin);
 int32_t DataWin_resolveTPAG(DataWin* dw, uint32_t offset);
