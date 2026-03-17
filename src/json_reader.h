@@ -51,6 +51,13 @@ const char* JsonReader_getString(const JsonValue* value);
 int JsonReader_arrayLength(const JsonValue* value);
 JsonValue* JsonReader_getArrayElement(const JsonValue* value, int index);
 
+// ===[ Array Bulk Read ]===
+
+// Reads a JSON number array into a float C array. Asserts the array has exactly expectedLen elements.
+void JsonReader_readFloatArray(const JsonValue* value, float* out, int expectedLen);
+// Reads a JSON number array into an int32 C array. Asserts the array has exactly expectedLen elements.
+void JsonReader_readInt32Array(const JsonValue* value, int32_t* out, int expectedLen);
+
 // ===[ Object Access ]===
 
 int JsonReader_objectLength(const JsonValue* value);

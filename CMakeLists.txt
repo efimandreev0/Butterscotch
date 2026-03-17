@@ -54,7 +54,7 @@ elseif(PLATFORM STREQUAL "ps2")
         # Compiling on the Docker container
         target_include_directories(butterscotch PRIVATE $ENV{PS2SDK}/ee/include $ENV{PS2SDK}/common/include $ENV{PS2DEV}/ee/include $ENV{GSKIT}/include)
         target_link_directories(butterscotch PRIVATE $ENV{PS2SDK}/ee/lib $ENV{GSKIT}/lib)
-        target_link_libraries(butterscotch gskit dmakit pad patches kernel c m)
+        target_link_libraries(butterscotch gskit dmakit pad mc patches kernel c m)
 
         # Embed ps2sdk IRX modules (sio2man, padman) as C arrays via bin2c
         # This avoids loading from rom0: which has compatibility issues between fat/slim PS2
@@ -69,13 +69,25 @@ elseif(PLATFORM STREQUAL "ps2")
             COMMENT "Embedding sio2man.irx"
         )
         add_custom_command(
+            OUTPUT ${IRX_GEN_DIR}/mcman_irx.c
+            COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/mcman.irx ${IRX_GEN_DIR}/mcman_irx.c mcman_irx
+            DEPENDS ${IRX_DIR}/mcman.irx
+            COMMENT "Embedding mcman.irx"
+        )
+        add_custom_command(
+            OUTPUT ${IRX_GEN_DIR}/mcserv_irx.c
+            COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/mcserv.irx ${IRX_GEN_DIR}/mcserv_irx.c mcserv_irx
+            DEPENDS ${IRX_DIR}/mcserv.irx
+            COMMENT "Embedding mcserv.irx"
+        )
+        add_custom_command(
             OUTPUT ${IRX_GEN_DIR}/padman_irx.c
             COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/padman.irx ${IRX_GEN_DIR}/padman_irx.c padman_irx
             DEPENDS ${IRX_DIR}/padman.irx
             COMMENT "Embedding padman.irx"
         )
 
-        target_sources(butterscotch PRIVATE ${IRX_GEN_DIR}/sio2man_irx.c ${IRX_GEN_DIR}/padman_irx.c)
+        target_sources(butterscotch PRIVATE ${IRX_GEN_DIR}/sio2man_irx.c ${IRX_GEN_DIR}/mcman_irx.c ${IRX_GEN_DIR}/mcserv_irx.c ${IRX_GEN_DIR}/padman_irx.c)
         target_include_directories(butterscotch PRIVATE ${IRX_GEN_DIR})
     else()
         # This block is for when we are developing Butterscotch with CLion!

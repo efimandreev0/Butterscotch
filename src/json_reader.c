@@ -459,6 +459,24 @@ JsonValue* JsonReader_getArrayElement(const JsonValue* value, int index) {
     return &value->array.items[index];
 }
 
+// ===[ Array Bulk Read ]===
+
+void JsonReader_readFloatArray(const JsonValue* value, float* out, int expectedLen) {
+    require(value != nullptr && value->type == JSON_ARRAY);
+    require(value->array.count == expectedLen);
+    repeat(expectedLen, i) {
+        out[i] = (float) value->array.items[i].numberValue;
+    }
+}
+
+void JsonReader_readInt32Array(const JsonValue* value, int32_t* out, int expectedLen) {
+    require(value != nullptr && value->type == JSON_ARRAY);
+    require(value->array.count == expectedLen);
+    repeat(expectedLen, i) {
+        out[i] = (int32_t) value->array.items[i].numberValue;
+    }
+}
+
 // ===[ Object Access ]===
 
 int JsonReader_objectLength(const JsonValue* value) {
