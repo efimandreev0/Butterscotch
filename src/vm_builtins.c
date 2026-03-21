@@ -2932,6 +2932,22 @@ static RValue builtin_draw_line_width(VMContext* ctx, RValue* args, [[maybe_unus
     return RValue_makeUndefined();
 }
 
+// draw_line_width_colour(x1, y1, x2, y2, w, col1, col2)
+static RValue builtin_draw_line_width_colour(VMContext* ctx, RValue* args, [[maybe_unused]] int32_t argCount) {
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer != nullptr) {
+        float x1 = (float) RValue_toReal(args[0]);
+        float y1 = (float) RValue_toReal(args[1]);
+        float x2 = (float) RValue_toReal(args[2]);
+        float y2 = (float) RValue_toReal(args[3]);
+        float w = (float) RValue_toReal(args[4]);
+        uint32_t col1 = (uint32_t) RValue_toInt32(args[5]);
+        uint32_t col2 = (uint32_t) RValue_toInt32(args[6]);
+        runner->renderer->vtable->drawLineColor(runner->renderer, x1, y1, x2, y2, w, col1, col2, runner->renderer->drawAlpha);
+    }
+    return RValue_makeUndefined();
+}
+
 static RValue builtin_draw_set_colour(VMContext* ctx, RValue* args, [[maybe_unused]] int32_t argCount) {
     Runner* runner = (Runner*) ctx->runner;
     if (runner->renderer != nullptr) {
@@ -3868,6 +3884,8 @@ void VMBuiltins_registerAll(void) {
     registerBuiltin("draw_self", builtin_draw_self);
     registerBuiltin("draw_line", builtin_draw_line);
     registerBuiltin("draw_line_width", builtin_draw_line_width);
+    registerBuiltin("draw_line_width_colour", builtin_draw_line_width_colour);
+    registerBuiltin("draw_line_width_color", builtin_draw_line_width_colour);
     registerBuiltin("draw_set_colour", builtin_draw_set_colour);
     registerBuiltin("draw_get_colour", builtin_draw_get_colour);
     registerBuiltin("draw_get_color", builtin_draw_get_color);
