@@ -139,6 +139,39 @@ elseif(PLATFORM STREQUAL "ps2")
                 ${CMAKE_SOURCE_DIR}/ps2dev-headers/gcc-include
         )
     endif()
+elseif(PLATFORM STREQUAL "sdl2")
+    # stb_image, stb_vorbis, miniaudio
+    target_include_directories(butterscotch PUBLIC vendor/stb/image)
+    target_include_directories(butterscotch PUBLIC vendor/stb/vorbis)
+    target_include_directories(butterscotch PUBLIC vendor/miniaudio)
+
+    if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID MATCHES "Clang")
+        target_link_options(butterscotch PRIVATE -static -static-libgcc)
+    endif()
+
+    find_package(SDL2 REQUIRED)
+
+    if(TARGET SDL2::SDL2-static)
+        target_link_libraries(butterscotch PRIVATE SDL2::SDL2-static)
+    else()
+        target_link_libraries(butterscotch PRIVATE SDL2::SDL2main SDL2::SDL2)
+    endif()
+
+    if(WIN32)
+        target_link_libraries(butterscotch PRIVATE
+                mingw32 user32 gdi32 winmm imm32 ole32 oleaut32
+                version uuid advapi32 setupapi shell32 dinput8
+        )
+    endif()
+
+    target_link_libraries(butterscotch PRIVATE m pthread)
+
+    # Enable AddressSanitizer optionally
+    set(ENABLE_ASAN OFF CACHE BOOL "Enable AddressSanitizer")
+    if(ENABLE_ASAN)
+        target_compile_options(butterscotch PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+        target_link_options(butterscotch PRIVATE -fsanitize=address)
+    endif()
 else()
     message(FATAL_ERROR "Unknown platform! ${PLATFORM}")
 endif()
