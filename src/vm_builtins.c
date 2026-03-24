@@ -2016,29 +2016,12 @@ static RValue builtinFileTextReadln([[maybe_unused]] VMContext* ctx, RValue* arg
         size++;
     }
 
-    // Now we read everything AGAIN, but now for realsies this time
-    char string[size + 1]; // +1 because the last one is null
-    int index = 0;
-
-    while (file->contentLen > file->readPos) {
-        char c = file->content[file->readPos];
-
-        file->readPos++;
-        if (c == '\n')
-            break;
-        if (c == '\r') {
-            // Handle \r\n
-            if (file->contentLen > file->readPos && file->content[file->readPos] == '\n') {
-                file->readPos++;
-            }
-            break;
-        }
-        string[index++] = c;
-    }
-
-    string[index] = '\0';
-
-    return RValue_makeOwnedString(safeStrdup(string));
+    // Now we copy it because we already know the size of the string!
+    char* string = safeMalloc(size + 1); // +1 because the last one is null
+    memcpy(string, file->content + file->readPos, size);
+    string[size] = '\0';
+    file->readPos = readPos;
+    return RValue_makeOwnedString(string);
 }
 
 static RValue builtinFileTextReadReal([[maybe_unused]] VMContext* ctx, RValue* args, int32_t argCount) {
