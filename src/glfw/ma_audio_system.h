@@ -5,6 +5,9 @@
 
 #define MAX_SOUND_INSTANCES 128
 #define SOUND_INSTANCE_ID_BASE 100000
+#define MAX_AUDIO_STREAMS 32
+// This is the index space that the native runner uses
+#define AUDIO_STREAM_INDEX_BASE 300000
 
 typedef struct {
     bool active;
@@ -22,11 +25,17 @@ typedef struct {
 } SoundInstance;
 
 typedef struct {
+    bool active;
+    char* filePath; // resolved file path (owned, freed on destroy)
+} AudioStreamEntry;
+
+typedef struct {
     AudioSystem base;
     ma_engine engine;
     SoundInstance instances[MAX_SOUND_INSTANCES];
     int32_t nextInstanceCounter;
     FileSystem* fileSystem;
+    AudioStreamEntry streams[MAX_AUDIO_STREAMS];
 } MaAudioSystem;
 
 MaAudioSystem* MaAudioSystem_create(void);

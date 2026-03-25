@@ -1799,6 +1799,22 @@ static RValue builtin_audioSoundSetTrackPosition(VMContext* ctx, RValue* args, [
     return RValue_makeUndefined();
 }
 
+static RValue builtin_audioCreateStream(VMContext* ctx, RValue* args, [[maybe_unused]] int32_t argCount) {
+    AudioSystem* audio = getAudioSystem(ctx);
+    if (audio == nullptr) return RValue_makeReal(-1.0);
+    const char* filename = RValue_toString(args[0]);
+    int32_t streamIndex = audio->vtable->createStream(audio, filename);
+    return RValue_makeReal((GMLReal) streamIndex);
+}
+
+static RValue builtin_audioDestroyStream(VMContext* ctx, RValue* args, [[maybe_unused]] int32_t argCount) {
+    AudioSystem* audio = getAudioSystem(ctx);
+    if (audio == nullptr) return RValue_makeReal(-1.0);
+    int32_t streamIndex = RValue_toInt32(args[0]);
+    bool success = audio->vtable->destroyStream(audio, streamIndex);
+    return RValue_makeReal(success ? 1.0 : -1.0);
+}
+
 // Application surface stubs
 STUB_RETURN_UNDEFINED(application_surface_enable)
 STUB_RETURN_UNDEFINED(application_surface_draw_enable)
@@ -4002,6 +4018,8 @@ void VMBuiltins_registerAll(void) {
     registerBuiltin("audio_resume_all", builtin_audioResumeAll);
     registerBuiltin("audio_sound_get_track_position", builtin_audioSoundGetTrackPosition);
     registerBuiltin("audio_sound_set_track_position", builtin_audioSoundSetTrackPosition);
+    registerBuiltin("audio_create_stream", builtin_audioCreateStream);
+    registerBuiltin("audio_destroy_stream", builtin_audioDestroyStream);
 
     // Application surface
     registerBuiltin("application_surface_enable", builtin_application_surface_enable);

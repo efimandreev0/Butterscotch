@@ -1041,6 +1041,15 @@ static bool ps2GroupIsLoaded([[maybe_unused]] AudioSystem* audio, [[maybe_unused
     return true;
 }
 
+static int32_t ps2CreateStream([[maybe_unused]] AudioSystem* audio, [[maybe_unused]] const char* filename) {
+    fprintf(stderr, "PS2AudioSystem: audio_create_stream not supported\n");
+    return -1;
+}
+
+static bool ps2DestroyStream([[maybe_unused]] AudioSystem* audio, [[maybe_unused]] int32_t streamIndex) {
+    return false;
+}
+
 // ===[ Vtable ]===
 
 static AudioSystemVtable ps2AudioSystemVtable = {
@@ -1065,6 +1074,8 @@ static AudioSystemVtable ps2AudioSystemVtable = {
     .setChannelCount = ps2SetChannelCount,
     .groupLoad = ps2GroupLoad,
     .groupIsLoaded = ps2GroupIsLoaded,
+    .createStream = ps2CreateStream,
+    .destroyStream = ps2DestroyStream,
 };
 
 // ===[ Lifecycle ]===
