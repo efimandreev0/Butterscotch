@@ -15,7 +15,7 @@ typedef struct Instance {
     GMLReal x, y;
     GMLReal xprevious, yprevious;
     GMLReal xstart, ystart;
-    bool persistent, solid, active, visible, createEventFired, outsideRoom;
+    bool persistent, solid, active, destroyed, visible, createEventFired, outsideRoom;
     int32_t maskIndex; // collision mask sprite override (-1 = use spriteIndex)
 
     // Per-instance self variable storage (sparse stb_ds hashmap, keyed by varID)

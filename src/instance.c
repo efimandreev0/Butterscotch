@@ -22,6 +22,7 @@ Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, GMLReal x, G
     inst->solid = false;
     inst->active = true;
     inst->visible = true;
+    inst->destroyed = false;
     inst->outsideRoom = false;
     inst->spriteIndex = -1;
     inst->imageSpeed = 1.0;

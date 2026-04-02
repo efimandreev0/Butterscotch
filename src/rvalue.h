@@ -23,10 +23,13 @@ typedef struct {
     union {
         GMLReal real;
         int32_t int32;
+#ifndef NO_RVALUE_INT64
         int64_t int64;
+#endif
         const char* string;
     };
-    RValueType type;
+    // We use uint8_t for the type instead of RValueType because a enum value occupies 4 bytes, while uint8_t occupies 1 byte
+    uint8_t type;
     bool ownsString;
 } RValue;
 
@@ -39,7 +42,17 @@ static RValue RValue_makeInt32(int32_t val) {
 }
 
 static RValue RValue_makeInt64(int64_t val) {
+#ifdef NO_RVALUE_INT64
+    // Values that don't fit in int32 get promoted to real instead of clamped, because clamping to INT32_MIN causes arithmetic overflow bugs
+    // (example: Undertale's mercymod = -99999999999999 in the Asriel fight)
+    if (val > INT32_MAX || INT32_MIN > val) {
+        return (RValue){ .real = (GMLReal) val, .type = RVALUE_REAL };
+    } else {
+        return (RValue){ .int32 = (int32_t) val, .type = RVALUE_INT32 };
+    }
+#else
     return (RValue){ .int64 = val, .type = RVALUE_INT64 };
+#endif
 }
 
 static RValue RValue_makeBool(bool val) {
@@ -75,9 +88,11 @@ static char* RValue_toString(RValue val) {
         case RVALUE_INT32:
             snprintf(buf, sizeof(buf), "%d", val.int32);
             return safeStrdup(buf);
+#ifndef NO_RVALUE_INT64
         case RVALUE_INT64:
             snprintf(buf, sizeof(buf), "%lld", (long long) val.int64);
             return safeStrdup(buf);
+#endif
         case RVALUE_STRING:
             return safeStrdup(val.string != nullptr ? val.string : "");
         case RVALUE_BOOL:
@@ -125,9 +140,11 @@ static char* RValue_toStringTyped(RValue val) {
         case RVALUE_INT32:
             snprintf(buf, sizeof(buf), "int32(%d)", val.int32);
             return safeStrdup(buf);
+#ifndef NO_RVALUE_INT64
         case RVALUE_INT64:
             snprintf(buf, sizeof(buf), "int64(%lld)", (long long) val.int64);
             return safeStrdup(buf);
+#endif
         case RVALUE_STRING: {
             const char* str = val.string != nullptr ? val.string : "";
             size_t needed = strlen(str) + 3;
@@ -158,7 +175,9 @@ static GMLReal RValue_toReal(RValue val) {
     switch (val.type) {
         case RVALUE_REAL:   return val.real;
         case RVALUE_INT32:  return (GMLReal) val.int32;
+#ifndef NO_RVALUE_INT64
         case RVALUE_INT64:  return (GMLReal) val.int64;
+#endif
         case RVALUE_BOOL:   return (GMLReal) val.int32;
         case RVALUE_STRING: return GMLReal_strtod(val.string, nullptr);
         case RVALUE_ARRAY_REF: return 0.0;
@@ -170,7 +189,9 @@ static int32_t RValue_toInt32(RValue val) {
     switch (val.type) {
         case RVALUE_REAL:   return (int32_t) val.real;
         case RVALUE_INT32:  return val.int32;
+#ifndef NO_RVALUE_INT64
         case RVALUE_INT64:  return (int32_t) val.int64;
+#endif
         case RVALUE_BOOL:   return val.int32;
         case RVALUE_STRING: return (int32_t) GMLReal_strtod(val.string, nullptr);
         case RVALUE_ARRAY_REF: return 0;
@@ -182,7 +203,9 @@ static int64_t RValue_toInt64(RValue val) {
     switch (val.type) {
         case RVALUE_REAL:   return (int64_t) val.real;
         case RVALUE_INT32:  return (int64_t) val.int32;
+#ifndef NO_RVALUE_INT64
         case RVALUE_INT64:  return val.int64;
+#endif
         case RVALUE_BOOL:   return (int64_t) val.int32;
         case RVALUE_STRING: return (int64_t) GMLReal_strtod(val.string, nullptr);
         case RVALUE_ARRAY_REF: return 0;
@@ -194,7 +217,9 @@ static bool RValue_toBool(RValue val) {
     switch (val.type) {
         case RVALUE_REAL:   return val.real > 0.5;
         case RVALUE_INT32:  return val.int32 > 0;
+#ifndef NO_RVALUE_INT64
         case RVALUE_INT64:  return val.int64 > 0;
+#endif
         case RVALUE_BOOL:   return val.int32 != 0;
         case RVALUE_STRING: return val.string != nullptr && val.string[0] != '\0';
         case RVALUE_ARRAY_REF: return false;
