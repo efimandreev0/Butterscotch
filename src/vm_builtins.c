@@ -2672,6 +2672,20 @@ static RValue builtinInstanceActivateObject(VMContext* ctx, RValue* args, int32_
     return RValue_makeUndefined();
 }
 
+static RValue builtinInstanceDeactivateObject(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (1 > argCount) return RValue_makeUndefined();
+    int32_t objIndex = RValue_toInt32(args[0]);
+
+    int instances = arrlen(ctx->runner->instances);
+    repeat(instances, i) {
+        Instance* instance = ctx->runner->instances[i];
+        if (instance->active && !instance->destroyed && VM_isObjectOrDescendant(ctx->dataWin, instance->objectIndex, objIndex)) {
+            instance->active = false;
+        }
+    }
+    return RValue_makeUndefined();
+}
+
 static RValue builtinEventInherited(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = (Runner*) ctx->runner;
     Instance* inst = (Instance*) ctx->currentInstance;
@@ -4559,6 +4573,7 @@ void VMBuiltins_registerAll(bool isGMS2) {
     registerBuiltin("instance_deactivate_all", builtinInstanceDeactivateAll);
     registerBuiltin("instance_activate_all", builtinInstanceActivateAll);
     registerBuiltin("instance_activate_object", builtinInstanceActivateObject);
+    registerBuiltin("instance_deactivate_object", builtinInstanceDeactivateObject);
     registerBuiltin("action_kill_object", builtinActionKillObject);
     registerBuiltin("action_create_object", builtinActionCreateObject);
     registerBuiltin("action_set_relative", builtinActionSetRelative);
