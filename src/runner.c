@@ -493,8 +493,10 @@ void Runner_draw(Runner* runner) {
                 {
                     if (runner->renderer != nullptr) {
                         RoomTile* tile = &data->legacyTiles[i];
-                        float offsetX = 0.0f, offsetY = 0.0f;
+                        // Check if this tile's layer is hidden via tile_layer_hide()
                         ptrdiff_t layerIdx = hmgeti(runner->tileLayerMap, tile->tileDepth);
+                        if (layerIdx >= 0 && !runner->tileLayerMap[layerIdx].value.visible) continue;
+                        float offsetX = 0.0f, offsetY = 0.0f;
                         if (layerIdx >= 0) {
                             offsetX = runner->tileLayerMap[layerIdx].value.offsetX;
                             offsetY = runner->tileLayerMap[layerIdx].value.offsetY;
