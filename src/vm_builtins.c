@@ -4375,11 +4375,10 @@ static RValue builtinActionIfVariable(VMContext* ctx, MAYBE_UNUSED RValue* args,
         }
     }
 
-    if (check) {
-        return args[1];
-    } else {
-        return args[2];
-    }
+    int32_t idx = check ? 1 : 2;
+    RValue result = args[idx];
+    args[idx].ownsString = false; // Steal ownership to avoid double-free in handleCall
+    return result;
 }
 
 STUB_RETURN_UNDEFINED(action_sound)
