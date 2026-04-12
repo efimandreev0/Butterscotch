@@ -1095,6 +1095,13 @@ static RValue builtinPointDirection(MAYBE_UNUSED VMContext* ctx, RValue* args, i
     return RValue_makeReal(GMLReal_atan2(-dy, dx) * (180.0 / M_PI));
 }
 
+static RValue builtinAngleDifference(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    if (2 > argCount) return RValue_makeReal(0.0);
+    GMLReal src = RValue_toReal(args[0]);
+    GMLReal dest = RValue_toReal(args[1]);
+    return RValue_makeReal(GMLReal_fmod(GMLReal_fmod(src - dest, 360.0) + 540.0, 360.0) - 180.0);
+}
+
 static RValue builtinMoveTowardsPoint(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     GMLReal targetX = RValue_toReal(args[0]);
     GMLReal targetY = RValue_toReal(args[1]);
@@ -4764,6 +4771,7 @@ void VMBuiltins_registerAll(bool isGMS2) {
     registerBuiltin("lerp", builtinLerp);
     registerBuiltin("point_distance", builtinPointDistance);
     registerBuiltin("point_direction", builtinPointDirection);
+    registerBuiltin("angle_difference", builtinAngleDifference);
     registerBuiltin("distance_to_point", builtinDistanceToPoint);
     registerBuiltin("distance_to_object", builtinDistanceToObject);
     registerBuiltin("move_towards_point", builtinMoveTowardsPoint);
