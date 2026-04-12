@@ -4515,7 +4515,7 @@ static RValue builtinPathEnd(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UN
 // string_hash_to_newline - converts # to \n in a string
 static RValue builtinStringHashToNewline(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) { 
     if (1 > argCount) return RValue_makeString("");
-    RValue original = args[0];
+    RValue original = args[0]; // This is a copy
 
     if (original.type != RVALUE_STRING) {
         // Fast path: If the argument is not a string, return a copy of it
@@ -4528,8 +4528,9 @@ static RValue builtinStringHashToNewline(MAYBE_UNUSED VMContext* ctx, RValue* ar
     }
 
     if (strchr(original.string, '#') == nullptr) {
-        // Fast path: if there isn't a "#" in the string, we can return a non-owning reference to avoid copying the string
-        return RValue_makeString(original.string);
+        // Fast path: if there isn't a "#" in the string, we can steal the reference to avoid copying the string
+        args[0].ownsString = false; // We are stealing the ownership of this, kthxbye
+        return original;
     }
 
     char *result = TextUtils_preprocessGmlText(original.string);
