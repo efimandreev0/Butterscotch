@@ -110,6 +110,7 @@ typedef struct CallFrame {
     uint32_t savedLocalsCount;
     const char* savedCodeName;
     ArrayMapEntry* savedLocalArrayMap;
+    CodeLocals* savedCodeLocals;
     RValue* savedScriptArgs;
     int32_t savedScriptArgCount;
     struct CallFrame* parent;
@@ -161,6 +162,7 @@ typedef struct VMContext {
     DataWin* dataWin;
     struct Runner* runner;
     ArrayMapEntry* localArrayMap;
+    CodeLocals* currentCodeLocals;
     ArrayMapEntry* globalArrayMap;
     FuncCallCache* funcCallCache;
     const char* currentCodeName;

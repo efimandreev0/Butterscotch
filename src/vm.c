@@ -334,6 +334,23 @@ static Variable* resolveVarDef(VMContext* ctx, uint32_t varRef) {
     return varDef;
 }
 
+// In bytecode version 17+, local variable varIDs are VARI chunk indices (e.g. 11935), not sequential slot indices (0, 1, 2...).
+// This function maps a varID to the correct local slot index by scanning the current CodeLocals table.
+// In earlier bytecode versions, varIDs are already sequential, so we return them as-is.
+static uint32_t resolveLocalSlot(VMContext* ctx, int32_t varID) {
+    if (17 > ctx->dataWin->gen8.bytecodeVersion || ctx->currentCodeLocals == nullptr) {
+        return (uint32_t) varID;
+    }
+    CodeLocals* cl = ctx->currentCodeLocals;
+    repeat(cl->localVarCount, i) {
+        if (cl->locals[i].index == (uint32_t) varID) {
+            return i;
+        }
+    }
+    fprintf(stderr, "VM: Local varID %d not found in CodeLocals for '%s'\n", varID, ctx->currentCodeName);
+    abort();
+}
+
 // Finds an active instance by target value.
 // target >= 100000: instance ID (find specific instance)
 // target >= 0 && target < 100000: object index (find first instance of that object, checking parent chains)
@@ -432,7 +449,8 @@ static RValue resolveVariableRead(VMContext* ctx, int32_t instanceType, uint32_t
     if (access.isArray) {
         switch (instanceType) {
             case INSTANCE_LOCAL: {
-                RValue result = arrayMapGet(ctx->localArrayMap, varDef->varID, access.arrayIndex);
+                uint32_t localSlot = resolveLocalSlot(ctx, varDef->varID);
+                RValue result = arrayMapGet(ctx->localArrayMap, localSlot, access.arrayIndex);
 #ifndef DISABLE_VM_TRACING
                 if (shouldTraceVariable(ctx->varReadsToBeTraced, "local", nullptr, varDef->name)) {
                     char* rvalueAsString = RValue_toStringTyped(result);
@@ -487,14 +505,15 @@ static RValue resolveVariableRead(VMContext* ctx, int32_t instanceType, uint32_t
 
     RValue result;
     switch (instanceType) {
-        case INSTANCE_LOCAL:
-            require(ctx->localVarCount > (uint32_t) varDef->varID);
-            if (ctx->localVars[varDef->varID].type == RVALUE_ARRAY_REF) {
-                result = ctx->localVars[varDef->varID];
-            } else if (arrayMapHasVariable(ctx->localArrayMap, varDef->varID)) {
-                result = RValue_makeArrayRef(varDef->varID);
+        case INSTANCE_LOCAL: {
+            uint32_t localSlot = resolveLocalSlot(ctx, varDef->varID);
+            require(ctx->localVarCount > localSlot);
+            if (ctx->localVars[localSlot].type == RVALUE_ARRAY_REF) {
+                result = ctx->localVars[localSlot];
+            } else if (arrayMapHasVariable(ctx->localArrayMap, localSlot)) {
+                result = RValue_makeArrayRef(localSlot);
             } else {
-                result = ctx->localVars[varDef->varID];
+                result = ctx->localVars[localSlot];
             }
 #ifndef DISABLE_VM_TRACING
             if (shouldTraceVariable(ctx->varReadsToBeTraced, "local", nullptr, varDef->name)) {
@@ -504,6 +523,7 @@ static RValue resolveVariableRead(VMContext* ctx, int32_t instanceType, uint32_t
             }
 #endif
             break;
+        }
         case INSTANCE_GLOBAL:
             require(ctx->globalVarCount > (uint32_t) varDef->varID);
             // If the scalar slot already has an array ref, return it as-is
@@ -680,9 +700,11 @@ static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t 
     // Check for array access
     if (access.isArray) {
         switch (instanceType) {
-            case INSTANCE_LOCAL:
-                arrayMapSet(&ctx->localArrayMap, varDef->varID, access.arrayIndex, val);
+            case INSTANCE_LOCAL: {
+                uint32_t localSlot = resolveLocalSlot(ctx, varDef->varID);
+                arrayMapSet(&ctx->localArrayMap, localSlot, access.arrayIndex, val);
                 return;
+            }
             case INSTANCE_GLOBAL: {
                 int32_t resolvedVarID = resolveArrayAlias(ctx->globalVars, ctx->globalVarCount, varDef->varID);
                 arrayMapSet(&ctx->globalArrayMap, resolvedVarID, access.arrayIndex, val);
@@ -737,8 +759,9 @@ static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t 
 
     switch (instanceType) {
         case INSTANCE_LOCAL: {
-            require(ctx->localVarCount > (uint32_t) varDef->varID);
-            RValue* dest = &ctx->localVars[varDef->varID];
+            uint32_t localSlot = resolveLocalSlot(ctx, varDef->varID);
+            require(ctx->localVarCount > localSlot);
+            RValue* dest = &ctx->localVars[localSlot];
             RValue_free(dest);
             if (val.type == RVALUE_STRING && !val.ownsString && val.string != nullptr) {
                 *dest = RValue_makeOwnedString(safeStrdup(val.string));
@@ -982,9 +1005,11 @@ static void handlePop(VMContext* ctx, uint32_t instr, const uint8_t* extraData) 
             }
         } else {
             switch (instanceType) {
-                case INSTANCE_LOCAL:
-                    arrayMapSet(&ctx->localArrayMap, varDef->varID, arrayIndex, val);
+                case INSTANCE_LOCAL: {
+                    uint32_t localSlot = resolveLocalSlot(ctx, varDef->varID);
+                    arrayMapSet(&ctx->localArrayMap, localSlot, arrayIndex, val);
                     break;
+                }
                 case INSTANCE_GLOBAL: {
                     int32_t resolvedVarID = resolveArrayAlias(ctx->globalVars, ctx->globalVarCount, varDef->varID);
                     arrayMapSet(&ctx->globalArrayMap, resolvedVarID, arrayIndex, val);
@@ -2105,6 +2130,7 @@ void VM_reset(VMContext* ctx) {
     ctx->currentCodeName = nullptr;
     ctx->localVars = nullptr;
     ctx->localVarCount = 0;
+    ctx->currentCodeLocals = nullptr;
     ctx->actionRelativeFlag = false;
 
     fprintf(stderr, "VM: Reset complete (%u global vars cleared)\n", ctx->globalVarCount);
@@ -2118,6 +2144,9 @@ RValue VM_executeCode(VMContext* ctx, int32_t codeIndex) {
     ctx->ip = 0;
     ctx->codeEnd = code->length;
     ctx->currentCodeName = code->name;
+
+    // Resolve CodeLocals for local variable slot mapping
+    ctx->currentCodeLocals = VM_resolveCodeLocals(ctx, code->name);
 
     // Allocate locals
     uint32_t localsCount = code->localsCount;
@@ -2174,6 +2203,7 @@ RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t
         .savedLocalsCount = ctx->localVarCount,
         .savedCodeName = ctx->currentCodeName,
         .savedLocalArrayMap = ctx->localArrayMap,
+        .savedCodeLocals = ctx->currentCodeLocals,
         .savedScriptArgs = ctx->scriptArgs,
         .savedScriptArgCount = ctx->scriptArgCount,
         .parent = ctx->callStack,
@@ -2186,6 +2216,7 @@ RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t
     ctx->ip = 0;
     ctx->codeEnd = code->length;
     ctx->currentCodeName = code->name;
+    ctx->currentCodeLocals = VM_resolveCodeLocals(ctx, code->name);
     ctx->localArrayMap = nullptr;
 
     // We use fixed-size arrays instead of VLAs because it seems that using multiple VLAs in a single function things get corrupted somehow?
@@ -2245,6 +2276,7 @@ RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t
     ctx->localVars = saved->savedLocals;
     ctx->localVarCount = saved->savedLocalsCount;
     ctx->localArrayMap = saved->savedLocalArrayMap;
+    ctx->currentCodeLocals = saved->savedCodeLocals;
     ctx->scriptArgs = saved->savedScriptArgs;
     ctx->scriptArgCount = saved->savedScriptArgCount;
     ctx->currentCodeName = saved->savedCodeName;
