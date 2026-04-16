@@ -79,14 +79,31 @@ typedef struct {
     float yOffset;
 } RuntimeBackgroundElement;
 
+// Mutable sprite element on an Assets layer. Populated from RoomLayerAssetsData.sprites at room init, can be removed at runtime via layer_sprite_destroy (used by language variant selection).
+typedef struct {
+    int32_t spriteIndex; // SPRT index (-1 = none/destroyed)
+    int32_t x;
+    int32_t y;
+    float scaleX;
+    float scaleY;
+    uint32_t color; // BGR + alpha
+    float animationSpeed;
+    uint32_t animationSpeedType;
+    float frameIndex;
+    float rotation;
+} RuntimeSpriteElement;
+
+// Values match GML layerelementtype_* enum so layer_get_element_type can return them as-is.
 typedef enum {
     RuntimeLayerElementType_Background = 1,
+    RuntimeLayerElementType_Sprite = 4,
 } RuntimeLayerElementType;
 
 typedef struct {
     uint32_t id;
     RuntimeLayerElementType type;
     RuntimeBackgroundElement* backgroundElement; // owned; nullptr if type != Background
+    RuntimeSpriteElement* spriteElement; // owned; nullptr if type != Sprite
 } RuntimeLayerElement;
 
 // Runtime-mutable state for a GMS2 room layer. Parsed layers are populated at room load from RoomLayer and share IDs with the parsed data.

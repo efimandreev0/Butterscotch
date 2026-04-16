@@ -1859,11 +1859,16 @@ static RValue builtinDsListFindIndex(VMContext* ctx, RValue* args, MAYBE_UNUSED 
 // ===[ ARRAY FUNCTIONS ]===
 
 static RValue builtinArrayLength1d(VMContext* ctx, RValue* args, int32_t argCount) {
-    // array_length_1d(array) takes a single array argument
-    if (args[0].type != RVALUE_ARRAY_REF)
+    // array_length_1d(array) takes either the legacy RVALUE_ARRAY_REF or the V17+ RVALUE_GML_ARRAY form.
+    // Both carry a varID that keys into one of the array maps below.
+    int32_t varID;
+    if (args[0].type == RVALUE_ARRAY_REF) {
+        varID = args[0].int32;
+    } else if (args[0].type == RVALUE_GML_ARRAY) {
+        varID = args[0].gmlArray.varID;
+    } else {
         return RValue_makeReal(0.0);
-
-    int32_t varID = args[0].int32;
+    }
     int32_t maxIndex = -1;
 
     // Search selfArrayMap on the current instance
@@ -4467,6 +4472,13 @@ static RValue builtin_spriteGetYOffset(VMContext* ctx, RValue* args, MAYBE_UNUSE
     return RValue_makeReal((GMLReal) ctx->dataWin->sprt.sprites[spriteIndex].originY);
 }
 
+static RValue builtin_spriteGetName(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    int32_t spriteIndex = (int32_t) RValue_toReal(args[0]);
+    if (0 > spriteIndex || (uint32_t) spriteIndex >= ctx->dataWin->sprt.count) return RValue_makeString("<undefined>");
+    const char* name = ctx->dataWin->sprt.sprites[spriteIndex].name;
+    return RValue_makeString(name != nullptr ? name : "<undefined>");
+}
+
 // sprite_set_offset(sprite_index, xoff, yoff)
 static RValue builtin_spriteSetOffset(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     int32_t spriteIndex = (int32_t) RValue_toReal(args[0]);
@@ -5318,6 +5330,7 @@ static RValue builtinLayerBackgroundCreate(VMContext* ctx, RValue* args, MAYBE_U
         .id = Runner_getNextLayerId(runner),
         .type = RuntimeLayerElementType_Background,
         .backgroundElement = bg,
+        .spriteElement = nullptr,
     };
     arrput(runtimeLayer->elements, el);
     return RValue_makeReal((GMLReal) el.id);
@@ -5409,6 +5422,72 @@ static RValue builtinLayerBackgroundAlpha(VMContext* ctx, RValue* args, MAYBE_UN
     RuntimeBackgroundElement* bg = findBackgroundElement(runner, RValue_toInt32(args[0]));
     if (bg != nullptr)
         bg->alpha = (float) RValue_toReal(args[1]);
+    return RValue_makeUndefined();
+}
+
+static RValue builtinLayerGetAllElements(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = (Runner*) ctx->runner;
+    int32_t id = RValue_toInt32(args[0]);
+
+    RValue arr = VM_createArray(ctx);
+    RuntimeLayer* runtimeLayer = Runner_findRuntimeLayerById(runner, id);
+    if (runtimeLayer == nullptr)
+        return arr;
+
+    int32_t i = 0;
+    size_t count = arrlenu(runtimeLayer->elements);
+    repeat(count, elementIndex) {
+        VM_arraySet(ctx, &arr, i++, RValue_makeReal((GMLReal) runtimeLayer->elements[elementIndex].id));
+    }
+    return arr;
+}
+
+static RValue builtinLayerGetElementType(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = (Runner*) ctx->runner;
+    int32_t id = RValue_toInt32(args[0]);
+
+    RuntimeLayerElement* el = Runner_findLayerElementById(runner, id, nullptr);
+    // layerelementtype_undefined == 0 matches GML's return for unknown/missing elements.
+    if (el == nullptr)
+        return RValue_makeReal(0.0);
+
+    return RValue_makeReal((GMLReal) el->type);
+}
+
+static RValue builtinLayerSpriteGetSprite(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = (Runner*) ctx->runner;
+    int32_t id = RValue_toInt32(args[0]);
+
+    RuntimeLayerElement* el = Runner_findLayerElementById(runner, id, nullptr);
+    if (el == nullptr || el->type != RuntimeLayerElementType_Sprite || el->spriteElement == nullptr)
+        return RValue_makeReal(-1.0);
+
+    return RValue_makeReal((GMLReal) el->spriteElement->spriteIndex);
+}
+
+static RValue builtinLayerSpriteDestroy(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = (Runner*) ctx->runner;
+    int32_t id = RValue_toInt32(args[0]);
+
+    RuntimeLayer* owningLayer = nullptr;
+    RuntimeLayerElement* el = Runner_findLayerElementById(runner, id, &owningLayer);
+    if (el == nullptr || owningLayer == nullptr || el->type != RuntimeLayerElementType_Sprite)
+        return RValue_makeUndefined();
+
+    if (el->spriteElement != nullptr) {
+        free(el->spriteElement);
+        el->spriteElement = nullptr;
+    }
+
+    // Remove the element from the owning layer's element array to keep lookup + iteration tidy.
+    size_t count = arrlenu(owningLayer->elements);
+    repeat(count, i) {
+        if (&owningLayer->elements[i] == el) {
+            arrdel(owningLayer->elements, i);
+            break;
+        }
+    }
+
     return RValue_makeUndefined();
 }
 
@@ -6108,6 +6187,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "sprite_get_number", builtin_spriteGetNumber);
     VM_registerBuiltin(ctx, "sprite_get_xoffset", builtin_spriteGetXOffset);
     VM_registerBuiltin(ctx, "sprite_get_yoffset", builtin_spriteGetYOffset);
+    VM_registerBuiltin(ctx, "sprite_get_name", builtin_spriteGetName);
     VM_registerBuiltin(ctx, "sprite_set_offset", builtin_spriteSetOffset);
     VM_registerBuiltin(ctx, "sprite_create_from_surface", builtin_spriteCreateFromSurface);
     VM_registerBuiltin(ctx, "sprite_delete", builtin_spriteDelete);
@@ -6169,6 +6249,10 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "layer_get_vspeed", builtinLayerGetVspeed);
     VM_registerBuiltin(ctx, "layer_vspeed", builtinLayerVspeed);
     VM_registerBuiltin(ctx, "layer_get_all", builtinLayerGetAll);
+    VM_registerBuiltin(ctx, "layer_get_all_elements", builtinLayerGetAllElements);
+    VM_registerBuiltin(ctx, "layer_get_element_type", builtinLayerGetElementType);
+    VM_registerBuiltin(ctx, "layer_sprite_get_sprite", builtinLayerSpriteGetSprite);
+    VM_registerBuiltin(ctx, "layer_sprite_destroy", builtinLayerSpriteDestroy);
     VM_registerBuiltin(ctx, "layer_get_id_at_depth", builtinLayerGetIdAtDepth);
     VM_registerBuiltin(ctx, "layer_create", builtinLayerCreate);
     VM_registerBuiltin(ctx, "layer_destroy", builtinLayerDestroy);

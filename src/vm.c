@@ -595,6 +595,12 @@ static RValue resolveVariableRead(VMContext* ctx, int32_t instanceType, uint32_t
     if (access.isArray) {
         switch (instanceType) {
             case INSTANCE_LOCAL: {
+                // If the local slot holds a V17 GML array reference (e.g. from `var x = layer_get_all()`), follow it into whichever array map the source data lives in.
+                uint32_t localSlot = resolveLocalSlot(ctx, varDef->varID);
+                if (ctx->localVarCount > localSlot && ctx->localVars[localSlot].type == RVALUE_GML_ARRAY) {
+                    RValue ref = ctx->localVars[localSlot];
+                    return gmlArrayGet(ctx, &ref, access.arrayIndex);
+                }
                 RValue result = arrayMapGet(ctx->localArrayMap, varDef->varID, access.arrayIndex);
 #ifndef DISABLE_VM_TRACING
                 if (shouldTraceVariable(ctx->varReadsToBeTraced, "local", nullptr, varDef->name)) {
@@ -606,6 +612,11 @@ static RValue resolveVariableRead(VMContext* ctx, int32_t instanceType, uint32_t
                 return result;
             }
             case INSTANCE_GLOBAL: {
+                // Follow V17 GML array reference in the global slot if present.
+                if (ctx->globalVarCount > (uint32_t) varDef->varID && ctx->globalVars[varDef->varID].type == RVALUE_GML_ARRAY) {
+                    RValue ref = ctx->globalVars[varDef->varID];
+                    return gmlArrayGet(ctx, &ref, access.arrayIndex);
+                }
                 int32_t resolvedVarID = resolveArrayAlias(ctx->globalVars, ctx->globalVarCount, varDef->varID);
                 RValue result = arrayMapGet(ctx->globalArrayMap, resolvedVarID, access.arrayIndex);
 #ifndef DISABLE_VM_TRACING
@@ -1092,12 +1103,20 @@ static void handlePush(VMContext* ctx, uint32_t instr, const uint8_t* extraData)
     }
 }
 
+// When a local/global/self variable's scalar slot already holds an RVALUE_GML_ARRAY, (from `var x = layer_get_all()` where the returned array lives under a synthetic varID in globalArrayMap),
+// follow that alias instead of creating a fresh ref pointing at the local/global/self's own varID,
+// otherwise subsequent pushaf reads would find an empty array at the wrong varID.
 static void handlePushLoc(VMContext* ctx, const uint8_t* extraData) {
     uint32_t varRef = resolveVarOperand(extraData);
     uint8_t varType = (varRef >> 24) & 0xF8;
     if (varType == VARTYPE_ARRAYPUSHAF || varType == VARTYPE_ARRAYPOPAF) {
         Variable* varDef = resolveVarDef(ctx, varRef);
-        stackPush(ctx, RValue_makeGMLArray(varDef->varID, INSTANCE_LOCAL));
+        uint32_t localSlot = resolveLocalSlot(ctx, varDef->varID);
+        if (ctx->localVarCount > localSlot && ctx->localVars[localSlot].type == RVALUE_GML_ARRAY) {
+            stackPush(ctx, ctx->localVars[localSlot]);
+        } else {
+            stackPush(ctx, RValue_makeGMLArray(varDef->varID, INSTANCE_LOCAL));
+        }
     } else {
         RValue val = resolveVariableRead(ctx, INSTANCE_LOCAL, varRef);
         val.gmlStackType = GML_TYPE_VARIABLE;
@@ -1110,7 +1129,11 @@ static void handlePushGlb(VMContext* ctx, const uint8_t* extraData) {
     uint8_t varType = (varRef >> 24) & 0xF8;
     if (varType == VARTYPE_ARRAYPUSHAF || varType == VARTYPE_ARRAYPOPAF) {
         Variable* varDef = resolveVarDef(ctx, varRef);
-        stackPush(ctx, RValue_makeGMLArray(varDef->varID, INSTANCE_GLOBAL));
+        if (ctx->globalVarCount > (uint32_t) varDef->varID && ctx->globalVars[varDef->varID].type == RVALUE_GML_ARRAY) {
+            stackPush(ctx, ctx->globalVars[varDef->varID]);
+        } else {
+            stackPush(ctx, RValue_makeGMLArray(varDef->varID, INSTANCE_GLOBAL));
+        }
     } else {
         RValue val = resolveVariableRead(ctx, INSTANCE_GLOBAL, varRef);
         val.gmlStackType = GML_TYPE_VARIABLE;
@@ -1123,7 +1146,15 @@ static void handlePushBltn(VMContext* ctx, uint32_t instr, const uint8_t* extraD
     uint8_t varType = (varRef >> 24) & 0xF8;
     if (varType == VARTYPE_ARRAYPUSHAF || varType == VARTYPE_ARRAYPOPAF) {
         Variable* varDef = resolveVarDef(ctx, varRef);
-        stackPush(ctx, RValue_makeGMLArray(varDef->varID, (int32_t) instrInstanceType(instr)));
+        int32_t scope = (int32_t) instrInstanceType(instr);
+        if (scope == INSTANCE_SELF && ctx->currentInstance != nullptr) {
+            RValue selfVal = Instance_getSelfVar((Instance*) ctx->currentInstance, varDef->varID);
+            if (selfVal.type == RVALUE_GML_ARRAY) {
+                stackPush(ctx, selfVal);
+                return;
+            }
+        }
+        stackPush(ctx, RValue_makeGMLArray(varDef->varID, scope));
     } else {
         RValue val = resolveVariableRead(ctx, (int32_t) instrInstanceType(instr), varRef);
         val.gmlStackType = GML_TYPE_VARIABLE;

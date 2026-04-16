@@ -28,6 +28,10 @@ void Runner_freeRuntimeLayer(RuntimeLayer* runtimeLayer) {
             free(el->backgroundElement);
             el->backgroundElement = nullptr;
         }
+        if (el->spriteElement != nullptr) {
+            free(el->spriteElement);
+            el->spriteElement = nullptr;
+        }
     }
     arrfree(runtimeLayer->elements);
     runtimeLayer->elements = nullptr;
@@ -637,17 +641,19 @@ void Runner_draw(Runner* runner) {
                     }
                 }
 
-                repeat(data->spriteCount, i)
-                {
-                    if(runner->renderer) {
-                        SpriteInstance* spriteInstance = &data->sprites[i];
-                        if (0 > spriteInstance->spriteIndex) continue;
-                        Renderer_drawSpriteExt(
-                            runner->renderer, spriteInstance->spriteIndex, (int32_t) spriteInstance->frameIndex,
-                            spriteInstance->x, spriteInstance->y, spriteInstance->scaleX,
-                            spriteInstance->scaleY, spriteInstance->rotation, spriteInstance->color,
-                            1.0);
-                    }
+                // Sprite elements are rendered from the runtime element list (not the parsed data) so that layer_sprite_destroy can remove them at runtime.
+                size_t elementCount = arrlenu(runtimeLayer->elements);
+                repeat(elementCount, j) {
+                    if (runner->renderer == nullptr) break;
+                    RuntimeLayerElement* el = &runtimeLayer->elements[j];
+                    if (el->type != RuntimeLayerElementType_Sprite || el->spriteElement == nullptr) continue;
+                    RuntimeSpriteElement* spr = el->spriteElement;
+                    if (0 > spr->spriteIndex) continue;
+                    Renderer_drawSpriteExt(
+                        runner->renderer, spr->spriteIndex, (int32_t) spr->frameIndex,
+                        spr->x, spr->y, spr->scaleX,
+                        spr->scaleY, spr->rotation, spr->color,
+                        1.0);
                 }
             } else if(parsedLayer->type == RoomLayerType_Background) {
                 if (runner->renderer == nullptr) return;
@@ -829,6 +835,35 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     }
     // Watermark: ensure runtime-allocated IDs (layers + elements) stay above parsed IDs.
     if (maxLayerId >= runner->nextLayerId) runner->nextLayerId = maxLayerId + 1;
+
+    // Populate runtime sprite elements for Assets layers, so they can be queried and destroyed via layer_sprite_get_sprite/layer_sprite_destroy
+    repeat(room->layerCount, i) {
+        RoomLayer* layerSource = &room->layers[i];
+        if (layerSource->type != RoomLayerType_Assets || layerSource->assetsData == nullptr) continue;
+        RoomLayerAssetsData* assets = layerSource->assetsData;
+        RuntimeLayer* runtimeLayer = &runner->runtimeLayers[i];
+        repeat(assets->spriteCount, j) {
+            SpriteInstance* src = &assets->sprites[j];
+            RuntimeSpriteElement* spriteElement = safeMalloc(sizeof(RuntimeSpriteElement));
+            spriteElement->spriteIndex = src->spriteIndex;
+            spriteElement->x = src->x;
+            spriteElement->y = src->y;
+            spriteElement->scaleX = src->scaleX;
+            spriteElement->scaleY = src->scaleY;
+            spriteElement->color = src->color;
+            spriteElement->animationSpeed = src->animationSpeed;
+            spriteElement->animationSpeedType = src->animationSpeedType;
+            spriteElement->frameIndex = src->frameIndex;
+            spriteElement->rotation = src->rotation;
+            RuntimeLayerElement el = {
+                .id = Runner_getNextLayerId(runner),
+                .type = RuntimeLayerElementType_Sprite,
+                .backgroundElement = nullptr,
+                .spriteElement = spriteElement,
+            };
+            arrput(runtimeLayer->elements, el);
+        }
+    }
 
     // Copy room background definitions into mutable runtime state
     runner->backgroundColor = room->backgroundColor;
