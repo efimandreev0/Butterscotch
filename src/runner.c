@@ -205,6 +205,7 @@ const char* Runner_getEventName(int32_t eventType, int32_t eventSubtype) {
             }
         case EVENT_KEYPRESS:   return "KeyPress";
         case EVENT_KEYRELEASE: return "KeyRelease";
+        case EVENT_PRECREATE:  return "PreCreate";
         default: return "Unknown";
     }
 }
@@ -924,6 +925,8 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         inst->imageXscale = (float) roomObj->scaleX;
         inst->imageYscale = (float) roomObj->scaleY;
         inst->imageAngle = (float) roomObj->rotation;
+        inst->imageSpeed = roomObj->imageSpeed;
+        inst->imageIndex = (float) roomObj->imageIndex;
     }
 
     // In GMS2, instances get their depth from their room layer, not the object definition.
@@ -960,6 +963,7 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         if (inst->createEventFired) continue;
         inst->createEventFired = true;
 
+        Runner_executeEvent(runner, inst, EVENT_PRECREATE, 0);
         executeCode(runner, inst, roomObj->preCreateCode);
         Runner_executeEvent(runner, inst, EVENT_CREATE, 0);
         executeCode(runner, inst, roomObj->creationCode);
@@ -1125,6 +1129,7 @@ Instance* Runner_createInstance(Runner* runner, GMLReal x, GMLReal y, int32_t ob
     if (isObjectDisabled(runner, objectIndex)) return nullptr;
     Instance* inst = createAndInitInstance(runner, runner->nextInstanceId++, objectIndex, x, y);
     inst->createEventFired = true;
+    Runner_executeEvent(runner, inst, EVENT_PRECREATE, 0);
     Runner_executeEvent(runner, inst, EVENT_CREATE, 0);
     return inst;
 }

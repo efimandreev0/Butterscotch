@@ -1099,7 +1099,8 @@ static void parseROOM(BinaryReader* reader, DataWin* dw) {
                         go->imageSpeed = BinaryReader_readFloat32(reader);
                         go->imageIndex = BinaryReader_readInt32(reader);
                     } else {
-                        go->imageSpeed = 0.0f;
+                        // Match the runtime Instance default (Instance_create) so consumers can copy unconditionally.
+                        go->imageSpeed = 1.0f;
                         go->imageIndex = 0;
                     }
                     go->color = BinaryReader_readUint32(reader);

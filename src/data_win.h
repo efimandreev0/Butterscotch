@@ -405,7 +405,7 @@ typedef struct {
 } Tmln;
 
 // ===[ OBJT - Game Objects ]===
-#define OBJT_EVENT_TYPE_COUNT 12
+#define OBJT_EVENT_TYPE_COUNT 15
 
 typedef struct {
     uint32_t eventSubtype;
