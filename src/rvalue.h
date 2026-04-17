@@ -55,15 +55,24 @@ typedef struct {
     // We use uint8_t for the type instead of RValueType because a enum value occupies 4 bytes, while uint8_t occupies 1 byte
     uint8_t type;
     bool ownsString;
+#if IS_BC17_OR_HIGHER_ENABLED
     uint8_t gmlStackType; // GML data type from the instruction that pushed this value
+#endif
 } RValue;
 
+// Helper to initialize .gmlStackType only on BC17+ builds
+#if IS_BC17_OR_HIGHER_ENABLED
+#  define RVALUE_INIT_GMLTYPE(t) .gmlStackType = (t)
+#else
+#  define RVALUE_INIT_GMLTYPE(t)
+#endif
+
 static RValue RValue_makeReal(GMLReal val) {
-    return (RValue){ .real = val, .type = RVALUE_REAL, .gmlStackType = GML_TYPE_DOUBLE };
+    return (RValue){ .real = val, .type = RVALUE_REAL, RVALUE_INIT_GMLTYPE(GML_TYPE_DOUBLE) };
 }
 
 static RValue RValue_makeInt32(int32_t val) {
-    return (RValue){ .int32 = val, .type = RVALUE_INT32, .gmlStackType = GML_TYPE_INT32 };
+    return (RValue){ .int32 = val, .type = RVALUE_INT32, RVALUE_INIT_GMLTYPE(GML_TYPE_INT32) };
 }
 
 static RValue RValue_makeInt64(int64_t val) {
@@ -71,35 +80,35 @@ static RValue RValue_makeInt64(int64_t val) {
     // Values that don't fit in int32 get promoted to real instead of clamped, because clamping to INT32_MIN causes arithmetic overflow bugs
     // (example: Undertale's mercymod = -99999999999999 in the Asriel fight)
     if (val > INT32_MAX || INT32_MIN > val) {
-        return (RValue){ .real = (GMLReal) val, .type = RVALUE_REAL, .gmlStackType = GML_TYPE_DOUBLE };
+        return (RValue){ .real = (GMLReal) val, .type = RVALUE_REAL RVALUE_INIT_GMLTYPE(GML_TYPE_DOUBLE) };
     } else {
-        return (RValue){ .int32 = (int32_t) val, .type = RVALUE_INT32, .gmlStackType = GML_TYPE_INT32 };
+        return (RValue){ .int32 = (int32_t) val, .type = RVALUE_INT32 RVALUE_INIT_GMLTYPE(GML_TYPE_INT32) };
     }
 #else
-    return (RValue){ .int64 = val, .type = RVALUE_INT64, .gmlStackType = GML_TYPE_INT64 };
+    return (RValue){ .int64 = val, .type = RVALUE_INT64, RVALUE_INIT_GMLTYPE(GML_TYPE_INT64) };
 #endif
 }
 
 static RValue RValue_makeBool(bool val) {
-    return (RValue){ .int32 = val ? 1 : 0, .type = RVALUE_BOOL, .gmlStackType = GML_TYPE_BOOL };
+    return (RValue){ .int32 = val ? 1 : 0, .type = RVALUE_BOOL, RVALUE_INIT_GMLTYPE(GML_TYPE_BOOL) };
 }
 
 static RValue RValue_makeString(const char* val) {
-    return (RValue){ .string = val, .type = RVALUE_STRING, .ownsString = false, .gmlStackType = GML_TYPE_STRING };
+    return (RValue){ .string = val, .type = RVALUE_STRING, .ownsString = false, RVALUE_INIT_GMLTYPE(GML_TYPE_STRING) };
 }
 
 static RValue RValue_makeOwnedString(char* val) {
-    return (RValue){ .string = val, .type = RVALUE_STRING, .ownsString = true, .gmlStackType = GML_TYPE_STRING };
+    return (RValue){ .string = val, .type = RVALUE_STRING, .ownsString = true, RVALUE_INIT_GMLTYPE(GML_TYPE_STRING) };
 }
 
 static RValue RValue_makeUndefined(void) {
-    return (RValue){ .type = RVALUE_UNDEFINED, .gmlStackType = GML_TYPE_VARIABLE };
+    return (RValue){ .type = RVALUE_UNDEFINED, RVALUE_INIT_GMLTYPE(GML_TYPE_VARIABLE) };
 }
 
 // Creates an array reference that aliases another variable's array data.
 // The sourceVarID identifies which variable's array map to use for reads/writes.
 static RValue RValue_makeArrayRef(int32_t sourceVarID) {
-    return (RValue){ .int32 = sourceVarID, .type = RVALUE_ARRAY_REF, .gmlStackType = GML_TYPE_VARIABLE };
+    return (RValue){ .int32 = sourceVarID, .type = RVALUE_ARRAY_REF, RVALUE_INIT_GMLTYPE(GML_TYPE_VARIABLE) };
 }
 
 #if IS_BC17_OR_HIGHER_ENABLED

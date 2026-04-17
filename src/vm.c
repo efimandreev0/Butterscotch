@@ -53,8 +53,10 @@ static char* formatStackContents(VMContext* ctx) {
 }
 #endif
 
+#if IS_BC17_OR_HIGHER_ENABLED
 // Returns the native byte size of a GML data type on the runner's stack.
 // This is needed because the Dup instruction encodes byte counts, not slot counts.
+// Only used by BC17+ Dup paths; BC16 Dup decodes the operand as a slot count directly.
 static int gmlTypeNativeSize(uint8_t gmlType) {
     switch (gmlType) {
         case GML_TYPE_DOUBLE:   return 8;
@@ -67,6 +69,7 @@ static int gmlTypeNativeSize(uint8_t gmlType) {
         default:                return 16;
     }
 }
+#endif
 
 static void stackPush(VMContext* ctx, RValue val) {
     require(VM_STACK_SIZE > ctx->stack.top);
@@ -84,12 +87,18 @@ static void stackPush(VMContext* ctx, RValue val) {
     ctx->stack.slots[ctx->stack.top++] = val;
 }
 
+#if IS_BC17_OR_HIGHER_ENABLED
 static void stackPushTyped(VMContext* ctx, RValue val, uint8_t gmlStackType) {
     if (IS_BC17_OR_HIGHER(ctx)) {
         val.gmlStackType = gmlStackType;
     }
     stackPush(ctx, val);
 }
+#else
+// BC16-only builds don't carry per-slot GML stack type, so this is just a plain push.
+// Defined as a macro so the gmlStackType argument (often `instrType2(instr)`) is never computed at call sites.
+#define stackPushTyped(ctx, val, gmlStackType) stackPush((ctx), (val))
+#endif
 
 static RValue stackPop(VMContext* ctx) {
     require(ctx->stack.top > 0);
@@ -1639,8 +1648,9 @@ static void handleConv(VMContext* ctx, uint32_t instr) {
         case 0x23: result = RValue_makeInt32((int32_t) val.int64); break;
         case 0x43: result = RValue_makeBool(val.int64 > 0); break;
         case 0x53: result = val; break; // Int64 -> Variable (passthrough)
-#else
-        // Int64 (3) -> other (Int64 stored as Int32 when NO_RVALUE_INT64)
+#elif IS_BC17_OR_HIGHER_ENABLED
+        // Int64 (3) -> other (Int64 stored as Int32 when NO_RVALUE_INT64).
+        // Only emitted on BC17+ builds: BC16 games (Undertale, SURVEY_PROGRAM) never emit Int64 Conv opcodes.
         case 0x03: result = RValue_makeReal((GMLReal) val.int32); break;
         case 0x23: result = val; break; // Already Int32
         case 0x43: result = RValue_makeBool(val.int32 > 0); break;
@@ -1691,10 +1701,12 @@ static void handleConv(VMContext* ctx, uint32_t instr) {
         RValue_free(&val);
     }
 
-    // Set gmlStackType to the destination type so Dup can compute correct byte sizes
+    // Set gmlStackType to the destination type so Dup can compute correct byte sizes (BC17+ only)
+#if IS_BC17_OR_HIGHER_ENABLED
     if (IS_BC17_OR_HIGHER(ctx)) {
         result.gmlStackType = dstType;
     }
+#endif
     stackPush(ctx, result);
 }
 
@@ -1778,7 +1790,9 @@ static void handleCmp(VMContext* ctx, uint32_t instr) {
     stackPush(ctx,RValue_makeBool(result));
 }
 
+#if IS_BC17_OR_HIGHER_ENABLED
 // Converts a native byte count to RValue slot count by walking the stack backwards from a given position.
+// Only used by BC17+ Dup paths; reads the per-slot gmlStackType which doesn't exist on BC16-only builds.
 static int32_t bytesToSlotCount(VMContext* ctx, int32_t nativeBytes, int32_t stackPos) {
     int32_t slots = 0;
     int32_t remaining = nativeBytes;
@@ -1791,9 +1805,11 @@ static int32_t bytesToSlotCount(VMContext* ctx, int32_t nativeBytes, int32_t sta
     require(remaining == 0); // Byte count must align exactly to slot boundaries
     return slots;
 }
+#endif
 
 static void handleDup(VMContext* ctx, uint32_t instr) {
     uint16_t operand = (uint16_t)(instr & 0xFFFF);
+#if IS_BC17_OR_HIGHER_ENABLED
     uint8_t type1 = instrType1(instr);
     int32_t typeSize = gmlTypeNativeSize(type1);
 
@@ -1832,10 +1848,12 @@ static void handleDup(VMContext* ctx, uint32_t instr) {
         }
         return;
     }
+#endif
 
     // Normal dup mode
     int32_t count;
 
+#if IS_BC17_OR_HIGHER_ENABLED
     if (IS_BC17_OR_HIGHER(ctx)) {
         // In bytecode 17+, the operand encodes a native element count: total bytes = (operand + 1) * typeSize(type1).
         // The native runner's stack stores raw bytes (int=4, double=8, variable=16), but our VM uses uniform RValue slots.
@@ -1848,6 +1866,11 @@ static void handleDup(VMContext* ctx, uint32_t instr) {
         count = (int32_t)(operand & 0xFF) + 1;
         require(ctx->stack.top >= count);
     }
+#else
+    // Bytecode 16: operand directly encodes how many additional items beyond 1 to duplicate
+    count = (int32_t)(operand & 0xFF) + 1;
+    require(ctx->stack.top >= count);
+#endif
 
     // Copy 'count' items from the top of the stack (preserving order)
     int32_t startIdx = ctx->stack.top - count;
