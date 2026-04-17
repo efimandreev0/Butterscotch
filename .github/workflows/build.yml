@@ -202,28 +202,35 @@ jobs:
 
       - name: Check executeLoop I-Cache fit
         run: |
-          # Extract executeLoop function size from the ELF symbol table
+          # Extract executeLoop function size(s) from the ELF symbol table.
+          # GCC IPA passes (constprop/isra/part) may clone a static function and
+          # suffix the clones (e.g. "executeLoop.constprop.0"). Sum all variants
+          # since they all share the 16 KB I-Cache budget.
           # nm -S prints: address size type name
           echo "Getting executeLoop size from ELF symbol table..."
-          SYMBOL_LINE=$(mips64r5900el-ps2-elf-nm -S build/butterscotch.elf | grep ' executeLoop$' || true)
-          if [ -z "$SYMBOL_LINE" ]; then
+          SYMBOL_LINES=$(mips64r5900el-ps2-elf-nm -S build/butterscotch.elf | grep -E ' executeLoop(\..*)?$' || true)
+          if [ -z "$SYMBOL_LINES" ]; then
             echo "::error::Could not find executeLoop symbol in ELF (is it stripped?)"
             exit 1
           fi
-          # Size is the second hex field
-          SIZE_HEX=$(echo "$SYMBOL_LINE" | awk '{print $2}')
-          SIZE_DEC=$((16#$SIZE_HEX))
+          echo "$SYMBOL_LINES"
+          SIZE_DEC=0
+          VARIANT_COUNT=0
+          for SIZE_HEX in $(echo "$SYMBOL_LINES" | awk '{print $2}'); do
+            SIZE_DEC=$((SIZE_DEC + 0x$SIZE_HEX))
+            VARIANT_COUNT=$((VARIANT_COUNT + 1))
+          done
           LIMIT=16384
           if [ "$SIZE_DEC" -gt "$LIMIT" ]; then
-            echo "::error::executeLoop is $SIZE_DEC bytes, exceeding the PS2 16 KB I-Cache ($LIMIT bytes) by $((SIZE_DEC - LIMIT)) bytes"
+            echo "::error::executeLoop is $SIZE_DEC bytes across $VARIANT_COUNT variant(s), exceeding the PS2 16 KB I-Cache ($LIMIT bytes) by $((SIZE_DEC - LIMIT)) bytes"
             echo "| Function | Size | Limit | Status |" >> $GITHUB_STEP_SUMMARY
             echo "|----------|------|-------|--------|" >> $GITHUB_STEP_SUMMARY
-            echo "| \`executeLoop\` | $SIZE_DEC bytes | $LIMIT bytes (16 KB) | **EXCEEDED** by $((SIZE_DEC - LIMIT)) bytes |" >> $GITHUB_STEP_SUMMARY
+            echo "| \`executeLoop\` ($VARIANT_COUNT variant(s)) | $SIZE_DEC bytes | $LIMIT bytes (16 KB) | **EXCEEDED** by $((SIZE_DEC - LIMIT)) bytes |" >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
           echo "| Function | Size | Limit | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|------|-------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| \`executeLoop\` | $SIZE_DEC bytes | $LIMIT bytes (16 KB) | $((LIMIT - SIZE_DEC)) bytes remaining |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`executeLoop\` ($VARIANT_COUNT variant(s)) | $SIZE_DEC bytes | $LIMIT bytes (16 KB) | $((LIMIT - SIZE_DEC)) bytes remaining |" >> $GITHUB_STEP_SUMMARY
 
       - name: Report executeLoop inlining
         run: |
@@ -237,7 +244,13 @@ jobs:
             | awk '{for(i=1;i<=NF;i++) if($i=="into" && $(i+1) ~ /^executeLoop/) {name=$(i-1); sub(/\/[0-9]+$/,"",name); print name}}' \
             | sort -u)
           # Cross-check: jal targets still present in the compiled executeLoop
-          NOT_INLINED=$(mips64r5900el-ps2-elf-objdump -d --disassemble=executeLoop build/butterscotch.elf 2>/dev/null \
+          # (including GCC-cloned variants like executeLoop.constprop.0).
+          VARIANT_NAMES=$(mips64r5900el-ps2-elf-nm build/butterscotch.elf | awk '/ executeLoop(\..*)?$/ {print $3}')
+          DISASM_ARGS=""
+          for NAME in $VARIANT_NAMES; do
+            DISASM_ARGS="$DISASM_ARGS --disassemble=$NAME"
+          done
+          NOT_INLINED=$(mips64r5900el-ps2-elf-objdump -d $DISASM_ARGS build/butterscotch.elf 2>/dev/null \
             | grep -oE "jal[[:space:]]+[0-9a-f]+ <[^>]+>" \
             | sed -E 's/.*<([^>]+)>/\1/' \
             | sort -u)
