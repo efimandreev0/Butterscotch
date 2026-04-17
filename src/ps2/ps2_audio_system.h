@@ -20,6 +20,9 @@
 #define STREAM_ADPCM_CHUNK_BYTES 4096
 #define STREAM_DECODE_SAMPLES (STREAM_ADPCM_CHUNK_BYTES * 2) // 2 samples per ADPCM byte
 
+// Maximum decoded PCM size for a single cached SFX. Anything larger is routed through the streaming path.
+#define PS2_SFX_CACHE_MAX_BYTES (512 * 1024)
+
 // ===[ SOUNDBNK.BIN Structs ]===
 
 typedef struct {
