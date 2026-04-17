@@ -62,6 +62,7 @@ typedef struct {
     bool printRooms;
     bool printDeclaredFunctions;
     int exitAtFrame;
+    int traceBytecodeAfterFrame;
     double speedMultiplier;
     int seed;
     bool hasSeed;
@@ -95,6 +96,7 @@ static void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) 
         {"always-log-unknown-functions", no_argument, nullptr, 'y'},
         {"always-log-stubbed-functions", no_argument, nullptr, 'Y'},
         {"exit-at-frame", required_argument, nullptr, 'x'},
+        {"trace-bytecode-after-frame", required_argument, nullptr, 'F'},
         {"dump-frame", required_argument, nullptr, 'd'},
         {"dump-frame-json", required_argument, nullptr, 'j'},
         {"dump-frame-json-file", required_argument, nullptr, 'J'},
@@ -110,6 +112,7 @@ static void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) 
 
     args->screenshotFrames = nullptr;
     args->exitAtFrame = -1;
+    args->traceBytecodeAfterFrame = 0;
     args->speedMultiplier = 1.0;
     args->renderer = "gl";
 
@@ -180,6 +183,16 @@ static void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) 
                     exit(1);
                 }
                 args->exitAtFrame = (int) frame;
+                break;
+            }
+            case 'F': {
+                char* endPtr;
+                long frame = strtol(optarg, &endPtr, 10);
+                if (*endPtr != '\0' || 0 > frame) {
+                    fprintf(stderr, "Error: Invalid frame number '%s' for --trace-bytecode-after-frame\n", optarg);
+                    exit(1);
+                }
+                args->traceBytecodeAfterFrame = (int) frame;
                 break;
             }
             case 'd': {
@@ -591,6 +604,7 @@ int main(int argc, char* argv[]) {
     shcopyFromTo(args.opcodesToBeTraced, runner->vmContext->opcodesToBeTraced);
     shcopyFromTo(args.stackToBeTraced, runner->vmContext->stackToBeTraced);
     shcopyFromTo(args.tilesToBeTraced, runner->vmContext->tilesToBeTraced);
+    runner->vmContext->traceBytecodeAfterFrame = args.traceBytecodeAfterFrame;
     runner->vmContext->alwaysLogUnknownFunctions = args.alwaysLogUnknownFunctions;
     runner->vmContext->alwaysLogStubbedFunctions = args.alwaysLogStubbedFunctions;
     runner->vmContext->traceEventInherited = args.traceEventInherited;

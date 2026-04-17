@@ -76,6 +76,7 @@ The GLFW target has a lot of nifty CLI parameters that you can use to trace and 
 * `--trace-frames`: Logs when a frame starts and when a frame ends, including how much time it took to process each frame.
 * `--always-log-unknown-functions`: When enabled, Butterscotch will always log unknown functions instead of logging them once per script.
 * `--always-log-stubbed-functions`: When enabled, Butterscotch will always log stubbed functions instead of logging them once per script.
+* `--trace-bytecode-after-frame`: When set, controls when `--trace-opcodes` and `--trace-stack` will start logging. Useful when debugging interpreter-heavy scripts.
 * `--exit-at-frame=Frame`: Automatically exit the runner after X frames.
 * `--speed`: Speed multiplier
 * `--seed=Seed`: Sets a fixed seed for the runner, useful for reproduceable runs.

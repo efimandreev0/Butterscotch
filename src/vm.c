@@ -25,6 +25,7 @@ static int32_t nextSyntheticVarID = 1000000;
 #ifndef DISABLE_VM_TRACING
 static bool shouldTraceStack(VMContext* ctx) {
     if (shlen(ctx->stackToBeTraced) == 0) return false;
+    if (ctx->traceBytecodeAfterFrame > ctx->runner->frameCount) return false;
     return shgeti(ctx->stackToBeTraced, "*") != -1 || shgeti(ctx->stackToBeTraced, ctx->currentCodeName) != -1;
 }
 
@@ -2239,7 +2240,7 @@ static RValue executeLoop(VMContext* ctx) {
         uint8_t opcode = instrOpcode(instr);
 
 #ifndef DISABLE_VM_TRACING
-        if (shlen(ctx->opcodesToBeTraced) > 0) {
+        if (shlen(ctx->opcodesToBeTraced) > 0 && ctx->runner->frameCount >= ctx->traceBytecodeAfterFrame) {
             if (shgeti(ctx->opcodesToBeTraced, "*") != -1 || shgeti(ctx->opcodesToBeTraced, ctx->currentCodeName) != -1) {
                 char opcodeStr[32], operandStr[256] = "", commentStr[128] = "";
                 formatInstruction(ctx, ctx->bytecodeBase, instrAddr, instr, extraData, opcodeStr, sizeof(opcodeStr), operandStr, sizeof(operandStr), commentStr, sizeof(commentStr));

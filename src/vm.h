@@ -245,6 +245,8 @@ typedef struct VMContext {
     StringBooleanEntry* opcodesToBeTraced;
     StringBooleanEntry* stackToBeTraced;
     StringBooleanEntry* tilesToBeTraced;
+    // Minimum frameCount before opcode/stack traces are emitted (default 0)
+    int traceBytecodeAfterFrame;
 #endif
 
     // Stack at the end because it is a big chunky boi (we don't want it pushing fields around)
