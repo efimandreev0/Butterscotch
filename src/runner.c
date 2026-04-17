@@ -110,7 +110,6 @@ static void executeCode(Runner* runner, Instance* instance, int32_t codeId) {
     const char* savedCodeName = vm->currentCodeName;
     RValue* savedLocalVars = vm->localVars;
     uint32_t savedLocalVarCount = vm->localVarCount;
-    ArrayMapEntry* savedLocalArrayMap = vm->localArrayMap;
     CodeLocals* savedCodeLocals = vm->currentCodeLocals;
     LocalSlotEntry* savedCodeLocalsSlotMap = vm->currentCodeLocalsSlotMap;
     int32_t savedStackTop = vm->stack.top;
@@ -140,7 +139,6 @@ static void executeCode(Runner* runner, Instance* instance, int32_t codeId) {
     vm->currentCodeName = savedCodeName;
     vm->localVars = savedLocalVars;
     vm->localVarCount = savedLocalVarCount;
-    vm->localArrayMap = savedLocalArrayMap;
     vm->currentCodeLocals = savedCodeLocals;
     vm->currentCodeLocalsSlotMap = savedCodeLocalsSlotMap;
     vm->stack.top = savedStackTop;
@@ -1839,14 +1837,14 @@ void Runner_dumpState(Runner* runner) {
         }
         if (hasAlarm) printf("\n");
 
-        // Self variables (non-array, sparse hashmap)
+        // Self variables
         bool hasSelfVars = false;
+        bool hasSelfArrays = false;
         repeat(hmlen(inst->selfVars), svIdx) {
             int32_t varID = inst->selfVars[svIdx].key;
             RValue val = inst->selfVars[svIdx].value;
             if (val.type == RVALUE_UNDEFINED) continue;
 
-            // Resolve variable name from VARI chunk
             const char* varName = "?";
             repeat(dataWin->vari.variableCount, varIdx) {
                 Variable* var = &dataWin->vari.variables[varIdx];
@@ -1856,34 +1854,19 @@ void Runner_dumpState(Runner* runner) {
                 }
             }
 
-            if (!hasSelfVars) { printf("  Self Variables:\n"); hasSelfVars = true; }
-            char* valStr = RValue_toStringFancy(val);
-            printf("    %s = %s\n", varName, valStr);
-            free(valStr);
-        }
-
-        // Self arrays
-        int64_t selfArrayLen = hmlen(inst->selfArrayMap);
-        if (selfArrayLen > 0) {
-            printf("  Self Arrays:\n");
-            repeat(selfArrayLen, arrIdx) {
-                int64_t key = inst->selfArrayMap[arrIdx].key;
-                RValue val = inst->selfArrayMap[arrIdx].value;
-                int32_t varID = (int32_t) (key >> 32);
-                int32_t arrayIndex = (int32_t) (key & 0xFFFFFFFF);
-
-                // Find variable name by scanning VARI entries
-                const char* varName = "<unknown>";
-                repeat(dataWin->vari.variableCount, varIdx) {
-                    Variable* var = &dataWin->vari.variables[varIdx];
-                    if (var->varID == varID && var->instanceType == INSTANCE_SELF) {
-                        varName = var->name;
-                        break;
-                    }
+            if (val.type == RVALUE_ARRAY && val.array != nullptr) {
+                if (!hasSelfArrays) { printf("  Self Arrays:\n"); hasSelfArrays = true; }
+                repeat(val.array->length, ai) {
+                    RValue inner = val.array->data[ai];
+                    if (inner.type == RVALUE_UNDEFINED) continue;
+                    char* innerStr = RValue_toStringFancy(inner);
+                    printf("    %s[%d] = %s\n", varName, (int) ai, innerStr);
+                    free(innerStr);
                 }
-
+            } else {
+                if (!hasSelfVars) { printf("  Self Variables:\n"); hasSelfVars = true; }
                 char* valStr = RValue_toStringFancy(val);
-                printf("    %s[%d] = %s\n", varName, arrayIndex, valStr);
+                printf("    %s = %s\n", varName, valStr);
                 free(valStr);
             }
         }
@@ -1903,27 +1886,19 @@ void Runner_dumpState(Runner* runner) {
         free(valStr);
     }
 
-    // Global arrays
-    int64_t globalArrayLen = hmlen(vm->globalArrayMap);
-    if (globalArrayLen > 0) {
-        repeat(globalArrayLen, arrIdx) {
-            int64_t key = vm->globalArrayMap[arrIdx].key;
-            RValue val = vm->globalArrayMap[arrIdx].value;
-            int32_t varID = (int32_t) (key >> 32);
-            int32_t arrayIndex = (int32_t) (key & 0xFFFFFFFF);
-
-            const char* varName = "<unknown>";
-            repeat(dataWin->vari.variableCount, varIdx) {
-                Variable* var = &dataWin->vari.variables[varIdx];
-                if (var->varID == varID && var->instanceType == INSTANCE_GLOBAL) {
-                    varName = var->name;
-                    break;
-                }
-            }
-
-            char* valStr = RValue_toStringFancy(val);
-            printf("  %s[%d] = %s\n", varName, arrayIndex, valStr);
-            free(valStr);
+    // Global arrays: scan globalVars slots for RVALUE_ARRAY entries
+    repeat(dataWin->vari.variableCount, varIdx) {
+        Variable* var = &dataWin->vari.variables[varIdx];
+        if (var->instanceType != INSTANCE_GLOBAL || var->varID < 0) continue;
+        if ((uint32_t) var->varID >= vm->globalVarCount) continue;
+        RValue val = vm->globalVars[var->varID];
+        if (val.type != RVALUE_ARRAY || val.array == nullptr) continue;
+        repeat(val.array->length, ai) {
+            RValue inner = val.array->data[ai];
+            if (inner.type == RVALUE_UNDEFINED) continue;
+            char* innerStr = RValue_toStringFancy(inner);
+            printf("  %s[%d] = %s\n", var->name, (int) ai, innerStr);
+            free(innerStr);
         }
     }
 
@@ -1954,12 +1929,25 @@ static void writeRValueJson(JsonWriter* w, RValue val) {
         case RVALUE_UNDEFINED:
             JsonWriter_null(w);
             break;
-        case RVALUE_ARRAY_REF: {
+        case RVALUE_ARRAY: {
+            // Render arrays as a JSON array. Skips RVALUE_UNDEFINED entries (they read as 0/null anyway).
+            JsonWriter_beginArray(w);
+            if (val.array != nullptr) {
+                repeat(val.array->length, ai) {
+                    writeRValueJson(w, val.array->data[ai]);
+                }
+            }
+            JsonWriter_endArray(w);
+            break;
+        }
+#if IS_BC17_OR_HIGHER_ENABLED
+        case RVALUE_METHOD: {
             char buf[64];
-            snprintf(buf, sizeof(buf), "<array_ref:%d>", val.int32);
+            snprintf(buf, sizeof(buf), "<method:%d>", val.method.codeIndex);
             JsonWriter_string(w, buf);
             break;
         }
+#endif
     }
 }
 
@@ -2076,42 +2064,6 @@ char* Runner_dumpStateJson(Runner* runner) {
             writeRValueJson(&w, val);
         }
         JsonWriter_endObject(&w);
-
-        // Self arrays
-        JsonWriter_key(&w, "selfArrays");
-        JsonWriter_beginObject(&w);
-        int64_t selfArrayLen = hmlen(inst->selfArrayMap);
-        if (selfArrayLen > 0) {
-            repeat(selfArrayLen, arrIdx) {
-                int64_t key = inst->selfArrayMap[arrIdx].key;
-                RValue val = inst->selfArrayMap[arrIdx].value;
-                int32_t varID = (int32_t) (key >> 32);
-                int32_t arrayIndex = (int32_t) (key & 0xFFFFFFFF);
-
-                // Find variable name
-                const char* varName = nullptr;
-                repeat(dataWin->vari.variableCount, varIdx) {
-                    Variable* var = &dataWin->vari.variables[varIdx];
-                    if (var->varID == varID && var->instanceType == INSTANCE_SELF) {
-                        varName = var->name;
-                        break;
-                    }
-                }
-
-                if (varName == nullptr) continue;
-
-                // Check if we already started this variable's object
-                // We write arrays as "varName": {"0": val, "1": val, ...}
-                // Since selfArrayMap entries may be interleaved, we build per-variable
-                // For simplicity, write each entry as varName[index] flattened
-                char compositeKey[256];
-                snprintf(compositeKey, sizeof(compositeKey), "%s[%d]", varName, arrayIndex);
-                JsonWriter_key(&w, compositeKey);
-                writeRValueJson(&w, val);
-            }
-        }
-        JsonWriter_endObject(&w);
-
         JsonWriter_endObject(&w);
     }
 
@@ -2166,37 +2118,6 @@ char* Runner_dumpStateJson(Runner* runner) {
         writeRValueJson(&w, val);
     }
     JsonWriter_endObject(&w);
-
-    // Global arrays
-    JsonWriter_key(&w, "globalArrays");
-    JsonWriter_beginObject(&w);
-    int64_t globalArrayLen = hmlen(vm->globalArrayMap);
-    if (globalArrayLen > 0) {
-        repeat(globalArrayLen, arrIdx) {
-            int64_t key = vm->globalArrayMap[arrIdx].key;
-            RValue val = vm->globalArrayMap[arrIdx].value;
-            int32_t varID = (int32_t) (key >> 32);
-            int32_t arrayIndex = (int32_t) (key & 0xFFFFFFFF);
-
-            const char* varName = nullptr;
-            repeat(dataWin->vari.variableCount, varIdx) {
-                Variable* var = &dataWin->vari.variables[varIdx];
-                if (var->varID == varID && var->instanceType == INSTANCE_GLOBAL) {
-                    varName = var->name;
-                    break;
-                }
-            }
-
-            if (varName == nullptr) continue;
-
-            char compositeKey[256];
-            snprintf(compositeKey, sizeof(compositeKey), "%s[%d]", varName, arrayIndex);
-            JsonWriter_key(&w, compositeKey);
-            writeRValueJson(&w, val);
-        }
-    }
-    JsonWriter_endObject(&w);
-
     JsonWriter_endObject(&w);
 
     char* result = JsonWriter_copyOutput(&w);

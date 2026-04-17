@@ -43,8 +43,6 @@ Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, GMLReal x, G
     inst->pathIndex = -1;
     inst->pathScale = 1.0f;
     inst->selfVars = nullptr;
-    inst->selfArrayMap = nullptr;
-    inst->selfArrayVarTracker = nullptr;
 
     // Initialize alarms to -1 (inactive)
     repeat(GML_ALARM_COUNT, i) {
@@ -57,20 +55,11 @@ Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, GMLReal x, G
 void Instance_free(Instance* instance) {
     if (instance == nullptr) return;
 
-    // Free owned strings in selfVars hashmap
+    // Free owned strings and decRef owned arrays in selfVars hashmap
     repeat(hmlen(instance->selfVars), i) {
         RValue_free(&instance->selfVars[i].value);
     }
     hmfree(instance->selfVars);
-
-    // Free selfArrayMap
-    repeat(hmlen(instance->selfArrayMap), i) {
-        RValue_free(&instance->selfArrayMap[i].value);
-    }
-    hmfree(instance->selfArrayMap);
-
-    // Free selfArrayVarTracker
-    hmfree(instance->selfArrayVarTracker);
 
     free(instance);
 }
@@ -117,25 +106,9 @@ void Instance_copyFields(Instance* source, Instance* destination) {
         destination->alarm[i] = source->alarm[i];
     }
 
-    // Deep-copy self variables (Instance_setSelfVar handles string duplication)
+    // Deep-copy self variables (Instance_setSelfVar handles string duplication + array incRef)
     repeat(hmlen(source->selfVars), i) {
         Instance_setSelfVar(destination, source->selfVars[i].key, source->selfVars[i].value);
-    }
-
-    // Deep-copy self array map, duplicating owned strings
-    repeat(hmlen(source->selfArrayMap), i) {
-        RValue val = source->selfArrayMap[i].value;
-        if (val.type == RVALUE_STRING && val.string != nullptr) {
-            val = RValue_makeOwnedString(safeStrdup(val.string));
-        } else {
-            val.ownsString = false;
-        }
-        hmput(destination->selfArrayMap, source->selfArrayMap[i].key, val);
-    }
-
-    // Deep-copy self array var tracker
-    repeat(hmlen(source->selfArrayVarTracker), i) {
-        hmput(destination->selfArrayVarTracker, source->selfArrayVarTracker[i].key, source->selfArrayVarTracker[i].value);
     }
 }
 

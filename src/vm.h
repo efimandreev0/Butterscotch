@@ -124,7 +124,7 @@ typedef struct CallFrame {
     RValue* savedLocals;
     uint32_t savedLocalsCount;
     const char* savedCodeName;
-    ArrayMapEntry* savedLocalArrayMap;
+    int32_t savedSavearefBalance;
     CodeLocals* savedCodeLocals;
     LocalSlotEntry* savedCodeLocalsSlotMap;
     RValue* savedScriptArgs;
@@ -178,12 +178,10 @@ typedef struct VMContext {
     struct Instance* otherInstance; // "other" instance for collision events
     DataWin* dataWin;
     struct Runner* runner;
-    ArrayMapEntry* localArrayMap;
     CodeLocals* currentCodeLocals;
     // BC17+: varID -> localVars slot lookup for the current code.
     // Points into codeLocalsSlotMaps, parallel to currentCodeLocals. Stays in sync with it.
     LocalSlotEntry* currentCodeLocalsSlotMap;
-    ArrayMapEntry* globalArrayMap;
     FuncCallCache* funcCallCache;
     const char* currentCodeName;
     int32_t currentCodeIndex; // Index into code.entries for the currently executing code
@@ -209,14 +207,14 @@ typedef struct VMContext {
 
     // V17+ extended BREAK opcode state
     bool* staticInitialized; // Per-code-entry flag for isstaticok/setstatic (allocated in VM_create)
-    RValue savedArrayRef;    // Saved array reference for savearef/restorearef
-    bool hasSavedArrayRef;   // Whether savedArrayRef is valid
+    // BC17+: owner token set by BREAK_SETOWNER. Arrays whose .owner mismatches fork on write.
+    void* currentArrayOwner;
+    // SAVEAREF/RESTOREAREF balance tracker.
+    int32_t savearefBalance;
 
     // Cold: init-only or rare lookups
-    // Tracks which global varIDs have array data (for array aliasing)
     BuiltinEntry* builtinMap;
     bool registeredBuiltinFunctions;
-    struct { int32_t key; int32_t value; }* globalArrayVarTracker;
     // funcName -> codeIndex hash map (stb_ds)
     struct { char* key; int32_t value; }* funcMap;
     // codeName -> CodeLocals* hash map (stb_ds)

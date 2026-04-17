@@ -3,6 +3,7 @@
 #include "common.h"
 #include <stdint.h>
 #include "rvalue.h"
+#include "gml_array.h"
 #include "stb_ds.h"
 
 #define GML_ALARM_COUNT 12
@@ -21,10 +22,8 @@ typedef struct Instance {
     bool persistent, solid, active, destroyed, visible, createEventFired, outsideRoom;
     int32_t maskIndex; // collision mask sprite override (-1 = use spriteIndex)
 
-    // Per-instance self variable storage (sparse stb_ds hashmap, keyed by varID)
+    // Per-instance self variable storage (sparse stb_ds hashmap, keyed by varID).
     SelfVarEntry* selfVars;
-    ArrayMapEntry* selfArrayMap;
-    struct { int32_t key; int32_t value; }* selfArrayVarTracker; // tracks which varIDs have array data
 
     // Built-in instance properties
     int32_t spriteIndex;
@@ -56,11 +55,11 @@ typedef struct Instance {
 Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, GMLReal x, GMLReal y);
 void Instance_free(Instance* instance);
 
-// Deep-copy all mutable fields from source to dst: built-in properties, alarms, selfVars, selfArrayMap, selfArrayVarTracker.
-// Does NOT copy instanceId, objectIndex, destroyed, or createEventFired. Strings are duplicated so ownership stays independent.
+// Deep-copy all mutable fields from source to dst: built-in properties, alarms, selfVars.
+// Does NOT copy instanceId, objectIndex, destroyed, or createEventFired. Strings are duplicated so ownership stays independent. Arrays bump refCount (shared - CoW handles forking on first write).
 void Instance_copyFields(Instance* dst, Instance* source);
 
-// Get a self variable by varID. Returns RVALUE_UNDEFINED if absent. The returned RValue is non-owning.
+// Get a self variable by varID. Returns RVALUE_UNDEFINED if absent. The returned RValue is non-owning (weak view - do not RValue_free unless you incRef/strdup first to strengthen).
 static inline RValue Instance_getSelfVar(Instance* inst, int32_t varID) {
     requireNotNull(inst);
     ptrdiff_t idx = hmgeti(inst->selfVars, varID);
@@ -70,7 +69,9 @@ static inline RValue Instance_getSelfVar(Instance* inst, int32_t varID) {
     return result;
 }
 
-// Set a self variable by varID. Frees the old value if present, makes an owning string copy if needed.
+// Set a self variable by varID. Frees the old value if present (decRefs owned arrays).
+// Always takes an independent reference: strings are strdup'd, arrays are incRef'd, regardless of whether the caller's RValue was owning.
+// The caller retains ownership of their original `val` and remains responsible for freeing it (via RValue_free) when done.
 static inline void Instance_setSelfVar(Instance* inst, int32_t varID, RValue val) {
     requireNotNull(inst);
     ptrdiff_t idx = hmgeti(inst->selfVars, varID);
@@ -79,6 +80,9 @@ static inline void Instance_setSelfVar(Instance* inst, int32_t varID, RValue val
     }
     if (val.type == RVALUE_STRING && val.string != nullptr) {
         val = RValue_makeOwnedString(safeStrdup(val.string));
+    } else if (val.type == RVALUE_ARRAY && val.array != nullptr) {
+        GMLArray_incRef(val.array);
+        val.ownsString = true;
     }
     hmput(inst->selfVars, varID, val);
 }

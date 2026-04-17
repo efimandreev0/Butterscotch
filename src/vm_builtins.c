@@ -1934,60 +1934,9 @@ static RValue builtinDsListFindIndex(VMContext* ctx, RValue* args, MAYBE_UNUSED 
 // ===[ ARRAY FUNCTIONS ]===
 
 static RValue builtinArrayLength1d(VMContext* ctx, RValue* args, int32_t argCount) {
-    // array_length_1d(array) takes either the legacy RVALUE_ARRAY_REF or the V17+ RVALUE_GML_ARRAY form.
-    // Both carry a varID that keys into one of the array maps below.
-    int32_t varID;
-    if (args[0].type == RVALUE_ARRAY_REF) {
-        varID = args[0].int32;
-#if IS_BC17_OR_HIGHER_ENABLED
-    } else if (args[0].type == RVALUE_GML_ARRAY) {
-        varID = args[0].gmlArray.varID;
-#endif
-    } else {
-        return RValue_makeReal(0.0);
-    }
-    int32_t maxIndex = -1;
-
-    // Search selfArrayMap on the current instance
-    Instance* inst = ctx->currentInstance;
-    if (inst != nullptr) {
-        repeat(hmlen(inst->selfArrayMap), idx) {
-            int64_t key = inst->selfArrayMap[idx].key;
-            int32_t keyVarID = (int32_t)(key >> 32);
-            if (keyVarID == varID) {
-                int32_t keyArrayIndex = (int32_t)(key & 0xFFFFFFFF);
-                if (keyArrayIndex > maxIndex) {
-                    maxIndex = keyArrayIndex;
-                }
-            }
-        }
-    }
-
-    // Also search globalArrayMap
-    repeat(hmlen(ctx->globalArrayMap), idx) {
-        int64_t key = ctx->globalArrayMap[idx].key;
-        int32_t keyVarID = (int32_t)(key >> 32);
-        if (keyVarID == varID) {
-            int32_t keyArrayIndex = (int32_t)(key & 0xFFFFFFFF);
-            if (keyArrayIndex > maxIndex) {
-                maxIndex = keyArrayIndex;
-            }
-        }
-    }
-
-    // Also search localArrayMap
-    repeat(hmlen(ctx->localArrayMap), idx) {
-        int64_t key = ctx->localArrayMap[idx].key;
-        int32_t keyVarID = (int32_t)(key >> 32);
-        if (keyVarID == varID) {
-            int32_t keyArrayIndex = (int32_t)(key & 0xFFFFFFFF);
-            if (keyArrayIndex > maxIndex) {
-                maxIndex = keyArrayIndex;
-            }
-        }
-    }
-
-    return RValue_makeReal((GMLReal)(maxIndex + 1));
+    (void) ctx; (void) argCount;
+    if (args[0].type != RVALUE_ARRAY || args[0].array == nullptr) return RValue_makeReal(0.0);
+    return RValue_makeReal((GMLReal) args[0].array->length);
 }
 
 // ===[ COLLISION FUNCTIONS]===
@@ -5629,10 +5578,14 @@ static RValue builtinLayerVspeed(VMContext* ctx, RValue* args, MAYBE_UNUSED int3
 
 // ===[ Array Functions ]===
 
-// @@NewGMLArray@@ - GMS2 internal function to create a new empty array.
-// In our VM, arrays are created implicitly on first write, so this is a no-op.
-static RValue builtinNewGMLArray(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
-    return RValue_makeUndefined();
+// @@NewGMLArray@@ - GMS2 internal function to create a new array literal (e.g. `[1, 2, 3]`).
+// Allocates a fresh GMLArray populated with the argument values.
+static RValue builtinNewGMLArray(VMContext* ctx, RValue* args, int32_t argCount) {
+    RValue arr = VM_createArray(ctx);
+    repeat(argCount, i) {
+        VM_arraySet(ctx, &arr, i, args[i]);
+    }
+    return arr;
 }
 
 // ===[ PATH FUNCTIONS ]===
