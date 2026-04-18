@@ -1878,17 +1878,9 @@ static void handleBranch(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
     ctx->ip = instrAddr + offset;
 }
 
-static void handleBranchTrue(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
+static void handleConditionalBranch(VMContext* ctx, uint32_t instr, uint32_t instrAddr, bool expected) {
     bool condition = stackPopInt32(ctx) != 0;
-    if (condition) {
-        int32_t offset = instrJumpOffset(instr);
-        ctx->ip = instrAddr + offset;
-    }
-}
-
-static void handleBranchFalse(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
-    bool condition = stackPopInt32(ctx) != 0;
-    if (!condition) {
+    if (condition == expected) {
         int32_t offset = instrJumpOffset(instr);
         ctx->ip = instrAddr + offset;
     }
@@ -2338,10 +2330,10 @@ static RValue executeLoop(VMContext* ctx) {
                 handleBranch(ctx, instr, instrAddr);
                 break;
             case OP_BT:
-                handleBranchTrue(ctx, instr, instrAddr);
+                handleConditionalBranch(ctx, instr, instrAddr, true);
                 break;
             case OP_BF:
-                handleBranchFalse(ctx, instr, instrAddr);
+                handleConditionalBranch(ctx, instr, instrAddr, false);
                 break;
 
             // Function call
