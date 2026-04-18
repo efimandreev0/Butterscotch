@@ -6234,6 +6234,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "action_set_hspeed", builtinActionSetHspeed);
     VM_registerBuiltin(ctx, "action_set_vspeed", builtinActionSetVspeed);
     VM_registerBuiltin(ctx, "event_inherited", builtinEventInherited);
+    VM_registerBuiltin(ctx, "action_inherited", builtinEventInherited);
     VM_registerBuiltin(ctx, "event_user", builtinEventUser);
     VM_registerBuiltin(ctx, "event_perform", builtinEventPerform);
 
