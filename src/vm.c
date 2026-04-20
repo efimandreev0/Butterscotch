@@ -506,16 +506,15 @@ static uint32_t resolveLocalSlot(VMContext* ctx, int32_t varID) {
     return slot;
 }
 
-// Finds an active instance by target value.
-// target >= 100000: instance ID (find specific instance)
-// target >= 0 && target < 100000: object index (find first instance of that object, checking parent chains)
+// Finds an instance by target value.
+// target >= 100000: instance ID (find specific instance, including recently-destroyed-but-not-cleaned-up-yet ones so GML code can read properties of an instance just after instance_destroy within the same step).
+// target >= 0 && target < 100000: object index (find first ACTIVE instance of that object, checking parent chains)
 static Instance* findInstanceByTarget(VMContext* ctx, int32_t target) {
     Runner* runner = (Runner*) ctx->runner;
 
     if (target >= 100000) {
         // Instance ID - find specific instance
-        Instance* inst = hmget(runner->instancesToId, target);
-        return (inst != nullptr && inst->active) ? inst : nullptr;
+        return hmget(runner->instancesToId, target);
     }
 
     // Object index - find first matching instance, checking parent chains
