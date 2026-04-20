@@ -12,6 +12,7 @@
 #include "stb_image.h"
 #include "stb_ds.h"
 #include "utils.h"
+#include "image_decoder.h"
 
 // ===[ Vtable Implementations ]===
 
@@ -169,8 +170,9 @@ static bool ensureTextureLoaded(GLLegacyRenderer* gl, uint32_t pageId) {
     DataWin* dw = gl->base.dataWin;
     Texture* txtr = &dw->txtr.textures[pageId];
 
-    int w, h, channels;
-    uint8_t* pixels = stbi_load_from_memory(txtr->blobData, (int) txtr->blobSize, &w, &h, &channels, 4);
+    int w, h;
+    bool gm2022_5 = DataWin_isVersionAtLeast(dw, 2022, 5, 0, 0);
+    uint8_t* pixels = ImageDecoder_decodeToRgba(txtr->blobData, (size_t) txtr->blobSize, gm2022_5, &w, &h);
     if (pixels == nullptr) {
         fprintf(stderr, "GL: Failed to decode TXTR page %u\n", pageId);
         return false;
@@ -186,7 +188,7 @@ static bool ensureTextureLoaded(GLLegacyRenderer* gl, uint32_t pageId) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    stbi_image_free(pixels);
+    free(pixels);
     fprintf(stderr, "GL: Loaded TXTR page %u (%dx%d)\n", pageId, w, h);
     return true;
 }

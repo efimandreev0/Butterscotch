@@ -876,6 +876,30 @@ static void parseOBJT(BinaryReader* reader, DataWin* dw) {
 
     if (count == 0) { free(ptrs); o->objects = nullptr; return; }
 
+    // Detect GMS 2022.5+ by probing the first game object's event list structure.
+    if (DataWin_isVersionAtLeast(dw, 2, 3, 0, 0) && !DataWin_isVersionAtLeast(dw, 2022, 5, 0, 0)) {
+        // Skip the 16 fixed uint32 header fields (name..angularDamping) to reach physicsVertexCount.
+        BinaryReader_seek(reader, ptrs[0] + 16 * 4);
+        int32_t vertexCount = BinaryReader_readInt32(reader);
+        if (vertexCount >= 0) {
+            // Skip friction + awake + kinematic (12 bytes) and physics vertices (8 bytes each).
+            BinaryReader_skip(reader, 12 + vertexCount * 8);
+            uint32_t eventTypeCount = BinaryReader_readUint32(reader);
+            bool isOldFormat = false;
+            if (eventTypeCount == OBJT_EVENT_TYPE_COUNT) {
+                uint32_t firstSubEventPtr = BinaryReader_readUint32(reader);
+                uint32_t currentAbsPos = (uint32_t) BinaryReader_getPosition(reader);
+                // The remaining 14 outer-list pointers sit between here and the first sub-event list.
+                if (firstSubEventPtr == currentAbsPos + 14 * 4) {
+                    isOldFormat = true;
+                }
+            }
+            if (!isOldFormat) {
+                DataWin_bumpVersionTo(dw, 2022, 5, 0, 0);
+            }
+        }
+    }
+
     o->objects = safeMalloc(count * sizeof(GameObject));
     repeat(count, i) {
         BinaryReader_seek(reader, ptrs[i]);
