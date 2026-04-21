@@ -1834,16 +1834,31 @@ static RValue builtinScriptExecute(VMContext* ctx, RValue* args, int32_t argCoun
     } else
 #endif
     {
-        // Numeric script index
-        int32_t scriptIdx = RValue_toInt32(args[0]);
+        // Numeric script/function index
+        int32_t rawArg = RValue_toInt32(args[0]);
+        codeId = -1;
 
-        // Look up the script to get its codeId
-        if (scriptIdx < 0 || (uint32_t) scriptIdx >= ctx->dataWin->scpt.count) {
-            fprintf(stderr, "VM: script_execute - invalid script index %d\n", scriptIdx);
-            return RValue_makeUndefined();
+#if IS_BC17_OR_HIGHER_ENABLED
+        // In GMS 2 BC17+, "scriptName" in source code is compiled as a FUNC-table index (same as builtinMethod). Resolve funcIdx -> codeIndex via funcMap.
+        if (IS_BC17_OR_HIGHER(ctx) && rawArg >= 0 && ctx->dataWin->func.functionCount > (uint32_t) rawArg) {
+            const char* funcName = ctx->dataWin->func.functions[rawArg].name;
+            if (funcName != nullptr) {
+                ptrdiff_t idx = shgeti(ctx->funcMap, (char*) funcName);
+                if (idx >= 0) {
+                    codeId = ctx->funcMap[idx].value;
+                }
+            }
         }
+#endif
 
-        codeId = ctx->dataWin->scpt.scripts[scriptIdx].codeId;
+        // Fallback: treat as SCPT index (BC16 and earlier, or when FUNC lookup failed)
+        if (0 > codeId) {
+            if (0 > rawArg || (uint32_t) rawArg >= ctx->dataWin->scpt.count) {
+                fprintf(stderr, "VM: script_execute - invalid script index %d\n", rawArg);
+                return RValue_makeUndefined();
+            }
+            codeId = ctx->dataWin->scpt.scripts[rawArg].codeId;
+        }
     }
 
     if (0 > codeId || ctx->dataWin->code.count <= (uint32_t) codeId) {
