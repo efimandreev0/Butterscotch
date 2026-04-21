@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include "data_win.h"
 #include "runner.h"
 #include "utils.h"
@@ -14,10 +15,41 @@
 // Used by both the renderer (for drawing text) and the VM (for string_width/string_height).
 
 static inline FontGlyph* TextUtils_findGlyph(Font* font, uint16_t ch) {
-    repeat(font->glyphCount, i) {
-        if (font->glyphs[i].character == ch) return &font->glyphs[i];
+    enum { TEXTUTILS_GLYPH_CACHE_SIZE = 256 };
+    typedef struct {
+        const Font* font;
+        const FontGlyph* glyphs;
+        uint32_t glyphCount;
+        uint16_t character;
+        FontGlyph* glyph;
+    } TextUtilsGlyphCacheEntry;
+
+    static TextUtilsGlyphCacheEntry cache[TEXTUTILS_GLYPH_CACHE_SIZE];
+
+    uint32_t key = (uint32_t) (((uintptr_t) font >> 4) ^ ((uint32_t) ch * 2654435761u));
+    TextUtilsGlyphCacheEntry* entry = &cache[key & (TEXTUTILS_GLYPH_CACHE_SIZE - 1)];
+
+    if (entry->font == font &&
+        entry->glyphs == font->glyphs &&
+        entry->glyphCount == font->glyphCount &&
+        entry->character == ch) {
+        return entry->glyph;
     }
-    return nullptr;
+
+    FontGlyph* glyph = nullptr;
+    repeat(font->glyphCount, i) {
+        if (font->glyphs[i].character == ch) {
+            glyph = &font->glyphs[i];
+            break;
+        }
+    }
+
+    entry->font = font;
+    entry->glyphs = font->glyphs;
+    entry->glyphCount = font->glyphCount;
+    entry->character = ch;
+    entry->glyph = glyph;
+    return glyph;
 }
 
 static inline float TextUtils_getKerningOffset(FontGlyph* glyph, uint16_t nextCh) {
@@ -61,54 +93,6 @@ static inline uint16_t TextUtils_decodeUtf8(const char* str, int32_t len, int32_
     // Invalid or truncated sequence
     (*pos)++;
     return 0xFFFD;
-}
-
-static inline int32_t TextUtils_utf8AdvanceCodepoints(const char* str, int32_t byteLen, int32_t codepointsToSkip) {
-    int32_t pos = 0;
-    while (pos < byteLen && codepointsToSkip > 0) {
-        pos++;
-        while (pos < byteLen && ((uint8_t)str[pos] & 0xC0) == 0x80) {
-            pos++;
-        }
-        codepointsToSkip--;
-    }
-    return pos;
-}
-
-static inline int32_t TextUtils_utf8CodepointCount(const char* str, int32_t byteLen) {
-    int32_t count = 0;
-    for (int32_t i = 0; i < byteLen; i++) {
-        if (((uint8_t)str[i] & 0xC0) != 0x80) {
-            count++;
-        }
-    }
-    return count;
-}
-
-static inline int32_t TextUtils_utf8EncodeCodepoint(uint32_t cp, char* out) {
-    if (cp <= 0x7FU) {
-        out[0] = (char) cp;
-        return 1;
-    }
-    if (cp <= 0x7FFU) {
-        out[0] = (char) (0xC0U | (cp >> 6));
-        out[1] = (char) (0x80U | (cp & 0x3FU));
-        return 2;
-    }
-    if (cp <= 0xFFFFU) {
-        out[0] = (char) (0xE0U | (cp >> 12));
-        out[1] = (char) (0x80U | ((cp >> 6) & 0x3FU));
-        out[2] = (char) (0x80U | (cp & 0x3FU));
-        return 3;
-    }
-    if (cp <= 0x10FFFFU) {
-        out[0] = (char) (0xF0U | (cp >> 18));
-        out[1] = (char) (0x80U | ((cp >> 12) & 0x3FU));
-        out[2] = (char) (0x80U | ((cp >> 6) & 0x3FU));
-        out[3] = (char) (0x80U | (cp & 0x3FU));
-        return 4;
-    }
-    return 0;
 }
 
 // Line stride used for multi-line text. Matches HTML5 runner behavior:

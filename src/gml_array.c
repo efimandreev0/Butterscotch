@@ -1,43 +1,22 @@
 #include "gml_array.h"
 #include "rvalue.h"
 #include "utils.h"
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-static void ensureRowCapacity(GMLArray* arr, int32_t minRows) {
-    if (arr->rowCapacity >= minRows) return;
-    int32_t newCap = arr->rowCapacity > 0 ? arr->rowCapacity : 4;
-    while (minRows > newCap) newCap *= 2;
-    arr->rows = safeRealloc(arr->rows, (uint32_t) newCap * sizeof(GMLArrayRow));
-    for (int32_t i = arr->rowCapacity; newCap > i; i++) {
-        arr->rows[i] = (GMLArrayRow){ .length = 0, .capacity = 0, .data = nullptr };
-    }
-    arr->rowCapacity = newCap;
-}
-
-static void growRow(GMLArrayRow* row, int32_t minLength) {
-    if (row->length >= minLength) return;
-    if (minLength > row->capacity) {
-        int32_t newCap = row->capacity > 0 ? row->capacity : 4;
-        while (minLength > newCap) newCap *= 2;
-        row->data = safeRealloc(row->data, (uint32_t) newCap * sizeof(RValue));
-        row->capacity = newCap;
-    }
-    for (int32_t i = row->length; minLength > i; i++) {
-        row->data[i] = (RValue){ .type = RVALUE_UNDEFINED };
-    }
-    row->length = minLength;
-}
 
 GMLArray* GMLArray_create(int32_t initialLength) {
     GMLArray* arr = safeCalloc(1, sizeof(GMLArray));
     arr->refCount = 1;
+    arr->length = initialLength;
+    arr->capacity = initialLength > 0 ? initialLength : 0;
     arr->owner = nullptr;
     if (initialLength > 0) {
-        ensureRowCapacity(arr, 1);
-        growRow(&arr->rows[0], initialLength);
-        arr->rowCount = 1;
+        arr->data = safeCalloc((uint32_t) initialLength, sizeof(RValue));
+        repeat(initialLength, i) {
+            arr->data[i] = (RValue){ .type = RVALUE_UNDEFINED };
+        }
+    } else {
+        arr->data = nullptr;
     }
     return arr;
 }
@@ -53,14 +32,10 @@ void GMLArray_decRef(GMLArray* arr) {
     arr->refCount--;
     if (arr->refCount > 0) return;
 
-    repeat(arr->rowCount, r) {
-        GMLArrayRow* row = &arr->rows[r];
-        repeat(row->length, c) {
-            RValue_free(&row->data[c]);
-        }
-        free(row->data);
+    repeat(arr->length, i) {
+        RValue_free(&arr->data[i]);
     }
-    free(arr->rows);
+    free(arr->data);
     free(arr);
 }
 
@@ -68,48 +43,51 @@ GMLArray* GMLArray_clone(GMLArray* src, void* newOwner) {
     if (src == nullptr) return nullptr;
     GMLArray* dst = safeCalloc(1, sizeof(GMLArray));
     dst->refCount = 1;
+    dst->length = src->length;
+    dst->capacity = src->length;
     dst->owner = newOwner;
-    if (src->rowCount > 0) {
-        ensureRowCapacity(dst, src->rowCount);
-        dst->rowCount = src->rowCount;
-        repeat(src->rowCount, r) {
-            GMLArrayRow* srcRow = &src->rows[r];
-            GMLArrayRow* dstRow = &dst->rows[r];
-            if (srcRow->length == 0) continue;
-            growRow(dstRow, srcRow->length);
-            repeat(srcRow->length, c) {
-                RValue srcVal = srcRow->data[c];
-                // Duplicate owned strings: for nested arrays, share the inner array (bump refCount).
-                // Inner arrays get their own CoW check on first write through the new outer slot.
-                if (srcVal.type == RVALUE_STRING && srcVal.ownsString && srcVal.string != nullptr) {
-                    dstRow->data[c] = RValue_makeOwnedString(safeStrdup(srcVal.string));
-                } else if (srcVal.type == RVALUE_ARRAY && srcVal.array != nullptr) {
-                    GMLArray_incRef(srcVal.array);
-                    dstRow->data[c] = srcVal;
-                    dstRow->data[c].ownsString = true;
+    if (src->length > 0) {
+        dst->data = safeCalloc((uint32_t) src->length, sizeof(RValue));
+        repeat(src->length, i) {
+            RValue srcVal = src->data[i];
+            // Duplicate owned strings: for nested arrays, share the inner array (bump refCount).
+            // Inner arrays get their own CoW check on first write through the new outer slot.
+            if (srcVal.type == RVALUE_STRING && srcVal.ownsString && srcVal.string != nullptr) {
+                dst->data[i] = RValue_makeOwnedString(safeStrdup(srcVal.string));
+            } else if (srcVal.type == RVALUE_ARRAY && srcVal.array != nullptr) {
+                GMLArray_incRef(srcVal.array);
+                dst->data[i] = srcVal;
+                dst->data[i].ownsString = true;
 #if IS_BC17_OR_HIGHER_ENABLED
-                } else if (srcVal.type == RVALUE_METHOD && srcVal.method != nullptr) {
-                    GMLMethod_incRef(srcVal.method);
-                    dstRow->data[c] = srcVal;
-                    dstRow->data[c].ownsString = true;
+            } else if (srcVal.type == RVALUE_METHOD && srcVal.method != nullptr) {
+                GMLMethod_incRef(srcVal.method);
+                dst->data[i] = srcVal;
+                dst->data[i].ownsString = true;
 #endif
-                } else {
-                    dstRow->data[c] = srcVal;
-                    dstRow->data[c].ownsString = false;
-                }
+            } else {
+                dst->data[i] = srcVal;
+                dst->data[i].ownsString = false;
             }
         }
+    } else {
+        dst->data = nullptr;
     }
     return dst;
 }
 
 void GMLArray_growTo(GMLArray* arr, int32_t minLength) {
-    if (arr == nullptr || minLength <= 0) return;
-    int32_t idx = minLength - 1;
-    int32_t row = idx / GML_ARRAY_STRIDE;
-    int32_t col = idx % GML_ARRAY_STRIDE;
-    ensureRowCapacity(arr, row + 1);
-    if (row + 1 > arr->rowCount) arr->rowCount = row + 1;
-    growRow(&arr->rows[row], col + 1);
-}
+    if (arr == nullptr) return;
+    if (arr->length >= minLength) return;
 
+    if (minLength > arr->capacity) {
+        int32_t newCapacity = arr->capacity > 0 ? arr->capacity : 4;
+        while (minLength > newCapacity) newCapacity *= 2;
+        arr->data = safeRealloc(arr->data, (uint32_t) newCapacity * sizeof(RValue));
+        arr->capacity = newCapacity;
+    }
+    // Fill new slots with undefined
+    for (int32_t i = arr->length; minLength > i; i++) {
+        arr->data[i] = (RValue){ .type = RVALUE_UNDEFINED };
+    }
+    arr->length = minLength;
+}

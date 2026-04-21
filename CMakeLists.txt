@@ -1,4 +1,18 @@
 cmake_minimum_required(VERSION 3.21)
+# Setup Nintendo Homebrew toolchains via devkitPro
+if(PLATFORM STREQUAL "3ds" OR PLATFORM STREQUAL "wiiu")
+    if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+        if(NOT DEFINED ENV{DEVKITPRO})
+            message(FATAL_ERROR "Please define DEVKITPRO environment variable to point to your SDK path!")
+        endif()
+
+        if(PLATFORM STREQUAL "3ds")
+            set(CMAKE_TOOLCHAIN_FILE "$ENV{DEVKITPRO}/cmake/3DS.cmake" CACHE PATH "toolchain file")
+        elseif(PLATFORM STREQUAL "wiiu")
+            set(CMAKE_TOOLCHAIN_FILE "$ENV{DEVKITPRO}/cmake/WiiU.cmake" CACHE PATH "toolchain file")
+        endif()
+    endif()
+endif()
 project(butterscotch C)
 
 set(CMAKE_C_STANDARD 99)
@@ -66,20 +80,20 @@ if(PLATFORM STREQUAL "glfw")
         # Target Windows 7+ (avoids referencing newer APIs like MapViewOfFileNuma2 that MinGW import libs don't provide)
         # https://github.com/mirror/mingw-w64/blob/master/mingw-w64-headers/include/sdkddkver.h
         target_compile_definitions(butterscotch PRIVATE _WIN32_WINNT=0x0601 NTDDI_VERSION=0x06010000 WIN32_LEAN_AND_MEAN)
-        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m opengl32 gdi32 winmm bz2)
+        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m opengl32 gdi32 winmm)
         target_link_options(butterscotch PRIVATE -static)
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
         find_package(PkgConfig REQUIRED)
         pkg_check_modules(GLFW3 REQUIRED glfw3)
         target_include_directories(butterscotch PRIVATE ${GLFW3_INCLUDE_DIRS})
         target_link_directories(butterscotch PRIVATE ${GLFW3_LIBRARY_DIRS})
-        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m pthread bz2)
+        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m pthread)
     else()
         find_package(PkgConfig REQUIRED)
         pkg_check_modules(GLFW3 REQUIRED glfw3)
         target_include_directories(butterscotch PRIVATE ${GLFW3_INCLUDE_DIRS})
         target_link_directories(butterscotch PRIVATE ${GLFW3_LIBRARY_DIRS})
-        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m pthread dl bz2)
+        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m pthread dl)
     endif()
 
     # Enable AddressSanitizer by default in Debug builds
@@ -239,39 +253,55 @@ elseif(PLATFORM STREQUAL "ps2")
                 ${CMAKE_SOURCE_DIR}/ps2dev-headers/gcc-include
         )
     endif()
-elseif(PLATFORM STREQUAL "sdl2")
-    # stb_image, stb_vorbis, miniaudio
+elseif(PLATFORM STREQUAL "3ds")
+    # Nintendo 3DS target via devkitARM + libctru + citro3d + NovaGL (GLES1.1 translation layer).
+    # Recommended to configure with:
+    #   cmake -DPLATFORM=3ds -DCMAKE_TOOLCHAIN_FILE=$ENV{DEVKITPRO}/cmake/3DS.cmake ...
+    # and to have NOVAGL_DIR pointing to the NovaGL source tree (defaults to ../NovaGL).
+
+    # The 3DS EE has double-precision FPU, but float is still ~2x faster — games generally
+    # work fine with float reals and the memory savings on GMReal fit the 3DS' 128MB RAM.
+    add_compile_definitions(USE_FLOAT_REALS)
+    add_compile_definitions(NO_RVALUE_INT64)
+    add_compile_definitions(DISABLE_VM_TRACING)
+    add_compile_definitions(PLATFORM_3DS)
+
+    # stb_image + stb_ds headers
     target_include_directories(butterscotch PUBLIC vendor/stb/image)
-    target_include_directories(butterscotch PUBLIC vendor/stb/vorbis)
-    target_include_directories(butterscotch PUBLIC vendor/miniaudio)
 
-    if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID MATCHES "Clang")
-        target_link_options(butterscotch PRIVATE -static -static-libgcc)
+    #target_include_directories($ENV{DEVKITPRO}/portlibs/3ds/include)
+
+    file(GLOB NOVAGL_SOURCES ${NOVAGL_DIR}/src/*.c)
+    target_sources(butterscotch PRIVATE ${NOVAGL_SOURCES})
+    target_include_directories(butterscotch PRIVATE ${NOVAGL_DIR}/include ${NOVAGL_DIR}/src)
+
+    if(DEFINED ENV{DEVKITPRO})
+        target_include_directories(butterscotch PRIVATE
+            $ENV{DEVKITPRO}/libctru/include
+            $ENV{DEVKITPRO}/portlibs/3ds/include)
+        target_link_directories(butterscotch PRIVATE
+            $ENV{DEVKITPRO}/libctru/lib
+            $ENV{DEVKITPRO}/portlibs/3ds/lib)
     endif()
 
-    find_package(SDL2 REQUIRED)
+    # libctru defines __3DS__ via toolchain; we don't need to add it manually.
+    target_link_libraries(butterscotch NovaGL citro3d ctru m)
 
-    if(TARGET SDL2::SDL2-static)
-        target_link_libraries(butterscotch PRIVATE SDL2::SDL2-static)
-    else()
-        target_link_libraries(butterscotch PRIVATE SDL2::SDL2main SDL2::SDL2)
-    endif()
+    # Aggressive optimization for the VM interpreter hot path (big rooms, battles).
+    # -ffunction-sections/-fdata-sections + --gc-sections strips dead code, shrinking
+    # the 3dsx and reducing ITCM pressure. -ffast-math is safe for game math (no NaN
+    # handling needed). -fomit-frame-pointer frees r11 as a general-purpose register
+    # on ARM — meaningful on the 3DS' register-starved A9.
+    target_compile_options(butterscotch PRIVATE
+        -O3
+        -ffast-math
+        -funroll-loops
+        -fomit-frame-pointer
+        -ffunction-sections
+        -fdata-sections)
+    target_link_options(butterscotch PRIVATE -Wl,--gc-sections)
 
-    if(WIN32)
-        target_link_libraries(butterscotch PRIVATE
-                mingw32 user32 gdi32 winmm imm32 ole32 oleaut32
-                version uuid advapi32 setupapi shell32 dinput8
-        )
-    endif()
-
-    target_link_libraries(butterscotch PRIVATE m pthread)
-
-    # Enable AddressSanitizer optionally
-    set(ENABLE_ASAN OFF CACHE BOOL "Enable AddressSanitizer")
-    if(ENABLE_ASAN)
-        target_compile_options(butterscotch PRIVATE -fsanitize=address -fno-omit-frame-pointer)
-        target_link_options(butterscotch PRIVATE -fsanitize=address)
-    endif()
+    ctr_create_3dsx(butterscotch)
 else()
     message(FATAL_ERROR "Unknown platform! ${PLATFORM}")
 endif()

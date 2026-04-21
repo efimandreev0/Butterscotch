@@ -110,8 +110,8 @@ static void executeCode(Runner* runner, Instance* instance, int32_t codeId) {
     const char* savedCodeName = vm->currentCodeName;
     RValue* savedLocalVars = vm->localVars;
     uint32_t savedLocalVarCount = vm->localVarCount;
+    CodeLocals* savedCodeLocals = vm->currentCodeLocals;
     LocalSlotEntry* savedCodeLocalsSlotMap = vm->currentCodeLocalsSlotMap;
-    int32_t savedCodeIndex = vm->currentCodeIndex;
     int32_t savedStackTop = vm->stack.top;
 
     // Save stack values (VM_executeCode resets stack.top to 0, which would let
@@ -139,8 +139,8 @@ static void executeCode(Runner* runner, Instance* instance, int32_t codeId) {
     vm->currentCodeName = savedCodeName;
     vm->localVars = savedLocalVars;
     vm->localVarCount = savedLocalVarCount;
+    vm->currentCodeLocals = savedCodeLocals;
     vm->currentCodeLocalsSlotMap = savedCodeLocalsSlotMap;
-    vm->currentCodeIndex = savedCodeIndex;
     vm->stack.top = savedStackTop;
 
     // Restore stack values
@@ -249,24 +249,62 @@ void Runner_executeEvent(Runner* runner, Instance* instance, int32_t eventType, 
     Runner_executeEventFromObject(runner, instance, instance->objectIndex, eventType, eventSubtype);
 }
 
+// Pair used for stable sorting: holds the instance pointer and its original array position.
+typedef struct {
+    Instance* inst;
+    int32_t originalIndex;
+} IndexedInstance;
+
+// Comparator for per-object-type event dispatch (ascending objectIndex).
+static int compareInstanceByObjectIndex(const void* a, const void* b) {
+    const IndexedInstance* ia = (const IndexedInstance*) a;
+    const IndexedInstance* ib = (const IndexedInstance*) b;
+    // Primary: group by objectIndex ascending (lower object index executes first)
+    if (ia->inst->objectIndex < ib->inst->objectIndex) return -1;
+    if (ib->inst->objectIndex < ia->inst->objectIndex) return 1;
+    // Secondary: preserve creation order within the same object type
+    if (ia->originalIndex < ib->originalIndex) return -1;
+    if (ib->originalIndex < ia->originalIndex) return 1;
+    return 0;
+}
+
 void Runner_executeEventForAll(Runner* runner, int32_t eventType, int32_t eventSubtype) {
-    // Matches the native GMS 1.4/2.x runner's Perform_Event_All: walk the room's active instance linked list in forward insertion order (oldest first), skipping destroyed instances.
-    //
-    // Ordering note: a room's own instances are loaded first at initRoom time, then persistent instances carried over from the previous room are appended at the end. That is what the
+    // Dispatch events per-object-type, matching the native GMS 1.4 and 2.0 runners
+    // The native runners iterate a prebuilt array of object indices (objects that have handlers for this event),
+    // then for each object type iterate all its instances. We approximate this by sorting all active instances by
+    // objectIndex (ascending), preserving creation order as the tiebreaker within the same object type
     int32_t count = (int32_t) arrlen(runner->instances);
-    // Snapshot the iteration list: events may create new instances (appended to runner->instances) and we do NOT want those to fire in this phase, matching GM semantics where only pre-existing instances run the current event phase.
-    Instance** snapshot = nullptr;
-    arrsetcap(snapshot, count);
+    IndexedInstance* sorted = nullptr;
     repeat(count, i) {
-        arrput(snapshot, runner->instances[i]);
-    }
-    repeat(count, i) {
-        Instance* inst = snapshot[i];
+        Instance* inst = runner->instances[i];
         if (inst->active) {
-            Runner_executeEvent(runner, inst, eventType, eventSubtype);
+            IndexedInstance ii = { .inst = inst, .originalIndex = i };
+            arrput(sorted, ii);
         }
     }
-    arrfree(snapshot);
+    int32_t sortedCount = (int32_t) arrlen(sorted);
+    if (sortedCount > 1) {
+        qsort(sorted, sortedCount, sizeof(IndexedInstance), compareInstanceByObjectIndex);
+    }
+    repeat(sortedCount, i) {
+        if (sorted[i].inst->active) {
+#ifdef __3DS__
+            // Very loud on 3DS specifically for OTHER_ROOM_START so we can tell
+            // which instance the VM dies on in undertale's battle room.
+            if (eventType == EVENT_OTHER && eventSubtype == OTHER_ROOM_START) {
+                Instance* inst = sorted[i].inst;
+                const char* objName = "<unknown>";
+                if (inst->objectIndex >= 0 && runner->dataWin->objt.count > (uint32_t) inst->objectIndex) {
+                    objName = runner->dataWin->objt.objects[inst->objectIndex].name;
+                }
+                fprintf(stderr, "  ROOM_START -> inst#%d obj=%s (idx=%d)\n",
+                        inst->instanceId, objName, inst->objectIndex);
+            }
+#endif
+            Runner_executeEvent(runner, sorted[i].inst, eventType, eventSubtype);
+        }
+    }
+    arrfree(sorted);
 }
 
 // ===[ Background Scrolling & Drawing ]===
@@ -438,7 +476,7 @@ void Runner_draw(Runner* runner) {
     // Draw non-foreground backgrounds (behind everything)
     if (!DataWin_isVersionAtLeast(runner->dataWin, 2, 0, 0, 0))
         Runner_drawBackgrounds(runner, false);
-
+ 
     // Fire draw subtypes in correct GameMaker order
     fireDrawSubtype(runner, drawList, drawCount, DRAW_PRE);
     fireDrawSubtype(runner, drawList, drawCount, DRAW_BEGIN);
@@ -525,6 +563,22 @@ void Runner_draw(Runner* runner) {
         } else if (d->type == DRAWABLE_INSTANCE) {
             Instance* inst = d->instance;
             int32_t codeId = findEventCodeIdAndOwner(runner->dataWin, inst->objectIndex, EVENT_DRAW, DRAW_NORMAL, nullptr);
+#ifdef __3DS__
+            // Per-frame one-shot diagnostic: print the first few DRAWABLE_INSTANCE dispatches
+            // so we can see whether instances are reaching the draw pipeline at all on 3DS.
+            static int s_instDebugFrame = -1;
+            static int s_instDebugCount = 0;
+            static int s_frameCounter = 0;
+            if (i == 0) { s_frameCounter++; if (s_frameCounter % 60 == 0) { s_instDebugFrame = s_frameCounter; s_instDebugCount = 0; } }
+            if (s_instDebugFrame == s_frameCounter && s_instDebugCount < 6) {
+                const char* objName = (inst->objectIndex >= 0 && runner->dataWin->objt.count > (uint32_t) inst->objectIndex)
+                                      ? runner->dataWin->objt.objects[inst->objectIndex].name : "<null>";
+                fprintf(stderr, "  DRAWABLE_INSTANCE[%d]: obj=%s spriteIndex=%d pos=(%.1f,%.1f) depth=%d visible=%d codeId=%d alpha=%.2f\n",
+                        s_instDebugCount, objName, inst->spriteIndex, (float)inst->x, (float)inst->y, inst->depth,
+                        (int)inst->visible, codeId, (float)inst->imageAlpha);
+                s_instDebugCount++;
+            }
+#endif
             if (codeId >= 0) {
                 Runner_executeEvent(runner, inst, EVENT_DRAW, DRAW_NORMAL);
             } else if (runner->renderer != nullptr) {
@@ -733,53 +787,6 @@ static Instance* createAndInitInstance(Runner* runner, int32_t instanceId, int32
 
 // ===[ Room Management ]===
 
-// Collect persistent instances from the previous room (they travel with the player), and free the rest.
-// You should re-append them at the tail AFTER creating the new room's own instances, so the iteration order matches the native runner: room-local instances first, persistent arrivals last.
-static Instance** takePersistentInstances(Runner* runner) {
-    Instance** carriedPersistent = nullptr;
-    int32_t oldCount = (int32_t) arrlen(runner->instances);
-    repeat(oldCount, i) {
-        Instance* inst = runner->instances[i];
-        if (inst->persistent) {
-            arrput(carriedPersistent, inst);
-        } else {
-            hmdel(runner->instancesToId, inst->instanceId);
-            Instance_free(inst);
-        }
-    }
-
-    arrfree(runner->instances);
-    runner->instances = nullptr;
-
-    return carriedPersistent;
-}
-
-// Append the carried-over persistent instances at the tail of runner->instances and free the temporary array. Pairs with takePersistentInstances.
-static void returnPersistentInstances(Runner* runner, Instance** carriedPersistent) {
-    repeat(arrlen(carriedPersistent), i) {
-        arrput(runner->instances, carriedPersistent[i]);
-    }
-    arrfree(carriedPersistent);
-}
-
-static void copyRoomViewToRuntimeView(RoomView* roomView, RuntimeView* runtimeView) {
-    runtimeView->enabled = roomView->enabled;
-    runtimeView->viewX = roomView->viewX;
-    runtimeView->viewY = roomView->viewY;
-    runtimeView->viewWidth = roomView->viewWidth;
-    runtimeView->viewHeight = roomView->viewHeight;
-    runtimeView->portX = roomView->portX;
-    runtimeView->portY = roomView->portY;
-    runtimeView->portWidth = roomView->portWidth;
-    runtimeView->portHeight = roomView->portHeight;
-    runtimeView->borderX = roomView->borderX;
-    runtimeView->borderY = roomView->borderY;
-    runtimeView->speedX = roomView->speedX;
-    runtimeView->speedY = roomView->speedY;
-    runtimeView->objectId = roomView->objectId;
-    runtimeView->viewAngle = 0;
-}
-
 static void initRoom(Runner* runner, int32_t roomIndex) {
     DataWin* dataWin = runner->dataWin;
     require(roomIndex >= 0 && dataWin->room.count > (uint32_t) roomIndex);
@@ -807,8 +814,6 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
 
     // If this is a persistent room that was previously visited, restore saved state
     if (room->persistent && savedState->initialized) {
-        memcpy(runner->views, savedState->views, sizeof(runner->views));
-
         // Restore backgrounds from saved state
         memcpy(runner->backgrounds, savedState->backgrounds, sizeof(runner->backgrounds));
         runner->backgroundColor = savedState->backgroundColor;
@@ -824,10 +829,24 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         runner->runtimeLayers = savedState->runtimeLayers;
         savedState->runtimeLayers = nullptr;
 
-        Instance** carriedPersistent = takePersistentInstances(runner);
+        // Keep only persistent instances (which travel between rooms), free non-persistent
+        // ones from the previous room. When the old room was also persistent, Runner_step
+        // already separated them; when it was NOT persistent, they're still here.
+        Instance** keptInstances = nullptr;
+        int32_t oldCount = (int32_t) arrlen(runner->instances);
+        repeat(oldCount, i) {
+            Instance* inst = runner->instances[i];
+            if (inst->persistent) {
+                arrput(keptInstances, inst);
+            } else {
+                hmdel(runner->instancesToId, inst->instanceId);
+                Instance_free(inst);
+            }
+        }
+        arrfree(runner->instances);
+        runner->instances = keptInstances;
 
-        // The native runner restores the room's own linked list first, then appends persistent arrivals at the tail.
-        // Event iteration is forward (oldest first), so a persistent instance runs after the room's own instances.
+        // Add back the saved room instances
         int32_t savedCount = (int32_t) arrlen(savedState->instances);
         repeat(savedCount, i) {
             arrput(runner->instances, savedState->instances[i]);
@@ -835,19 +854,12 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         arrfree(savedState->instances);
         savedState->instances = nullptr;
 
-        returnPersistentInstances(runner, carriedPersistent);
-
         // No Create events, no preCreateCode, no creationCode, no room creation code
         fprintf(stderr, "Runner: Room restored (persistent): %s (room %d) with %d instances\n", room->name, roomIndex, (int) arrlen(runner->instances));
         return;
     }
 
     // === Normal room initialization (first visit, or non-persistent room) ===
-
-    // Initialize the views from scratch
-    repeat(MAX_VIEWS, vi) {
-        copyRoomViewToRuntimeView(&room->views[vi], &runner->views[vi]);
-    }
 
     // Reset tile layer state for the new room
     hmfree(runner->tileLayerMap);
@@ -925,7 +937,20 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         dst->alpha = 1.0f;
     }
 
-    Instance** carriedPersistent = takePersistentInstances(runner);
+    // Handle persistent instances: keep persistent ones, free non-persistent
+    Instance** keptInstances = nullptr;
+    int32_t oldCount = (int32_t) arrlen(runner->instances);
+    repeat(oldCount, i) {
+        Instance* inst = runner->instances[i];
+        if (inst->persistent) {
+            arrput(keptInstances, inst);
+        } else {
+            hmdel(runner->instancesToId, inst->instanceId);
+            Instance_free(inst);
+        }
+    }
+    arrfree(runner->instances);
+    runner->instances = keptInstances;
 
     // Two-pass instance creation (matches HTML5 runner behavior):
     // Pass 1: Create all instance objects so they exist for cross-references
@@ -937,8 +962,15 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     repeat(room->gameObjectCount, i) {
         RoomGameObject* roomObj = &room->gameObjects[i];
 
-        // Skip if a persistent instance carried over from the previous room already owns this ID (re-entering the persistent instance's home room, don't create a duplicate!).
-        if (hmget(runner->instancesToId, roomObj->instanceID) != nullptr) continue;
+        // Check if a persistent instance with this ID already exists
+        bool alreadyExists = false;
+        repeat(arrlen(runner->instances), j) {
+            if (runner->instances[j]->instanceId == roomObj->instanceID) {
+                alreadyExists = true;
+                break;
+            }
+        }
+        if (alreadyExists) continue;
         if (isObjectDisabled(runner, roomObj->objectDefinition)) continue;
 
         Instance* inst = createAndInitInstance(runner, roomObj->instanceID, roomObj->objectDefinition, (GMLReal) roomObj->x, (GMLReal) roomObj->y);
@@ -969,11 +1001,17 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     repeat(room->gameObjectCount, i) {
         RoomGameObject* roomObj = &room->gameObjects[i];
 
-        Instance* inst = hmget(runner->instancesToId, roomObj->instanceID);
+        // Find the instance we created (skip persistent ones that were kept)
+        Instance* inst = nullptr;
+        repeat(arrlen(runner->instances), j) {
+            if (runner->instances[j]->instanceId == roomObj->instanceID) {
+                inst = runner->instances[j];
+                break;
+            }
+        }
         if (inst == nullptr) continue;
 
-        // Skip instances that already had their Create event fired (persistent carry-overs
-        // that hmget also matches, since instancesToId still holds them).
+        // Skip instances that already had their Create event fired (persistent carry-overs)
         if (inst->createEventFired) continue;
         inst->createEventFired = true;
 
@@ -989,9 +1027,6 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         RValue result = VM_executeCode(runner->vmContext, room->creationCodeId);
         RValue_free(&result);
     }
-
-    // Append persistent instances carried over from the previous room at the tail, so forward event iteration processes the new room's own instances first and the travelers last.
-    returnPersistentInstances(runner, carriedPersistent);
 
     // Mark this room as initialized for persistent room support
     savedState->initialized = true;
@@ -1025,14 +1060,6 @@ static void cleanupState(Runner* runner) {
         free(runner->savedRoomStates);
     }
     runner->savedRoomStates = nullptr;
-
-    // Free struct instances (created via @@NewGMLObject@@)
-    repeat(arrlen(runner->structInstances), i) {
-        hmdel(runner->instancesToId, runner->structInstances[i]->instanceId);
-        Instance_free(runner->structInstances[i]);
-    }
-    arrfree(runner->structInstances);
-    runner->structInstances = nullptr;
 
     hmfree(runner->instancesToId);
     runner->instancesToId = nullptr;
@@ -1215,7 +1242,7 @@ RuntimeLayerElement* Runner_findLayerElementById(Runner* runner, int32_t element
             if ((int32_t) runtimeLayer->elements[j].id == elementId) {
                 if (outLayer != nullptr)
                     *outLayer = runtimeLayer;
-
+                
                 return &runtimeLayer->elements[j];
             }
         }
@@ -1271,6 +1298,12 @@ void Runner_initFirstRoom(Runner* runner) {
 
     // Fire Room Start for all instances
     Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ROOM_START);
+
+#ifdef __3DS__
+    if (runner->renderer != nullptr && runner->renderer->vtable->onRoomChanged != nullptr) {
+        runner->renderer->vtable->onRoomChanged(runner->renderer, firstRoomIndex);
+    }
+#endif
 }
 
 // ===[ Collision Event Dispatch ]===
@@ -1411,24 +1444,33 @@ static void updateViews(Runner* runner) {
     Room* room = runner->currentRoom;
     if (!(room->flags & 1)) return;
 
-    repeat(MAX_VIEWS, vi) {
-        RuntimeView* view = &runner->views[vi];
-        if (!view->enabled || 0 > view->objectId) continue;
+    repeat(8, vi) {
+        RoomView* view = &room->views[vi];
+        if (!view->enabled) continue;
 
-        // Find first active instance of the target object
-        Instance* target = nullptr;
-        int32_t count = (int32_t) arrlen(runner->instances);
-        repeat(count, i) {
-            Instance* inst = runner->instances[i];
-            if (inst->active && VM_isObjectOrDescendant(runner->dataWin, inst->objectIndex, view->objectId)) { target = inst; break; };
+        if (view->objectId >= 0) {
+            // Find first active instance of the target object
+            Instance* target = nullptr;
+            int32_t count = (int32_t) arrlen(runner->instances);
+            repeat(count, i) {
+                Instance* inst = runner->instances[i];
+                if (inst->active && VM_isObjectOrDescendant(runner->dataWin, inst->objectIndex, view->objectId)) { target = inst; break; };
+            }
+
+            if (target != nullptr) {
+                int32_t ix = (int32_t) GMLReal_floor(target->x);
+                int32_t iy = (int32_t) GMLReal_floor(target->y);
+                view->viewX = followAxis(view->viewX, view->viewWidth, ix, view->borderX, view->speedX, (int32_t) room->width);
+                view->viewY = followAxis(view->viewY, view->viewHeight, iy, view->borderY, view->speedY, (int32_t) room->height);
+                continue;
+            }
         }
 
-        if (target != nullptr) {
-            int32_t ix = (int32_t) GMLReal_floor(target->x);
-            int32_t iy = (int32_t) GMLReal_floor(target->y);
-            view->viewX = followAxis(view->viewX, view->viewWidth, ix, view->borderX, view->speedX, (int32_t) room->width);
-            view->viewY = followAxis(view->viewY, view->viewHeight, iy, view->borderY, view->speedY, (int32_t) room->height);
-        }
+        // Always clamp to room bounds
+        if (view->viewX + view->viewWidth > (int32_t) room->width) view->viewX = (int32_t) room->width - view->viewWidth;
+        if (view->viewY + view->viewHeight > (int32_t) room->height) view->viewY = (int32_t) room->height - view->viewHeight;
+        if (0 > view->viewX) view->viewX = 0;
+        if (0 > view->viewY) view->viewY = 0;
     }
 }
 
@@ -1580,55 +1622,6 @@ static bool adaptPath(Runner* runner, Instance* inst) {
     return atPathEnd;
 }
 
-static void persistRoomState(Runner* runner, int32_t roomIndex) {
-    SavedRoomState* state = &runner->savedRoomStates[roomIndex];
-
-    // Free any previously saved instances (from an earlier visit)
-    int32_t prevSavedCount = (int32_t) arrlen(state->instances);
-    repeat(prevSavedCount, i) {
-        hmdel(runner->instancesToId, state->instances[i]->instanceId);
-        Instance_free(state->instances[i]);
-    }
-    arrfree(state->instances);
-    state->instances = nullptr;
-    hmfree(state->tileLayerMap);
-    state->tileLayerMap = nullptr;
-    freeRuntimeLayersArray(&state->runtimeLayers);
-
-    // Separate persistent instances (travel with player) from room instances (saved)
-    Instance** keptInstances = nullptr;
-    int32_t count = (int32_t) arrlen(runner->instances);
-    repeat(count, i) {
-        Instance* inst = runner->instances[i];
-        if (inst->persistent) {
-            arrput(keptInstances, inst);
-        } else if (inst->active) {
-            arrput(state->instances, inst);
-        } else {
-            hmdel(runner->instancesToId, inst->instanceId);
-            Instance_free(inst);
-        }
-    }
-    arrfree(runner->instances);
-    runner->instances = keptInstances;
-
-    // Save room visual state
-    memcpy(state->backgrounds, runner->backgrounds, sizeof(runner->backgrounds));
-    memcpy(state->views, runner->views, sizeof(runner->views));
-    state->backgroundColor = runner->backgroundColor;
-    state->drawBackgroundColor = runner->drawBackgroundColor;
-
-    // Transfer tile layer map ownership to saved state
-    state->tileLayerMap = runner->tileLayerMap;
-    runner->tileLayerMap = nullptr;
-
-    // Transfer runtime layer ownership to saved state
-    state->runtimeLayers = runner->runtimeLayers;
-    runner->runtimeLayers = nullptr;
-
-    state->initialized = true;
-}
-
 void Runner_step(Runner* runner) {
     // Save xprevious/yprevious and path_positionprevious for all active instances
     int32_t prevCount = (int32_t) arrlen(runner->instances);
@@ -1775,7 +1768,7 @@ void Runner_step(Runner* runner) {
     // Execute End Step for all instances
     Runner_executeEventForAll(runner, EVENT_STEP, STEP_END);
 
-    // Update view following
+    // Update view following and clamping
     updateViews(runner);
 
     // Handle game restart
@@ -1809,7 +1802,51 @@ void Runner_step(Runner* runner) {
 
         // If the old room is persistent, save its instance and visual state
         if (oldRoom->persistent) {
-            persistRoomState(runner, oldRoomIndex);
+            SavedRoomState* state = &runner->savedRoomStates[oldRoomIndex];
+
+            // Free any previously saved instances (from an earlier visit)
+            int32_t prevSavedCount = (int32_t) arrlen(state->instances);
+            repeat(prevSavedCount, i) {
+                hmdel(runner->instancesToId, state->instances[i]->instanceId);
+                Instance_free(state->instances[i]);
+            }
+            arrfree(state->instances);
+            state->instances = nullptr;
+            hmfree(state->tileLayerMap);
+            state->tileLayerMap = nullptr;
+            freeRuntimeLayersArray(&state->runtimeLayers);
+
+            // Separate persistent instances (travel with player) from room instances (saved)
+            Instance** keptInstances = nullptr;
+            int32_t count = (int32_t) arrlen(runner->instances);
+            repeat(count, i) {
+                Instance* inst = runner->instances[i];
+                if (inst->persistent) {
+                    arrput(keptInstances, inst);
+                } else if (inst->active) {
+                    arrput(state->instances, inst);
+                } else {
+                    hmdel(runner->instancesToId, inst->instanceId);
+                    Instance_free(inst);
+                }
+            }
+            arrfree(runner->instances);
+            runner->instances = keptInstances;
+
+            // Save room visual state
+            memcpy(state->backgrounds, runner->backgrounds, sizeof(runner->backgrounds));
+            state->backgroundColor = runner->backgroundColor;
+            state->drawBackgroundColor = runner->drawBackgroundColor;
+
+            // Transfer tile layer map ownership to saved state
+            state->tileLayerMap = runner->tileLayerMap;
+            runner->tileLayerMap = nullptr;
+
+            // Transfer runtime layer ownership to saved state
+            state->runtimeLayers = runner->runtimeLayers;
+            runner->runtimeLayers = nullptr;
+
+            state->initialized = true;
         }
 
         // Free the outgoing room's payload under lazyLoadRooms, unless it's eagerly pinned or we're restarting the same room (initRoom would just re-load it).
@@ -1820,8 +1857,20 @@ void Runner_step(Runner* runner) {
         // Load new room
         initRoom(runner, newRoomIndex);
 
+#ifdef __3DS__
+        fprintf(stderr, "Runner[3DS]: room %d, dispatching Room Start to %d instances\n",
+                newRoomIndex, (int) arrlen(runner->instances));
+#endif
+
         // Fire Room Start for all instances
         Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ROOM_START);
+
+#ifdef __3DS__
+        if (runner->renderer != nullptr && runner->renderer->vtable->onRoomChanged != nullptr) {
+            runner->renderer->vtable->onRoomChanged(runner->renderer, newRoomIndex);
+        }
+        fprintf(stderr, "Runner[3DS]: room %d, Room Start dispatch complete\n", newRoomIndex);
+#endif
     }
 
     Runner_cleanupDestroyedInstances(runner);
@@ -1898,10 +1947,10 @@ void Runner_dumpState(Runner* runner) {
 
             if (val.type == RVALUE_ARRAY && val.array != nullptr) {
                 if (!hasSelfArrays) { printf("  Self Arrays:\n"); hasSelfArrays = true; }
-                repeat(GMLArray_length1D(val.array), ai) {
-                    RValue* cell = GMLArray_slot(val.array, ai);
-                    if (cell == nullptr || cell->type == RVALUE_UNDEFINED) continue;
-                    char* innerStr = RValue_toStringFancy(*cell);
+                repeat(val.array->length, ai) {
+                    RValue inner = val.array->data[ai];
+                    if (inner.type == RVALUE_UNDEFINED) continue;
+                    char* innerStr = RValue_toStringFancy(inner);
                     printf("    %s[%d] = %s\n", varName, (int) ai, innerStr);
                     free(innerStr);
                 }
@@ -1935,10 +1984,10 @@ void Runner_dumpState(Runner* runner) {
         if ((uint32_t) var->varID >= vm->globalVarCount) continue;
         RValue val = vm->globalVars[var->varID];
         if (val.type != RVALUE_ARRAY || val.array == nullptr) continue;
-        repeat(GMLArray_length1D(val.array), ai) {
-            RValue* cell = GMLArray_slot(val.array, ai);
-            if (cell == nullptr || cell->type == RVALUE_UNDEFINED) continue;
-            char* innerStr = RValue_toStringFancy(*cell);
+        repeat(val.array->length, ai) {
+            RValue inner = val.array->data[ai];
+            if (inner.type == RVALUE_UNDEFINED) continue;
+            char* innerStr = RValue_toStringFancy(inner);
             printf("  %s[%d] = %s\n", var->name, (int) ai, innerStr);
             free(innerStr);
         }
@@ -1975,9 +2024,8 @@ static void writeRValueJson(JsonWriter* w, RValue val) {
             // Render arrays as a JSON array. Skips RVALUE_UNDEFINED entries (they read as 0/null anyway).
             JsonWriter_beginArray(w);
             if (val.array != nullptr) {
-                repeat(GMLArray_length1D(val.array), ai) {
-                    RValue* cell = GMLArray_slot(val.array, ai);
-                    writeRValueJson(w, cell != nullptr ? *cell : (RValue){ .type = RVALUE_UNDEFINED });
+                repeat(val.array->length, ai) {
+                    writeRValueJson(w, val.array->data[ai]);
                 }
             }
             JsonWriter_endArray(w);

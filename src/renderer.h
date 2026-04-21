@@ -34,6 +34,12 @@ typedef struct {
     void (*deleteSprite)(Renderer* renderer, int32_t spriteIndex);
     // Optional: platform-specific tile rendering (nullptr = use default drawSpritePart path)
     void (*drawTile)(Renderer* renderer, RoomTile* tile, float offsetX, float offsetY);
+#ifdef __3DS__
+    // Optional: the runner fires this after a room load completes. On 3DS this
+    // rebuilds per-room texture residency and frees atlases that aren't needed
+    // by the new room. nullptr on other platforms.
+    void (*onRoomChanged)(Renderer* renderer, int32_t roomIndex);
+#endif
 } RendererVtable;
 
 // ===[ Renderer Base Struct ]===
