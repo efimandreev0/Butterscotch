@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -62,6 +63,64 @@ static inline uint16_t TextUtils_decodeUtf8(const char* str, int32_t len, int32_
     return 0xFFFD;
 }
 
+static inline int32_t TextUtils_utf8AdvanceCodepoints(const char* str, int32_t byteLen, int32_t codepointsToSkip) {
+    int32_t pos = 0;
+    while (pos < byteLen && codepointsToSkip > 0) {
+        pos++;
+        while (pos < byteLen && ((uint8_t)str[pos] & 0xC0) == 0x80) {
+            pos++;
+        }
+        codepointsToSkip--;
+    }
+    return pos;
+}
+
+static inline int32_t TextUtils_utf8CodepointCount(const char* str, int32_t byteLen) {
+    int32_t count = 0;
+    for (int32_t i = 0; i < byteLen; i++) {
+        if (((uint8_t)str[i] & 0xC0) != 0x80) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static inline int32_t TextUtils_utf8EncodeCodepoint(uint32_t cp, char* out) {
+    if (cp <= 0x7FU) {
+        out[0] = (char) cp;
+        return 1;
+    }
+    if (cp <= 0x7FFU) {
+        out[0] = (char) (0xC0U | (cp >> 6));
+        out[1] = (char) (0x80U | (cp & 0x3FU));
+        return 2;
+    }
+    if (cp <= 0xFFFFU) {
+        out[0] = (char) (0xE0U | (cp >> 12));
+        out[1] = (char) (0x80U | ((cp >> 6) & 0x3FU));
+        out[2] = (char) (0x80U | (cp & 0x3FU));
+        return 3;
+    }
+    if (cp <= 0x10FFFFU) {
+        out[0] = (char) (0xF0U | (cp >> 18));
+        out[1] = (char) (0x80U | ((cp >> 12) & 0x3FU));
+        out[2] = (char) (0x80U | ((cp >> 6) & 0x3FU));
+        out[3] = (char) (0x80U | (cp & 0x3FU));
+        return 4;
+    }
+    return 0;
+}
+
+// Line stride used for multi-line text. Matches HTML5 runner behavior:
+// - When `linesep` is not provided to draw_text, it defaults to `font.TextHeight('M')`
+//   which is `max_glyph_height * scaleY`. We apply scaleY via the transform matrix already,
+//   so we return the raw max glyph height here.
+// - Falls back to emSize only if the font has no glyphs recorded.
+static inline float TextUtils_lineStride(Font* font) {
+    if (font->maxGlyphHeight > 0) return (float) font->maxGlyphHeight;
+    return font->emSize;
+}
+
 static inline float TextUtils_measureLineWidth(Font* font, const char* line, int32_t len) {
     float width = 0;
     int32_t pos = 0;
@@ -82,34 +141,62 @@ static inline float TextUtils_measureLineWidth(Font* font, const char* line, int
     return width;
 }
 
-// Preprocesses GML text: converts unescaped # to \n, and \# to literal #.
-// Returns a heap-allocated string that must be freed by the caller.
-static inline char* TextUtils_preprocessGmlText(const char* text) {
-    int32_t len = (int32_t) strlen(text);
-    char* result = safeMalloc(len + 1);
-    int32_t out = 0;
+// Result of GML text preprocessing. If owning is true, the caller must free the text pointer.
+typedef struct {
+    const char* text;
+    bool owning;
+} PreprocessedText;
 
-    repeat(len, i) {
+// Frees the text pointer if it is owning.
+static inline void PreprocessedText_free(PreprocessedText pt) {
+    if (pt.owning) free((char*) pt.text);
+}
+
+// Preprocesses GML text: converts unescaped # to \n, and \# to literal #.
+// Uses a fused single-pass approach: scans for # and only allocates if one is found.
+static inline PreprocessedText TextUtils_preprocessGmlText(const char* text) {
+    int32_t len = (int32_t) strlen(text);
+
+    // Scan until we find a #
+    for (int32_t i = 0; len > i; i++) {
         if (text[i] == '#') {
+            // Found one - allocate and process from here
+            char* result = safeMalloc(len + 1);
+            memcpy(result, text, i);
+            int32_t out = i;
+
+            // Check if the # is escaped (\#)
             if (out > 0 && result[out - 1] == '\\') {
-                // \# -> replace the already-written backslash with literal #
                 result[out - 1] = '#';
             } else {
                 result[out++] = '\n';
             }
-        } else {
-            result[out++] = text[i];
+
+            // Process the rest of the string
+            for (int32_t j = i + 1; len > j; j++) {
+                if (text[j] == '#') {
+                    if (out > 0 && result[out - 1] == '\\') {
+                        result[out - 1] = '#';
+                    } else {
+                        result[out++] = '\n';
+                    }
+                } else {
+                    result[out++] = text[j];
+                }
+            }
+            result[out] = '\0';
+            return (PreprocessedText){ .text = result, .owning = true };
         }
     }
-    result[out] = '\0';
-    return result;
+
+    // No # found, return original pointer without allocating
+    return (PreprocessedText){ .text = text, .owning = false };
 }
 
 // Preprocess GML text ONLY if the runner is not GameMaker: Studio 2
-// Returns a heap-allocated string that must be freed by the caller
-static inline char* TextUtils_preprocessGmlTextIfNeeded(Runner* runner, const char* text) {
-    if (runner->isGMS2)
-        return safeStrdup(text);
+static inline PreprocessedText TextUtils_preprocessGmlTextIfNeeded(Runner* runner, const char* text) {
+    if (DataWin_isVersionAtLeast(runner->dataWin, 2, 0, 0, 0))
+        return (PreprocessedText){ .text = text, .owning = false };
     return TextUtils_preprocessGmlText(text);
 }
 

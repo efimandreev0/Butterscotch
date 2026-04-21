@@ -73,6 +73,38 @@ static bool glfwDeleteFile(FileSystem* fs, const char* relativePath) {
     return result == 0;
 }
 
+static bool glfwReadFileBinary(FileSystem* fs, const char* relativePath, uint8_t** outData, int32_t* outSize) {
+    char* fullPath = buildFullPath((GlfwFileSystem*) fs, relativePath);
+    FILE* f = fopen(fullPath, "rb");
+    free(fullPath);
+    if (f == nullptr)
+        return false;
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    uint8_t* data = safeMalloc((size_t) size);
+    size_t bytesRead = fread(data, 1, (size_t) size, f);
+    fclose(f);
+
+    *outData = data;
+    *outSize = (int32_t) bytesRead;
+    return true;
+}
+
+static bool glfwWriteFileBinary(FileSystem* fs, const char* relativePath, const uint8_t* data, int32_t size) {
+    char* fullPath = buildFullPath((GlfwFileSystem*) fs, relativePath);
+    FILE* f = fopen(fullPath, "wb");
+    free(fullPath);
+    if (f == nullptr)
+        return false;
+
+    size_t written = fwrite(data, 1, (size_t) size, f);
+    fclose(f);
+    return written == (size_t) size;
+}
+
 // ===[ Vtable ]===
 
 static FileSystemVtable glfwFileSystemVtable = {
@@ -81,6 +113,8 @@ static FileSystemVtable glfwFileSystemVtable = {
     .readFileText = glfwReadFileText,
     .writeFileText = glfwWriteFileText,
     .deleteFile = glfwDeleteFile,
+    .readFileBinary = glfwReadFileBinary,
+    .writeFileBinary = glfwWriteFileBinary,
 };
 
 // ===[ Lifecycle ]===

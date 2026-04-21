@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(butterscotch C)
 
-set(CMAKE_C_STANDARD 23)
+set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 add_compile_options(-Wall -Wextra)
 
@@ -17,6 +17,22 @@ add_compile_definitions(
 
 if(PLATFORM STREQUAL "")
     message(FATAL_ERROR "PLATFORM is not set! Use -DPLATFORM=glfw (or another supported platform).")
+endif()
+
+# To avoid unused code in production builds that are only used for a single game (example: PlayStation 2 target), we can enable/disable specific bytecode versions
+#
+# If only a single bytecode version is enabled, the checks will be collapsed and removed by the compiler during build time, reducing code size and improving
+# performance on low end hardware!
+option(ENABLE_BC16 "Enable support for Bytecode Version 16" ON)
+option(ENABLE_BC17 "Enable support for Bytecode Version 17" ON)
+if(NOT ENABLE_BC16 AND NOT ENABLE_BC17)
+    message(FATAL_ERROR "You need to build Butterscotch with at least one bytecode version enabled!")
+endif()
+if(ENABLE_BC16)
+    add_compile_definitions(ENABLE_BC16)
+endif()
+if(ENABLE_BC17)
+    add_compile_definitions(ENABLE_BC17)
 endif()
 
 file(GLOB SOURCES src/*.c)
@@ -50,13 +66,20 @@ if(PLATFORM STREQUAL "glfw")
         # Target Windows 7+ (avoids referencing newer APIs like MapViewOfFileNuma2 that MinGW import libs don't provide)
         # https://github.com/mirror/mingw-w64/blob/master/mingw-w64-headers/include/sdkddkver.h
         target_compile_definitions(butterscotch PRIVATE _WIN32_WINNT=0x0601 NTDDI_VERSION=0x06010000 WIN32_LEAN_AND_MEAN)
-        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m opengl32 gdi32 winmm)
+        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m opengl32 gdi32 winmm bz2)
         target_link_options(butterscotch PRIVATE -static)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(GLFW3 REQUIRED glfw3)
+        target_include_directories(butterscotch PRIVATE ${GLFW3_INCLUDE_DIRS})
+        target_link_directories(butterscotch PRIVATE ${GLFW3_LIBRARY_DIRS})
+        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m pthread bz2)
     else()
         find_package(PkgConfig REQUIRED)
         pkg_check_modules(GLFW3 REQUIRED glfw3)
         target_include_directories(butterscotch PRIVATE ${GLFW3_INCLUDE_DIRS})
-        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m pthread dl)
+        target_link_directories(butterscotch PRIVATE ${GLFW3_LIBRARY_DIRS})
+        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m pthread dl bz2)
     endif()
 
     # Enable AddressSanitizer by default in Debug builds
@@ -66,7 +89,7 @@ if(PLATFORM STREQUAL "glfw")
         set(ENABLE_ASAN_DEFAULT OFF)
     endif()
     set(ENABLE_ASAN ${ENABLE_ASAN_DEFAULT} CACHE BOOL "Enable AddressSanitizer")
-    if(ENABLE_ASAN AND NOT MINGW)
+    if(ENABLE_ASAN AND NOT MINGW AND NOT CMAKE_SYSTEM_NAME STREQUAL "Haiku")
         target_compile_options(butterscotch PRIVATE -fsanitize=address -fno-omit-frame-pointer)
         target_link_options(butterscotch PRIVATE -fsanitize=address)
     endif()
@@ -77,6 +100,8 @@ elseif(PLATFORM STREQUAL "ps2")
     add_compile_definitions(NO_RVALUE_INT64)
     # Disable Butterscotch VM/interpreter tracing checks
     add_compile_definitions(DISABLE_VM_TRACING)
+    # Platform identifier for PS2-specific code paths (e.g., scratchpad allocation)
+    add_compile_definitions(PLATFORM_PS2)
     # Disable the PS2 audio system
     option(DISABLE_PS2_AUDIO "Disable the PS2 audio system" OFF)
     if(DISABLE_PS2_AUDIO)
@@ -91,7 +116,7 @@ elseif(PLATFORM STREQUAL "ps2")
         # Compiling on the Docker container
         target_include_directories(butterscotch PRIVATE $ENV{PS2SDK}/ee/include $ENV{PS2SDK}/common/include $ENV{PS2DEV}/ee/include $ENV{GSKIT}/include)
         target_link_directories(butterscotch PRIVATE $ENV{PS2SDK}/ee/lib $ENV{GSKIT}/lib)
-        target_link_libraries(butterscotch gskit dmakit audsrv pad mc patches kernel c m)
+        target_link_libraries(butterscotch gskit dmakit audsrv pad mc kbd patches kernel c m)
 
         # Embed ps2sdk IRX modules (sio2man, padman) as C arrays via bin2c
         # This avoids loading from rom0: which has compatibility issues between fat/slim PS2
@@ -123,6 +148,19 @@ elseif(PLATFORM STREQUAL "ps2")
             DEPENDS ${IRX_DIR}/padman.irx
             COMMENT "Embedding padman.irx"
         )
+        # We need the USB mass storage IRX modules for writing gmon.out when not running from host: and for keyboard support
+        add_custom_command(
+            OUTPUT ${IRX_GEN_DIR}/usbd_irx.c
+            COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/usbd.irx ${IRX_GEN_DIR}/usbd_irx.c usbd_irx
+            DEPENDS ${IRX_DIR}/usbd.irx
+            COMMENT "Embedding usbd.irx"
+        )
+        add_custom_command(
+            OUTPUT ${IRX_GEN_DIR}/ps2kbd_irx.c
+            COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/ps2kbd.irx ${IRX_GEN_DIR}/ps2kbd_irx.c ps2kbd_irx
+            DEPENDS ${IRX_DIR}/ps2kbd.irx
+            COMMENT "Embedding ps2kbd.irx"
+        )
         if(NOT DISABLE_PS2_AUDIO)
             add_custom_command(
                 OUTPUT ${IRX_GEN_DIR}/freesd_irx.c
@@ -138,7 +176,7 @@ elseif(PLATFORM STREQUAL "ps2")
             )
         endif()
 
-        target_sources(butterscotch PRIVATE ${IRX_GEN_DIR}/sio2man_irx.c ${IRX_GEN_DIR}/mcman_irx.c ${IRX_GEN_DIR}/mcserv_irx.c ${IRX_GEN_DIR}/padman_irx.c)
+        target_sources(butterscotch PRIVATE ${IRX_GEN_DIR}/sio2man_irx.c ${IRX_GEN_DIR}/mcman_irx.c ${IRX_GEN_DIR}/mcserv_irx.c ${IRX_GEN_DIR}/padman_irx.c ${IRX_GEN_DIR}/usbd_irx.c ${IRX_GEN_DIR}/ps2kbd_irx.c)
         if(NOT DISABLE_PS2_AUDIO)
             target_sources(butterscotch PRIVATE ${IRX_GEN_DIR}/freesd_irx.c ${IRX_GEN_DIR}/audsrv_irx.c)
         endif()
@@ -151,13 +189,6 @@ elseif(PLATFORM STREQUAL "ps2")
             target_compile_options(butterscotch PRIVATE -pg)
             target_link_options(butterscotch PRIVATE -pg)
 
-            # Embed USB mass storage IRX modules for writing gmon.out when not running from host:
-            add_custom_command(
-                OUTPUT ${IRX_GEN_DIR}/usbd_irx.c
-                COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/usbd.irx ${IRX_GEN_DIR}/usbd_irx.c usbd_irx
-                DEPENDS ${IRX_DIR}/usbd.irx
-                COMMENT "Embedding usbd.irx (profiler)"
-            )
             add_custom_command(
                 OUTPUT ${IRX_GEN_DIR}/bdm_irx.c
                 COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/bdm.irx ${IRX_GEN_DIR}/bdm_irx.c bdm_irx
@@ -177,7 +208,6 @@ elseif(PLATFORM STREQUAL "ps2")
                 COMMENT "Embedding usbmass_bd.irx (profiler)"
             )
             target_sources(butterscotch PRIVATE
-                ${IRX_GEN_DIR}/usbd_irx.c
                 ${IRX_GEN_DIR}/bdm_irx.c
                 ${IRX_GEN_DIR}/bdmfs_fatfs_irx.c
                 ${IRX_GEN_DIR}/usbmass_bd_irx.c

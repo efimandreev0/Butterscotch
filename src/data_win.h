@@ -1,8 +1,12 @@
 #pragma once
 
+#include "common.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdio.h>
+
+#include "utils.h"
 
 // Forward declaration for progress callback
 typedef struct DataWin DataWin;
@@ -33,6 +37,12 @@ typedef struct {
     bool parseAudo;
     // If true, precise masks will be skipped when the sprite does not have a precise state set
     bool skipLoadingPreciseMasksForNonPreciseSprites;
+
+    // If true, Room payloads (backgrounds, views, gameObjects, tiles, layers) are parsed on demand via DataWin_loadRoomPayload during gameplay.
+    bool lazyLoadRooms;
+
+    // When lazyLoadRooms is true, this list indicates which rooms should be loaded during load time instead of demand. They will also not be freed.
+    StringBooleanEntry* eagerlyLoadedRooms;
 
     // Optional progress callback, called before each chunk is parsed.
     // chunkName: 4-character chunk name (e.g. "GEN8", "SPRT")
@@ -353,8 +363,19 @@ typedef struct {
     uint32_t textureOffset; // absolute file offset to TexturePageItem
     float scaleX;
     float scaleY;
+    int32_t ascenderOffset; // bytecodeVersion >= 17 only
+    uint32_t ascender;  // GMS 2022.2+ (0 when absent)
+    uint32_t sdfSpread; // GMS 2023.2 nonLTS+ (0 when absent)
+    uint32_t lineHeight; // GMS 2023.6+ (0 when absent)
+    bool hasAscender;
+    bool hasSDFSpread;
+    bool hasLineHeight;
     uint32_t glyphCount;
     FontGlyph* glyphs;
+    uint32_t maxGlyphHeight; // Computed after glyph parse: max sourceHeight across glyphs; HTML5 runner uses this for line stride (see yyFont.TextHeight)
+    // Sprite font fields (only valid when isSpriteFont is true)
+    bool isSpriteFont;
+    int32_t spriteIndex; // source sprite index (-1 for regular fonts)
 } Font;
 
 typedef struct {
@@ -399,7 +420,7 @@ typedef struct {
 } Tmln;
 
 // ===[ OBJT - Game Objects ]===
-#define OBJT_EVENT_TYPE_COUNT 12
+#define OBJT_EVENT_TYPE_COUNT 15
 
 typedef struct {
     uint32_t eventSubtype;
@@ -421,6 +442,7 @@ typedef struct {
     const char* name;
     int32_t spriteId;
     bool visible;
+    bool managed; // GMS 2022.5+
     bool solid;
     int32_t depth;
     bool persistent;
@@ -486,6 +508,8 @@ typedef struct {
     int32_t creationCode;
     float scaleX;
     float scaleY;
+    float imageSpeed; // GMS >= 2.2.2.302 only, otherwise 0.0f
+    int32_t imageIndex; // GMS >= 2.2.2.302 only, otherwise 0
     uint32_t color;
     float rotation;
     int32_t preCreateCode;
@@ -520,7 +544,7 @@ enum RoomLayerType : uint32_t
 
 typedef struct {
     const char* name;
-    uint32_t spritePtr;
+    int32_t spriteIndex; // Direct index into SPRT chunk
     int32_t x;
     int32_t y;
     float scaleX;
@@ -558,6 +582,13 @@ typedef struct {
 } RoomLayerInstancesData;
 
 typedef struct {
+    int32_t backgroundIndex; // tileset (BGND index)
+    uint32_t tilesX; // grid width in tiles
+    uint32_t tilesY; // grid height in tiles
+    uint32_t* tileData; // flat array of tilesX * tilesY tile values (row-major)
+} RoomLayerTilesData;
+
+typedef struct {
     const char* name;
     uint32_t id;
     uint32_t type;
@@ -570,9 +601,11 @@ typedef struct {
     RoomLayerAssetsData *assetsData;
     RoomLayerBackgroundData *backgroundData;
     RoomLayerInstancesData *instancesData;
+    RoomLayerTilesData *tilesData;
 } RoomLayer;
 
 typedef struct {
+    // Scalar header: always valid regardless of payloadLoaded.
     const char* name;
     const char* caption;
     uint32_t width;
@@ -591,8 +624,20 @@ typedef struct {
     float gravityX;
     float gravityY;
     float metersPerPixel;
-    RoomBackground backgrounds[8];
-    RoomView views[8];
+
+    // Lazy-load offsets: absolute file offsets to the PointerList head for each payload section.
+    // Captured during the header pass of parseROOM so DataWin_loadRoomPayload can seek directly.
+    uint32_t backgroundsFileOffset;
+    uint32_t viewsFileOffset;
+    uint32_t gameObjectsFileOffset;
+    uint32_t tilesFileOffset;
+    uint32_t layersFileOffset; // 0 if pre-GMS2
+    bool payloadLoaded;
+    bool eagerlyLoaded; // set if this room's name matched DataWinParserOptions.eagerlyLoadedRooms; payload is preserved across transitions
+
+    // Payload: valid only when payloadLoaded is true. Zeroed/null otherwise. Backgrounds/views point to a heap array of 8 entries when loaded.
+    RoomBackground* backgrounds;
+    RoomView* views;
     uint32_t gameObjectCount;
     RoomGameObject* gameObjects;
     uint32_t tileCount;
@@ -648,6 +693,7 @@ typedef struct {
     int32_t varID;
     uint32_t occurrences;
     uint32_t firstAddress;
+    int16_t builtinVarId; // Pre-resolved enum ID for built-in variables (varID == -6), -1 otherwise
 } Variable;
 
 typedef struct {
@@ -666,7 +712,9 @@ typedef struct {
 } Function;
 
 typedef struct {
-    uint32_t index;
+    // UndertaleModTool calls this field "Index", but that's because that's how it seemingly worked in pre-bytecode version 17
+    // After bytecode version 17+, this has shown that this is actually the varID of the local variable (it matches the Variable.varID)
+    uint32_t varID;
     const char* name;
 } LocalVar;
 
@@ -693,6 +741,10 @@ typedef struct {
 typedef struct {
     uint32_t scaled;
     uint32_t generatedMips; // GMS 2.0.6+: number of generated mipmaps (0 for GMS 1.x)
+    uint32_t textureBlockSize; // GMS 2022.3+: size of the texture block (0 for older versions)
+    int32_t textureWidth;  // GMS 2022.9+
+    int32_t textureHeight; // GMS 2022.9+
+    int32_t indexInGroup;  // GMS 2022.9+
     uint32_t blobOffset; // absolute file offset to PNG data
     uint32_t blobSize; // computed size of blob data
     uint8_t* blobData; // owned copy of PNG data
@@ -714,6 +766,16 @@ typedef struct {
     uint32_t count;
     AudioEntry* entries;
 } Audo;
+
+// ===[ Detected Format ]===
+// The effective GMS version after heuristic detection. GEN8.version is unreliable since GM:S 2,
+// so chunk parsers probe the data and bump these fields upward when they detect newer-format features.
+typedef struct {
+    uint32_t major;
+    uint32_t minor;
+    uint32_t release;
+    uint32_t build;
+} DetectedFormat;
 
 // ===[ Top-level DataWin container ]===
 typedef struct DataWin {
@@ -750,16 +812,35 @@ typedef struct DataWin {
     Txtr txtr;
     Audo audo;
 
+    DetectedFormat detectedFormat;
+
     // Lookup map: absolute file offset -> TPAG index (built during TPAG parsing)
     struct { uint32_t key; int32_t value; }* tpagOffsetMap;
     // Lookup map: absolute file offset -> SPRT index (built during SPRT parsing)
     struct { uint32_t key; int32_t value; }* sprtOffsetMap;
+
+    // Held open across the whole session when DataWinParserOptions.lazyLoadRooms is true.
+    // Used by DataWin_loadRoomPayload to satisfy on-demand room payload reads.
+    // nullptr when lazy loading is disabled. Closed by DataWin_free.
+    FILE* lazyLoadFile;
+    char* lazyLoadFilePath;     // owned strdup of the original file path, for diagnostics
+    bool lazyLoadRooms;          // mirrors the parser option so Runner can branch without re-reading options
 } DataWin;
 
 DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options);
 void DataWin_free(DataWin* dataWin);
 void DataWin_printDebugSummary(DataWin* dataWin);
+// Lazy room payload management. DataWin_loadRoomPayload is a no-op when the payload is already loaded.
+void DataWin_loadRoomPayload(DataWin* dw, int32_t roomIndex);
+void DataWin_freeRoomPayload(Room* room);
 int32_t DataWin_resolveTPAG(DataWin* dw, uint32_t offset);
 int32_t DataWin_resolveSPRT(DataWin* dw, uint32_t offset);
+// Compares the detected effective GMS version (not the raw GEN8 version) against a lower bound.
+// Returns true if the detected version >= (major, minor, release, build).
+//
+// Mirrors UndertaleModTool's IsVersionAtLeast.
+bool DataWin_isVersionAtLeast(const DataWin* dw, uint32_t major, uint32_t minor, uint32_t release, uint32_t build);
+// Raises the detected effective version to at least (major, minor, release, build). No-op if the detected version is already >= the target.
+void DataWin_bumpVersionTo(DataWin* dw, uint32_t major, uint32_t minor, uint32_t release, uint32_t build);
 void GamePath_computeInternal(GamePath* path);
 PathPositionResult GamePath_getPosition(GamePath* path, double t);

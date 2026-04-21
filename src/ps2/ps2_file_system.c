@@ -345,6 +345,57 @@ static bool deleteFile(FileSystem* fs, const char* relativePath) {
     return remove(paths[0]) == 0;
 }
 
+static bool ps2ReadFileBinary(FileSystem* fs, const char* relativePath, uint8_t** outData, int32_t* outSize) {
+    Ps2FileSystem* pfs = (Ps2FileSystem*) fs;
+    ptrdiff_t idx = shgeti(pfs->mappings, relativePath);
+    if (0 > idx)
+        return false;
+
+    char** paths = pfs->mappings[idx].value;
+    int pathCount = arrlen(paths);
+    repeat(pathCount, i) {
+        FILE* f = fopen(paths[i], "rb");
+        if (f == nullptr)
+            continue;
+
+        fseek(f, 0, SEEK_END);
+        long size = ftell(f);
+        fseek(f, 0, SEEK_SET);
+
+        uint8_t* data = safeMalloc((size_t) size);
+        size_t bytesRead = fread(data, 1, (size_t) size, f);
+        fclose(f);
+
+        *outData = data;
+        *outSize = (int32_t) bytesRead;
+        return true;
+    }
+
+    return false;
+}
+
+static bool ps2WriteFileBinary(FileSystem* fs, const char* relativePath, const uint8_t* data, int32_t size) {
+    Ps2FileSystem* pfs = (Ps2FileSystem*) fs;
+    ptrdiff_t idx = shgeti(pfs->mappings, relativePath);
+    if (0 > idx)
+        return false;
+
+    char** paths = pfs->mappings[idx].value;
+    if (arrlen(paths) == 0)
+        return false;
+
+    const char* writePath = paths[0];
+    ensureParentDirectory(pfs, writePath);
+
+    FILE* f = fopen(writePath, "wb");
+    if (f == nullptr)
+        return false;
+
+    size_t written = fwrite(data, 1, (size_t) size, f);
+    fclose(f);
+    return written == (size_t) size;
+}
+
 // ===[ Vtable ]===
 
 static FileSystemVtable ps2FileSystemVtable = {
@@ -353,6 +404,8 @@ static FileSystemVtable ps2FileSystemVtable = {
     .readFileText = readFileText,
     .writeFileText = writeFileText,
     .deleteFile = deleteFile,
+    .readFileBinary = ps2ReadFileBinary,
+    .writeFileBinary = ps2WriteFileBinary,
 };
 
 // ===[ Lifecycle ]===

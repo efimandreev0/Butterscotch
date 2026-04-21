@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common.h"
 #include "renderer.h"
 #include <gsKit.h>
 #include "stb_ds.h"
@@ -65,11 +66,11 @@ typedef struct {
 } VRAMChunk;
 
 // ===[ EE RAM Atlas Cache Entry ]===
-// Caches compressed atlas data (header + pixel data) in EE RAM to avoid repeated CDVD reads.
+// Caches uncompressed atlas pixel data in EE RAM for zero-copy VRAM uploads to avoid repeated CDVD reads and decompression
 typedef struct {
     int16_t atlasId;    // Which atlas (-1 = free)
-    uint32_t offset;    // Byte offset within eeCache buffer
-    uint32_t size;      // Total bytes stored (128-byte header + compressed pixel data)
+    uint32_t offset;    // Byte offset within eeCache buffer (128-byte aligned)
+    uint32_t size;      // Total bytes stored (uncompressed indexed pixels: 128KB for 4bpp, 256KB for 8bpp)
     uint64_t lastUsed;  // Frame counter for LRU
 } EeAtlasCacheEntry;
 
@@ -116,10 +117,11 @@ typedef struct {
     uint16_t atlasCount;       // Number of atlas IDs from ATLAS.BIN header
     uint8_t* atlasBpp;         // Bits per pixel per atlas (4 or 8), from ATLAS.BIN [atlasCount]
     uint64_t frameCounter;     // Incremented each frame for LRU tracking
+    bool evictedAtlasUsedInCurrentFrame; // Used for debugging, true if a atlas that was used on the current frame was evicted (VRAM thrashing)
 
-    // EE RAM atlas cache (stores compressed atlas data to avoid repeated CDVD reads)
-    uint8_t* eeCache;                  // 4 MiB contiguous buffer
-    uint32_t eeCacheCapacity;          // Total size (4 * 1024 * 1024)
+    // EE RAM atlas cache (stores uncompressed atlas pixel data for zero-copy VRAM uploads)
+    uint8_t* eeCache;                  // Contiguous buffer with uncompressed texture data
+    uint32_t eeCacheCapacity;          // Total size (See EE_CACHE_CAPACITY)
     uint32_t eeCacheBumpPtr;           // End of live data
     EeAtlasCacheEntry* eeCacheEntries; // Per-atlas cache state [atlasCount]
     uint32_t* atlasDataSizes;          // On-disk size per atlas (header + compressed data) [atlasCount]

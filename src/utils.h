@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -31,6 +32,14 @@
 do { \
 if (!(condition)) { \
 fprintf(stderr, "Requirement failed at %s:%d: %s\n", __FILE__, __LINE__, message); \
+abort(); \
+} \
+} while (0)
+
+#define requireMessageFormatted(condition, fmt, ...) \
+do { \
+if (!(condition)) { \
+fprintf(stderr, "Requirement failed at %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__); \
 abort(); \
 } \
 } while (0)

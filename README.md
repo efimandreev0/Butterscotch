@@ -24,6 +24,14 @@ Butterscotch's goal is to be able to have Undertale v1.08 (GameMaker: Studio 1.4
 
 While our target is Undertale v1.08, that doesn't mean that other games CAN'T run in Butterscotch! Because Butterscotch is a runner and not a Undertale port/remake, you CAN run other GameMaker: Studio games with it and, as long as the game is compiled with GameMaker: Studio 1.4.1804 and they only use GML variables and functions that Butterscotch supports, it should work fine.
 
+Here are the Bytecode Versions that Butterscotch supports
+
+* Bytecode Version 15
+* Bytecode Version 16
+* Bytecode Version 17
+
+However, that doesn't mean that a game that uses a compatible version WILL run! The bytecode support is still a WIP, and Butterscotch may have quirks that the original GameMaker: Studio runner may not have.
+
 Of course, there are exceptions that break game compatibility altogether:
 
 * Games compiled with YYC, because they use native code instead of bytecode. 
@@ -32,9 +40,15 @@ Of course, there are exceptions that break game compatibility altogether:
 ## Supported Platforms
 
 * Linux (GLFW, OpenGL)
+* macOS (GLFW, OpenGL)
 * Windows (GLFW, OpenGL, MinGW)
 * PlayStation 2 (ps2sdk, gsKit)
+* Haiku (GLFW)
 * ...and maybe more in the future!
+
+## Community Ports
+
+* [Xbox 360 (Butterscotch-360)](https://github.com/ceilingtilefan/Butterscotch-360) by @ceilingtilefan
 
 ## Building Butterscotch
 
@@ -69,6 +83,9 @@ The GLFW target has a lot of nifty CLI parameters that you can use to trace and 
 * `--trace-opcodes`: Traces opcodes
 * `--trace-stack`: Traces stack
 * `--trace-frames`: Logs when a frame starts and when a frame ends, including how much time it took to process each frame.
+* `--always-log-unknown-functions`: When enabled, Butterscotch will always log unknown functions instead of logging them once per script.
+* `--always-log-stubbed-functions`: When enabled, Butterscotch will always log stubbed functions instead of logging them once per script.
+* `--trace-bytecode-after-frame`: When set, controls when `--trace-opcodes` and `--trace-stack` will start logging. Useful when debugging interpreter-heavy scripts.
 * `--exit-at-frame=Frame`: Automatically exit the runner after X frames.
 * `--speed`: Speed multiplier
 * `--seed=Seed`: Sets a fixed seed for the runner, useful for reproduceable runs.
@@ -77,7 +94,8 @@ The GLFW target has a lot of nifty CLI parameters that you can use to trace and 
 * `--disassemble`: Dissassembles a specific script
 * `--record-inputs`: Records user inputs
 * `--playback-inputs`: Playbacks user inputs
-* `--debug`: Enable debug features
+* `--os-type`: Allows changing the built-in `os_type` value. The default is Windows. Example: When running Undertale Xbox, you would need to set it to `--os-type xboxone`.
+* `--profiler`: Logs which GML scripts are the heaviest in terms of time and executed instructions.
 
 ## Debug Features
 
@@ -107,7 +125,7 @@ Having a transpiler also have other disadvantages:
 
 ## Screenshots
 
-### Undertale (GLFW)
+### Undertale (GLFW) [Bytecode Version 16]
 
 <img width="160" height="120" alt="Image" src="https://github.com/user-attachments/assets/6651cc2e-0d6d-4354-b98d-081e84a981df" />
 <img width="160" height="120" alt="Image" src="https://github.com/user-attachments/assets/1d6edc51-2829-4f8f-b900-393f21a6655b" />
@@ -122,34 +140,24 @@ Having a transpiler also have other disadvantages:
 <img width="160" height="120" alt="Image" src="https://github.com/user-attachments/assets/e5c67781-0ffc-43c8-9c7d-333254eed704" />
 <img width="160" height="120" alt="Image" src="https://github.com/user-attachments/assets/93900e3c-79b5-4a05-bd6c-d68814e9e101" />
 
-### Undertale (PlayStation 2)
+### Undertale (PlayStation 2) [Bytecode Version 16]
 
-Here's a video :3 https://youtu.be/3MoAPO8H85U
+Here's a video :3 https://youtu.be/PuzBxe0VGtY
 
-## Tales of Agentic Engineering
+### DELTARUNE (SURVEY_PROGRAM) (PlayStation 2) [Bytecode Version 16]
 
-Since I created Droidtale, I've always had the thought about "if it is a VM, then you could reimplement it and port any GameMaker game to any platform, right?".
+Here's a video :3 https://youtu.be/TLJtV2WnrmQ
 
-Fast forward ten years, and while I was toying around with Claude Code I've thought about "what if I asked Claude to vibe code a GameMaker runner re-implementation in Kotlin lol". Of course, this did not go well because Claude was not even able to render the Undertale intro sequence, until I intervened and started nudging it in the right direction. After nudging it, and debugging it manually, it actually got somewhere and was able to render Undertale's intro sequence up until the main menu...
+### DELTARUNE Chapter 2 (GLFW) [Bytecode Version 17]
 
-...and that's when I found out that we were onto something here and that the idea could be viable. And that's when I started learning C and rewriting the runner to be cross-platform.
+<img width="160" height="120" alt="image" src="https://github.com/user-attachments/assets/d0df9858-ad2b-4642-9f32-a542d1d942e0" />
 
-Butterscotch is not "vibe coded", that is, I didn't just let Claude go wild and implement everything. This does not work, and anyone that says that "vibe coding" works and will replace all developers is lying, or they aren't skilled enough to know what good code looks like, or they are rich and have a lot of money to spend while Claude keeps getting stuck trying to resolve bugs that they don't know how to fix like [it was a infinite monkey theorem](https://en.wikipedia.org/wiki/Infinite_monkey_theorem).
+### DELTARUNE Chapter 3 (GLFW) [Bytecode Version 17]
 
-Butterscotch is made with an "agentic engineering" approach. I did use Claude Code to implement a lot of things in Butterscotch, but every line of code was reviewed and refactored by me to polish the code that Claude made (Claude LOVES creating duplicate code and creating some non-sensical things).
+<img width="160" height="120" alt="image" src="https://github.com/user-attachments/assets/7b49d434-e66f-4ee3-bfe8-c0b4f45ceeb7" />
+<img width="160" height="120" alt="image" src="https://github.com/user-attachments/assets/afbe62ad-4706-4882-a9c9-6c239ed57c69" />
+<img width="160" height="120" alt="image" src="https://github.com/user-attachments/assets/d83c9f8c-e9b9-410e-8d3d-3663ede23fab" />
 
-That does not mean that Butterscotch's code is good however, I'm not a C developer (JVM my beloved) and I know just enough C to be dangerous (who doesn't like a use after free crash??) so some of the code decisions are questionable at best, harmful at worst. That's why if you see the codebase, it really feels like it is a Java developer trying to create a C application.
+### DELTARUNE Chapter Selector (GLFW) [Bytecode Version 17]
 
-That said, here are some tips and tricks with using Claude Code for projects like this:
-
-* The project itself, when you think about it, is somewhat trivial, which is why Claude excelled on it.
-    * [UndertaleModTool](https://github.com/UnderminersTeam/UndertaleModTool) has bytecode documentation and you can decompile Undertale's source code to GML, so Claude can compare the bytecode to the original GML code to figure out what the interpreter is doing wrong.
-    * [GameMaker-HTML5](https://github.com/YoYoGames/GameMaker-HTML5) has GML's builtin variables and functions straight from YoYo Games, so it can just port the functions from JavaScript to C.
-    * While decompiled code is hard for us to understand, LLMs are quite good at it. Telling Claude to read Ghidra's decompiled GameMaker: Studio runner code to figure out some bytecode interpreter opcodes shenanigans actually had surprising results.
-    * This isn't the first project that attempts something like this! [OpenGM](https://github.com/misternebula/OpenGM) is also a open source GameMaker: Studio runner re-implementation, written in C# instead of C, and it exists since 2024! While Claude did *not* read OpenGM's source code during Butterscotch's development, that doesn't mean that Claude never studied OpenGM's source code during its training. So maybe when it was implementing things in Butterscotch, it may have pulled things that it had previously learned from OpenGM and other similar projects.
-* Adding ways for Claude to know what's going on in the runner makes it way easier for it to know what is the issue. Things that are useful for us are also useful for them. That's why Butterscotch has a lot of `--trace-*` functions, because Claude can use it to trace what is going on in the runner to try pointing it to the right direction to where it may be going wrong. And when that fails, we as humans can use the very useful `--trace-*` functions too.
-* Adding ways for Claude to take screenshots lets them try to tackle graphical related issues, because you can tell them "if the old screenshot is different than the new screenshot, you've probably fixed the issue".
-* Adding input recording and playback allows us to record a set of inputs that reproduce a specific bug, and then we can tell Claude to playback our inputs to figure out what could be going wrong to cause that specific bug.
-* You still need to know EXACTLY what you want, and know HOW are you going to break down the problem into small pieces. Just like what you already do when programming. If I didn't already have previous knowledge on how the YoYo runner worked, I would've probably said "pls port Undertale for me kthxbye" and that would've probably gone nowhere.
-
-However I still needed to keep an eye out on whatever Claude was doing if they were trying to fix a non-trivial problem, because if I didn't attempt to nudge it in the right direction, it would go completely off the rails.
+<img width="160" height="120" alt="image" src="https://github.com/user-attachments/assets/b8a848df-fd1c-49b7-9602-e8020ac86d5d" />

@@ -9,6 +9,7 @@
 #include <gsFontM.h>
 #include <libpad.h>
 #include <libmc.h>
+#include <libkbd.h>
 #include <timer.h>
 #include <unistd.h>
 #include <sbv_patches.h>
@@ -25,7 +26,9 @@
 #include "gs_renderer.h"
 #include "noop_audio_system.h"
 #include "ps2_utils.h"
+#include "stb_ds.h"
 #include "utils.h"
+#include "../profiler.h"
 
 #ifdef GPROF_PROFILING
 #include <ps2prof.h>
@@ -40,6 +43,10 @@ extern unsigned char mcserv_irx[];
 extern unsigned int size_mcserv_irx;
 extern unsigned char padman_irx[];
 extern unsigned int size_padman_irx;
+extern unsigned char usbd_irx[];
+extern unsigned int size_usbd_irx;
+extern unsigned char ps2kbd_irx[];
+extern unsigned int size_ps2kbd_irx;
 #ifndef DISABLE_PS2_AUDIO
 extern unsigned char freesd_irx[];
 extern unsigned int size_freesd_irx;
@@ -52,8 +59,8 @@ extern unsigned int size_audsrv_irx;
 // how much memory the console really has, we will use this value instead
 static int MAX_MEMORY_BYTES = 33554432;
 
-// 256-byte aligned buffer for libpad
-static char padBuf[256] __attribute__((aligned(64)));
+// 256-byte aligned buffers for libpad (one per port)
+static char padBuf[2][256] __attribute__((aligned(64)));
 
 // Controller button to GML key mapping
 typedef struct {
@@ -61,11 +68,167 @@ typedef struct {
     int32_t gmlKey;
 } PadMapping;
 
-static PadMapping* padMappings = nullptr;
-static int padMappingCount = 0;
+static PadMapping* pad1Mappings = nullptr;
+static int pad1MappingCount = 0;
+static PadMapping* pad2Mappings = nullptr;
+static int pad2MappingCount = 0;
 
-// Previous frame's button state for detecting press/release edges
-static uint16_t prevButtons = 0xFFFF; // All buttons released (buttons are active-low)
+// Previous frame's button state per pad (active-low; 0xFFFF = all released)
+static uint16_t prevButtons[2] = {0xFFFF, 0xFFFF};
+
+// Whether each port was successfully opened (padPortOpen succeeded)
+static bool padOpened[2] = {false, false};
+
+// Whether each pad was STABLE last frame (for disconnect/reconnect edge detection)
+static bool padWasStable[2] = {false, false};
+
+static void parsePadMappings(JsonValue* configRoot, const char* key, PadMapping** outMappings, int* outCount, const char* logLabel) {
+    JsonValue* mappingsObj = JsonReader_getObject(configRoot, key);
+    if (mappingsObj == nullptr || !JsonReader_isObject(mappingsObj)) return;
+    int count = JsonReader_objectLength(mappingsObj);
+    PadMapping* mappings = safeMalloc(sizeof(PadMapping) * count);
+    repeat(count, i) {
+        const char* padButtonStr = JsonReader_getObjectKey(mappingsObj, i);
+        JsonValue* gmlKeyVal = JsonReader_getObjectValue(mappingsObj, i);
+        mappings[i].padButton = (uint16_t) atoi(padButtonStr);
+        mappings[i].gmlKey = (int32_t) JsonReader_getInt(gmlKeyVal);
+        printf("CONFIG.JSN: %s mapping pad=%d -> gmlKey=%d\n", logLabel, mappings[i].padButton, mappings[i].gmlKey);
+    }
+    *outMappings = mappings;
+    *outCount = count;
+}
+
+static void pollPad(Runner* runner, int port, PadMapping* mappings, int mappingCount, uint16_t* prev, bool* wasStable) {
+    int state = padGetState(port, 0);
+    bool stable = (state == PAD_STATE_STABLE);
+
+    if (!stable) {
+        if (*wasStable) {
+            // Disconnect edge: release every key whose button was held.
+            repeat(mappingCount, i) {
+                uint16_t mask = mappings[i].padButton;
+                if ((*prev & mask) == 0) {
+                    RunnerKeyboard_onKeyUp(runner->keyboard, mappings[i].gmlKey);
+                }
+            }
+            *prev = 0xFFFF;
+            *wasStable = false;
+        }
+        return;
+    }
+
+    if (!*wasStable) {
+        // Reconnect edge: avoid phantom presses from buttons that were held when the pad came back.
+        *prev = 0xFFFF;
+        *wasStable = true;
+    }
+
+    struct padButtonStatus padStatus;
+    unsigned char padResult = padRead(port, 0, &padStatus);
+    if (padResult == 0) return;
+
+    uint16_t buttons = padStatus.btns;
+    repeat(mappingCount, i) {
+        uint16_t mask = mappings[i].padButton;
+        int32_t gmlKey = mappings[i].gmlKey;
+
+        // PS2 buttons are active-low: 0 = pressed, 1 = released
+        bool wasPressed = (*prev & mask) == 0;
+        bool isPressed = (buttons & mask) == 0;
+
+        if (isPressed && !wasPressed) {
+            RunnerKeyboard_onKeyDown(runner->keyboard, gmlKey);
+        } else if (!isPressed && wasPressed) {
+            RunnerKeyboard_onKeyUp(runner->keyboard, gmlKey);
+        }
+    }
+    *prev = buttons;
+}
+
+// ===[ USB Keyboard ]===
+
+static bool kbdAvailable = false;
+
+// Shift modifier state (left-or-right).
+static bool kbdShiftHeld = false;
+
+// Map a USB HID usage code (as delivered by ps2kbd.irx in RAW mode) to a GML VK code.
+static int32_t hidUsageToGmlKey(uint8_t hid) {
+    // Letters: HID 0x04..0x1D -> ASCII 'A'..'Z' (GML uses uppercase ASCII)
+    if (hid >= 0x04 && hid <= 0x1D) return (int32_t) ('A' + (hid - 0x04));
+    // Numbers: HID 0x1E..0x26 -> '1'..'9', 0x27 -> '0'
+    if (hid >= 0x1E && hid <= 0x26) return (int32_t) ('1' + (hid - 0x1E));
+    if (hid == 0x27) return (int32_t) '0';
+    // Special keys need mapping
+    switch (hid) {
+        case 0x28: return VK_ENTER;      // Enter
+        case 0x29: return VK_ESCAPE;     // Escape
+        case 0x2A: return VK_BACKSPACE;  // Backspace
+        case 0x2B: return VK_TAB;        // Tab
+        case 0x2C: return VK_SPACE;      // Space
+        case 0x3A: return VK_F1;
+        case 0x3B: return VK_F2;
+        case 0x3C: return VK_F3;
+        case 0x3D: return VK_F4;
+        case 0x3E: return VK_F5;
+        case 0x3F: return VK_F6;
+        case 0x40: return VK_F7;
+        case 0x41: return VK_F8;
+        case 0x42: return VK_F9;
+        case 0x43: return VK_F10;
+        case 0x44: return VK_F11;
+        case 0x45: return VK_F12;
+        case 0x49: return VK_INSERT;
+        case 0x4A: return VK_HOME;
+        case 0x4B: return VK_PAGEUP;
+        case 0x4C: return VK_DELETE;
+        case 0x4D: return VK_END;
+        case 0x4E: return VK_PAGEDOWN;
+        case 0x4F: return VK_RIGHT;
+        case 0x50: return VK_LEFT;
+        case 0x51: return VK_DOWN;
+        case 0x52: return VK_UP;
+        case 0xE0: case 0xE4: return VK_CONTROL;  // Left/Right Ctrl
+        case 0xE1: case 0xE5: return VK_SHIFT;    // Left/Right Shift
+        case 0xE2: case 0xE6: return VK_ALT;      // Left/Right Alt
+        default: return -1;
+    }
+}
+
+// Translate a HID usage code to an ASCII character for RunnerKeyboard_onCharacter.
+// Also handles when the shift key is held.
+static unsigned int hidUsageToAsciiChar(uint8_t hid, bool shift) {
+    // Letters A-Z: HID 0x04..0x1D
+    if (hid >= 0x04 && hid <= 0x1D) {
+        char base = (char) ('a' + (hid - 0x04));
+        return (unsigned int) (shift ? (base - 32) : base);
+    }
+
+    // Digits / top-row symbols: 0x1E..0x26 -> 1..9, 0x27 -> 0
+    static const char digitsUnshifted[10] = {'1','2','3','4','5','6','7','8','9','0'};
+    static const char digitsShifted[10]   = {'!','@','#','$','%','^','&','*','(',')'};
+    if (hid >= 0x1E && hid <= 0x26) return (unsigned int) (shift ? digitsShifted[hid - 0x1E] : digitsUnshifted[hid - 0x1E]);
+    if (hid == 0x27) return (unsigned int) (shift ? digitsShifted[9] : digitsUnshifted[9]);
+
+    switch (hid) {
+        case 0x28: return (unsigned int) '\r';  // Enter
+        case 0x2A: return (unsigned int) '\b';  // Backspace
+        case 0x2B: return (unsigned int) '\t';  // Tab
+        case 0x2C: return (unsigned int) ' ';   // Space
+        case 0x2D: return (unsigned int) (shift ? '_' : '-');
+        case 0x2E: return (unsigned int) (shift ? '+' : '=');
+        case 0x2F: return (unsigned int) (shift ? '{' : '[');
+        case 0x30: return (unsigned int) (shift ? '}' : ']');
+        case 0x31: return (unsigned int) (shift ? '|' : '\\');
+        case 0x33: return (unsigned int) (shift ? ':' : ';');
+        case 0x34: return (unsigned int) (shift ? '"' : '\'');
+        case 0x35: return (unsigned int) (shift ? '~' : '`');
+        case 0x36: return (unsigned int) (shift ? '<' : ',');
+        case 0x37: return (unsigned int) (shift ? '>' : '.');
+        case 0x38: return (unsigned int) (shift ? '?' : '/');
+        default: return 0;
+    }
+}
 
 // ===[ Loading Screen ]===
 
@@ -316,7 +479,28 @@ int main(int argc, char* argv[]) {
     }
 
     padInit(0);
-    padPortOpen(0, 0, padBuf);
+    padOpened[0] = (padPortOpen(0, 0, padBuf[0]) != 0);
+    padOpened[1] = (padPortOpen(1, 0, padBuf[1]) != 0);
+    if (!padOpened[0]) printf("Warning: failed to open pad port 0\n");
+    if (!padOpened[1]) printf("Warning: failed to open pad port 1\n");
+
+    // ===[ Load USB Keyboard IOP Modules ]===
+    int usbdRet = SifExecModuleBuffer(usbd_irx, size_usbd_irx, 0, nullptr, nullptr);
+    if (0 > usbdRet) {
+        printf("Warning: failed to load usbd: %d (keyboard disabled)\n", usbdRet);
+    } else {
+        int kbdRet = SifExecModuleBuffer(ps2kbd_irx, size_ps2kbd_irx, 0, nullptr, nullptr);
+        if (0 > kbdRet) {
+            printf("Warning: failed to load ps2kbd: %d (keyboard disabled)\n", kbdRet);
+        } else if (PS2KbdInit() == 0) {
+            printf("Warning: PS2KbdInit failed (keyboard disabled)\n");
+        } else {
+            PS2KbdSetReadmode(PS2KBD_READMODE_RAW);
+            PS2KbdSetBlockingMode(PS2KBD_NONBLOCKING);
+            kbdAvailable = true;
+            printf("USB keyboard initialized\n");
+        }
+    }
 
 #ifndef DISABLE_PS2_AUDIO
     // ===[ Load Audio IOP Modules ]===
@@ -346,57 +530,8 @@ int main(int argc, char* argv[]) {
         .gsFontM = gsFontM,
     };
 
-    // ===[ Parse data.win ]===
-    drawStatusScreen(gsGlobal, gsFontM, nullptr, "Loading data.win...", nullptr);
-
-    DataWin* dataWin = DataWin_parse(
-        dataWinPath,
-        (DataWinParserOptions) {
-            .parseGen8 = true,
-            .parseOptn = true,
-            .parseLang = true,
-            .parseExtn = true,
-            .parseSond = true,
-            .parseAgrp = true,
-            .parseSprt = true,
-            .parseBgnd = true,
-            .parsePath = true,
-            .parseScpt = true,
-            .parseGlob = true,
-            .parseShdr = true,
-            .parseFont = true,
-            .parseTmln = true,
-            .parseObjt = true,
-            .parseRoom = true,
-            .parseTpag = true,
-            .parseCode = true,
-            .parseVari = true,
-            .parseFunc = true,
-            .parseStrg = true,
-            .parseTxtr = false,
-            .parseAudo = false,
-            .skipLoadingPreciseMasksForNonPreciseSprites = true,
-            .progressCallback = loadingScreenCallback,
-            .progressCallbackUserData = &loadingState,
-        }
-    );
-    free(dataWinPath);
-
-    {
-        void* heapTop = sbrk(0);
-        int32_t usedBytes = (int32_t) (uintptr_t) heapTop;
-        int32_t freeBytes = MAX_MEMORY_BYTES - usedBytes;
-        printf("Memory after data.win parsing: used=%d bytes (%.1f KB), total=%d bytes (%.1f KB), free=%d bytes (%.1f KB)\n", usedBytes, usedBytes / 1024.0f, MAX_MEMORY_BYTES, MAX_MEMORY_BYTES / 1024.0f, freeBytes, freeBytes / 1024.0f);
-    }
-    // ===[ Create texture cache and renderer ]===
-    drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Creating renderer...", &loadingState);
-
-    Renderer* renderer = GsRenderer_create(gsGlobal);
-
-    drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Creating VM and runner...", &loadingState);
-
     // ===[ Load CONFIG.JSN ]===
-    drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Loading CONFIG.JSN...", &loadingState);
+    drawStatusScreen(gsGlobal, gsFontM, nullptr, "Loading CONFIG.JSN...", nullptr);
 
     char* configJsonPath = PS2Utils_createDevicePath("CONFIG.JSN");
     FILE* configFile = fopen(configJsonPath, "rb");
@@ -418,8 +553,63 @@ int main(int argc, char* argv[]) {
     free(configJsonPath);
 
     if (configRoot == nullptr) {
-        drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "CONFIG.JSN invalid or not found!", &loadingState);
+        drawStatusScreen(gsGlobal, gsFontM, nullptr, "CONFIG.JSN invalid or not found!", nullptr);
         while (true) {}
+    }
+
+    bool lazyLoadRooms = JsonReader_getBool(JsonReader_getObject(configRoot, "lazyLoadRooms"));
+    StringBooleanEntry* eagerRooms = nullptr; // stb_ds string-keyed set; keys borrowed from configRoot
+    JsonValue* eagerArr = JsonReader_getObject(configRoot, "eagerlyLoadedRooms");
+    int n = JsonReader_arrayLength(eagerArr);
+    repeat(n, i) {
+        const char* name = JsonReader_getString(JsonReader_getArrayElement(eagerArr, i));
+        if (name != nullptr) shput(eagerRooms, (char*) name, true);
+    }
+
+    // ===[ Parse data.win ]===
+    drawStatusScreen(gsGlobal, gsFontM, nullptr, "Loading data.win...", nullptr);
+
+    DataWin* dataWin = DataWin_parse(
+        dataWinPath,
+        (DataWinParserOptions) {
+            .parseGen8 = true,
+            .parseOptn = true,
+            .parseLang = true,
+            .parseExtn = false,
+            .parseSond = true,
+            .parseAgrp = true,
+            .parseSprt = true,
+            .parseBgnd = true,
+            .parsePath = true,
+            .parseScpt = true,
+            .parseGlob = true,
+            .parseShdr = true,
+            .parseFont = true,
+            .parseTmln = true,
+            .parseObjt = true,
+            .parseRoom = true,
+            .parseTpag = true,
+            .parseCode = true,
+            .parseVari = true,
+            .parseFunc = true,
+            .parseStrg = true,
+            .parseTxtr = false,
+            .parseAudo = false,
+            .skipLoadingPreciseMasksForNonPreciseSprites = true,
+            .lazyLoadRooms = lazyLoadRooms,
+            .eagerlyLoadedRooms = eagerRooms,
+            .progressCallback = loadingScreenCallback,
+            .progressCallbackUserData = &loadingState,
+        }
+    );
+    free(dataWinPath);
+    shfree(eagerRooms);
+
+    {
+        void* heapTop = sbrk(0);
+        int32_t usedBytes = (int32_t) (uintptr_t) heapTop;
+        int32_t freeBytes = MAX_MEMORY_BYTES - usedBytes;
+        printf("Memory after data.win parsing: used=%d bytes (%.1f KB), total=%d bytes (%.1f KB), free=%d bytes (%.1f KB)\n", usedBytes, usedBytes / 1024.0f, MAX_MEMORY_BYTES, MAX_MEMORY_BYTES / 1024.0f, freeBytes, freeBytes / 1024.0f);
     }
 
     FileSystem* fileSystem = Ps2FileSystem_create(configRoot, dataWin->gen8.displayName);
@@ -428,8 +618,27 @@ int main(int argc, char* argv[]) {
         while (true) {}
     }
 
+    drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Creating VM...", &loadingState);
+
     VMContext* vm = VM_create(dataWin);
-    Runner* runner = Runner_create(dataWin, vm, fileSystem);
+
+    // ===[ Initialize Renderer ]===
+    drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Initializing renderer...", &loadingState);
+
+    Renderer* renderer = GsRenderer_create(gsGlobal);
+
+    // ===[ Initialize Audio System ]===
+#ifndef DISABLE_PS2_AUDIO
+    drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Initializing audio...", &loadingState);
+    Ps2AudioSystem* ps2Audio = Ps2AudioSystem_create();
+    AudioSystem* audioSystem = (AudioSystem*) ps2Audio;
+#else
+    AudioSystem* audioSystem = (AudioSystem*) NoopAudioSystem_create();
+#endif
+
+    drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Creating runner...", &loadingState);
+
+    Runner* runner = Runner_create(dataWin, vm, renderer, fileSystem, audioSystem);
 
     // Parse disabledObjects from CONFIG.JSN
     JsonValue* disabledObjectsArr = JsonReader_getObject(configRoot, "disabledObjects");
@@ -446,19 +655,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Parse controllerMappings from CONFIG.JSN
-    JsonValue* controllerMappingsObj = JsonReader_getObject(configRoot, "controllerMappings");
-    if (controllerMappingsObj != nullptr && JsonReader_isObject(controllerMappingsObj)) {
-        padMappingCount = JsonReader_objectLength(controllerMappingsObj);
-        padMappings = safeMalloc(sizeof(PadMapping) * padMappingCount);
-        repeat(padMappingCount, i) {
-            const char* padButtonStr = JsonReader_getObjectKey(controllerMappingsObj, i);
-            JsonValue* gmlKeyVal = JsonReader_getObjectValue(controllerMappingsObj, i);
-            padMappings[i].padButton = (uint16_t) atoi(padButtonStr);
-            padMappings[i].gmlKey = (int32_t) JsonReader_getInt(gmlKeyVal);
-            printf("CONFIG.JSN: controllerMapping pad=%d -> gmlKey=%d\n", padMappings[i].padButton, padMappings[i].gmlKey);
-        }
-    }
+    // Parse pad mappings from CONFIG.JSN (one object per controller, both optional)
+    parsePadMappings(configRoot, "controller1Mappings", &pad1Mappings, &pad1MappingCount, "controller1");
+    parsePadMappings(configRoot, "controller2Mappings", &pad2Mappings, &pad2MappingCount, "controller2");
 
     {
         void* heapTop = sbrk(0);
@@ -466,22 +665,6 @@ int main(int argc, char* argv[]) {
         int32_t freeBytes = MAX_MEMORY_BYTES - usedBytes;
         printf("Memory after VM and runner creation: used=%d bytes (%.1f KB), total=%d bytes (%.1f KB), free=%d bytes (%.1f KB)\n", usedBytes, usedBytes / 1024.0f, MAX_MEMORY_BYTES, MAX_MEMORY_BYTES / 1024.0f, freeBytes, freeBytes / 1024.0f);
     }
-
-    runner->renderer = renderer;
-
-    // ===[ Initialize Audio System ]===
-#ifndef DISABLE_PS2_AUDIO
-    drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Initializing audio...", &loadingState);
-    Ps2AudioSystem* ps2Audio = Ps2AudioSystem_create();
-    AudioSystem* audioSystem = (AudioSystem*) ps2Audio;
-    audioSystem->vtable->init(audioSystem, dataWin, fileSystem);
-    runner->audioSystem = audioSystem;
-#else
-    runner->audioSystem = (AudioSystem*) NoopAudioSystem_create();
-#endif
-
-    drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Initializing renderer...", &loadingState);
-    renderer->vtable->init(renderer, dataWin);
 
     drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Initializing first room...", &loadingState);
     Runner_initFirstRoom(runner);
@@ -510,7 +693,13 @@ int main(int argc, char* argv[]) {
     StartTimerSystemTime();
 
     // ===[ Main Loop ]===
-    bool debugOverlayEnabled = JsonReader_getBool(JsonReader_getObject(configRoot, "debugOverlayEnabled"));
+    bool debugOverlayStartEnabled = JsonReader_getBool(JsonReader_getObject(configRoot, "debugOverlayEnabled"));
+    int debugOverlayState = debugOverlayStartEnabled ? 0 : 2;
+    uint16_t prevOverlayPadButtons = 0xFFFF;
+    int profilerFramesInWindow = 0;
+    static const int PROFILER_WINDOW_FRAMES = 60;
+    char profilerOverlayText[1024];
+    profilerOverlayText[0] = '\0';
     while (!runner->shouldExit) {
         u64 frameStartTime = GetTimerSystemTime();
         // ===[ Poll Controller (always poll every vsync) ]===
@@ -519,32 +708,33 @@ int main(int argc, char* argv[]) {
         //
         // beginFrame is called after the game consumes input.
 
-        struct padButtonStatus padStatus;
-        unsigned char padResult = padRead(0, 0, &padStatus);
-        uint16_t buttons = 0xFFFF; // all released by default
-        if (padResult != 0) {
-            buttons = padStatus.btns;
+        if (padOpened[0]) pollPad(runner, 0, pad1Mappings, pad1MappingCount, &prevButtons[0], &padWasStable[0]);
+        if (padOpened[1]) pollPad(runner, 1, pad2Mappings, pad2MappingCount, &prevButtons[1], &padWasStable[1]);
 
-            repeat(padMappingCount, i) {
-                uint16_t mask = padMappings[i].padButton;
-                int32_t gmlKey = padMappings[i].gmlKey;
+        // ===[ Poll USB Keyboard ]===
+        // Drain all pending RAW events this vsync so press/release edges aren't dropped.
+        if (kbdAvailable) {
+            PS2KbdRawKey rawKey;
+            while (PS2KbdReadRaw(&rawKey) > 0) {
+                int32_t gmlKey = hidUsageToGmlKey(rawKey.key);
 
-                // PS2 buttons are active-low: 0 = pressed, 1 = released
-                bool wasPressed = (prevButtons & mask) == 0;
-                bool isPressed = (buttons & mask) == 0;
+                // Track shift modifier locally so we can pick the correct glyph for onCharacter.
+                if (rawKey.key == 0xE1 || rawKey.key == 0xE5) {
+                    kbdShiftHeld = (rawKey.state == PS2KBD_RAWKEY_DOWN);
+                }
 
-                if (isPressed && !wasPressed) {
-                    RunnerKeyboard_onKeyDown(runner->keyboard, gmlKey);
-                } else if (!isPressed && wasPressed) {
-                    RunnerKeyboard_onKeyUp(runner->keyboard, gmlKey);
+                if (rawKey.state == PS2KBD_RAWKEY_DOWN) {
+                    if (gmlKey >= 0) RunnerKeyboard_onKeyDown(runner->keyboard, gmlKey);
+                    unsigned int ch = hidUsageToAsciiChar(rawKey.key, kbdShiftHeld);
+                    if (ch != 0) RunnerKeyboard_onCharacter(runner->keyboard, ch);
+                } else if (rawKey.state == PS2KBD_RAWKEY_UP) {
+                    if (gmlKey >= 0) RunnerKeyboard_onKeyUp(runner->keyboard, gmlKey);
                 }
             }
-
-            prevButtons = buttons;
         }
 
-        // R2 removes speed cap (ignore waiting for vsync)
-        bool speedCapRemoved = (padResult != 0) && ((buttons & PAD_R2) == 0);
+        // R2 on pad1 removes speed cap (ignore waiting for vsync)
+        bool speedCapRemoved = padWasStable[0] && ((prevButtons[0] & PAD_R2) == 0);
 
         // Go to next room
         if (RunnerKeyboard_checkPressed(runner->keyboard, VK_PAGEUP)) {
@@ -570,7 +760,10 @@ int main(int argc, char* argv[]) {
         }
 
         if (RunnerKeyboard_checkPressed(runner->keyboard, VK_F12)) {
-            debugOverlayEnabled = !debugOverlayEnabled;
+            debugOverlayState = (debugOverlayState + 1) % 3;
+            Profiler_setEnabled(&vm->profiler, debugOverlayState == 1);
+            profilerFramesInWindow = 0;
+            profilerOverlayText[0] = '\0';
         }
 
         // Reset global interact state because I HATE when I get stuck while moving through rooms
@@ -606,18 +799,19 @@ int main(int argc, char* argv[]) {
         bool viewsEnabled = (activeRoom->flags & 1) != 0;
 
         if (viewsEnabled) {
-            repeat(8, vi) {
-                if (!activeRoom->views[vi].enabled) continue;
+            repeat(MAX_VIEWS, vi) {
+                RuntimeView* view = &runner->views[vi];
+                if (!view->enabled) continue;
 
-                int32_t viewX = activeRoom->views[vi].viewX;
-                int32_t viewY = activeRoom->views[vi].viewY;
-                int32_t viewW = activeRoom->views[vi].viewWidth;
-                int32_t viewH = activeRoom->views[vi].viewHeight;
-                int32_t portX = activeRoom->views[vi].portX;
-                int32_t portY = activeRoom->views[vi].portY;
-                int32_t portW = activeRoom->views[vi].portWidth;
-                int32_t portH = activeRoom->views[vi].portHeight;
-                float viewAngle = runner->viewAngles[vi];
+                int32_t viewX = view->viewX;
+                int32_t viewY = view->viewY;
+                int32_t viewW = view->viewWidth;
+                int32_t viewH = view->viewHeight;
+                int32_t portX = view->portX;
+                int32_t portY = view->portY;
+                int32_t portW = view->portWidth;
+                int32_t portH = view->portHeight;
+                float viewAngle = view->viewAngle;
 
                 runner->viewCurrent = (int32_t) vi;
                 renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH, portX, portY, portW, portH, viewAngle);
@@ -625,6 +819,13 @@ int main(int argc, char* argv[]) {
                 Runner_draw(runner);
 
                 renderer->vtable->endView(renderer);
+
+                int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : portW;
+                int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : portH;
+                renderer->vtable->beginGUI(renderer, guiW, guiH, portX, portY, portW, portH);
+                Runner_drawGUI(runner);
+                renderer->vtable->endGUI(renderer);
+
                 anyViewRendered = true;
             }
         }
@@ -635,6 +836,12 @@ int main(int argc, char* argv[]) {
             renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, 0, 0, gameW, gameH, 0.0f);
             Runner_draw(runner);
             renderer->vtable->endView(renderer);
+
+            int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : gameW;
+            int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : gameH;
+            renderer->vtable->beginGUI(renderer, guiW, guiH, 0, 0, gameW, gameH);
+            Runner_drawGUI(runner);
+            renderer->vtable->endGUI(renderer);
         }
 
         runner->viewCurrent = 0;
@@ -656,7 +863,7 @@ int main(int argc, char* argv[]) {
         float tickTime = (float) duration / (float) (kBUSCLK / 1000);
 
         // ===[ Debug Overlay ]===
-        if (debugOverlayEnabled) {
+        if (debugOverlayState == 0 || debugOverlayState == 1) {
             u64 debugColor = GS_SETREG_RGBAQ(0xFF, 0xFF, 0xFF, 0x80, 0x00);
             // sbrk(0) returns the actual heap frontier; true free = top of RAM - sbrk frontier
             void* heapTop = sbrk(0);
@@ -674,8 +881,24 @@ int main(int argc, char* argv[]) {
                 if (gsRenderer->eeCacheEntries[ai].atlasId >= 0) eeramAtlasCount++;
             }
 
-            snprintf(debugText, sizeof(debugText), "Tick: %.2fms\nFree: %d bytes\nVRAM Free: %lu bytes\nRoom Speed: %u%s\nAtlas: (%u, %u, %u)", tickTime, freeBytes, (unsigned long) vramFreeBytes, roomSpeed, speedCapRemoved ? " [UNCAPPED]" : "", vramAtlasCount, eeramAtlasCount, gsRenderer->atlasCount);
+            snprintf(debugText, sizeof(debugText), "Tick: %.2fms\nFree: %d bytes\nVRAM Free: %lu bytes\nRoom Speed: %u%s\nAtlas: (%u, %u, %u)%s", tickTime, freeBytes, (unsigned long) vramFreeBytes, roomSpeed, speedCapRemoved ? " [UNCAPPED]" : "", vramAtlasCount, eeramAtlasCount, gsRenderer->atlasCount, gsRenderer->evictedAtlasUsedInCurrentFrame ? " [THRASHING]" : "");
             gsKit_fontm_print_scaled(gsGlobal, gsFontM, 10.0f, 10.0f, 10, 0.6f, debugColor, debugText);
+
+            if (debugOverlayState == 1) {
+                profilerFramesInWindow++;
+                if (profilerFramesInWindow >= PROFILER_WINDOW_FRAMES) {
+                    char* profilerReport = Profiler_createReport(vm->profiler, 8, profilerFramesInWindow);
+                    if (profilerReport != nullptr) {
+                        snprintf(profilerOverlayText, sizeof(profilerOverlayText), "%s", profilerReport);
+                        free(profilerReport);
+                    }
+                    Profiler_reset(vm->profiler);
+                    profilerFramesInWindow = 0;
+                }
+                float profilerY = 10.0f + (15.6f * 5.0f) + 6.0f;
+                const char* profilerDisplay = profilerOverlayText[0] != '\0' ? profilerOverlayText : "GML Profiler (collecting...)";
+                gsKit_fontm_print_scaled(gsGlobal, gsFontM, 10.0f, profilerY, 10, 0.35f, debugColor, profilerDisplay);
+            }
         }
 
         // Execute draw queue and flip buffers

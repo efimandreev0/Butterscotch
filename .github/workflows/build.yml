@@ -7,8 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  build-glfw:
-    name: Build (GLFW/Linux)
+  build-glfw-linux-x86_64:
+    name: Build (GLFW/Linux x86_64)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,7 +20,7 @@ jobs:
           echo "date=$(git log -1 --format=%cd --date=short)" >> $GITHUB_OUTPUT
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake libglfw3-dev
+        run: sudo apt-get update && sudo apt-get install -y cmake libglfw3-dev libbz2-dev
 
       - name: Configure
         run: cmake -B build -DPLATFORM=glfw -DCMAKE_BUILD_TYPE=Release "-DBUTTERSCOTCH_COMMIT_HASH=${{ steps.commit-info.outputs.hash }}" "-DBUTTERSCOTCH_COMMIT_DATE=${{ steps.commit-info.outputs.date }}"
@@ -31,11 +31,11 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: butterscotch-glfw-linux
+          name: butterscotch-glfw-linux-x86_64
           path: build/butterscotch
 
-  build-glfw-windows:
-    name: Build (GLFW/Windows)
+  build-glfw-windows-x86_64:
+    name: Build (GLFW/Windows x86_64)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,6 +62,14 @@ jobs:
           make -C /tmp/glfw/build -j$(nproc)
           sudo make -C /tmp/glfw/build install
 
+      - name: Build bzip2 for MinGW
+        run: |
+          curl -L https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz -o /tmp/bzip2.tar.gz
+          tar -xf /tmp/bzip2.tar.gz -C /tmp
+          make -C /tmp/bzip2-1.0.8 libbz2.a CC=x86_64-w64-mingw32-gcc AR=x86_64-w64-mingw32-ar RANLIB=x86_64-w64-mingw32-ranlib -j$(nproc)
+          sudo cp /tmp/bzip2-1.0.8/libbz2.a /usr/x86_64-w64-mingw32/lib/
+          sudo cp /tmp/bzip2-1.0.8/bzlib.h /usr/x86_64-w64-mingw32/include/
+
       - name: Configure
         run: cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake -DPLATFORM=glfw -DCMAKE_BUILD_TYPE=Release "-DBUTTERSCOTCH_COMMIT_HASH=${{ steps.commit-info.outputs.hash }}" "-DBUTTERSCOTCH_COMMIT_DATE=${{ steps.commit-info.outputs.date }}"
 
@@ -71,14 +79,118 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: butterscotch-glfw-windows
+          name: butterscotch-glfw-windows-x86_64
+          path: build/butterscotch.exe
+
+  build-glfw-linux-x86:
+    name: Build (GLFW/Linux x86)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get commit info
+        id: commit-info
+        run: |
+          echo "hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "date=$(git log -1 --format=%cd --date=short)" >> $GITHUB_OUTPUT
+
+      - name: Install 32-bit toolchain and dependencies
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc-multilib g++-multilib pkg-config libbz2-dev:i386 libx11-dev:i386 libxrandr-dev:i386 libxinerama-dev:i386 libxcursor-dev:i386 libxi-dev:i386 libgl-dev:i386
+
+      - name: Build GLFW (32-bit)
+        run: |
+          git clone https://github.com/glfw/glfw.git /tmp/glfw
+          git -C /tmp/glfw checkout fdd14e65b1c29e4e6df875fb5669ec00d6793531
+          cmake -B /tmp/glfw/build -S /tmp/glfw \
+            -DCMAKE_C_FLAGS=-m32 \
+            -DCMAKE_INSTALL_PREFIX=/usr/local/glfw-x86 \
+            -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF -DGLFW_BUILD_DOCS=OFF -DGLFW_BUILD_WAYLAND=OFF
+          make -C /tmp/glfw/build -j$(nproc)
+          sudo make -C /tmp/glfw/build install
+
+      - name: Configure
+        run: |
+          export PKG_CONFIG_PATH=/usr/local/glfw-x86/lib/pkgconfig:/usr/lib/i386-linux-gnu/pkgconfig
+          cmake -B build -DPLATFORM=glfw -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-m32 -DCMAKE_EXE_LINKER_FLAGS=-m32 "-DBUTTERSCOTCH_COMMIT_HASH=${{ steps.commit-info.outputs.hash }}" "-DBUTTERSCOTCH_COMMIT_DATE=${{ steps.commit-info.outputs.date }}"
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: butterscotch-glfw-linux-x86
+          path: build/butterscotch
+
+  build-glfw-windows-x86:
+    name: Build (GLFW/Windows x86)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get commit info
+        id: commit-info
+        run: |
+          echo "hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "date=$(git log -1 --format=%cd --date=short)" >> $GITHUB_OUTPUT
+
+      - name: Install MinGW and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake mingw-w64
+
+      - name: Build GLFW for MinGW (32-bit)
+        run: |
+          git clone https://github.com/glfw/glfw.git /tmp/glfw
+          git -C /tmp/glfw checkout fdd14e65b1c29e4e6df875fb5669ec00d6793531
+          cmake -B /tmp/glfw/build -S /tmp/glfw \
+            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/cmake/mingw-w64-i686.cmake \
+            -DCMAKE_INSTALL_PREFIX=/usr/i686-w64-mingw32 \
+            -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF -DGLFW_BUILD_DOCS=OFF
+          make -C /tmp/glfw/build -j$(nproc)
+          sudo make -C /tmp/glfw/build install
+
+      - name: Build bzip2 for MinGW (32-bit)
+        run: |
+          curl -L https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz -o /tmp/bzip2.tar.gz
+          tar -xf /tmp/bzip2.tar.gz -C /tmp
+          make -C /tmp/bzip2-1.0.8 libbz2.a CC=i686-w64-mingw32-gcc AR=i686-w64-mingw32-ar RANLIB=i686-w64-mingw32-ranlib -j$(nproc)
+          sudo cp /tmp/bzip2-1.0.8/libbz2.a /usr/i686-w64-mingw32/lib/
+          sudo cp /tmp/bzip2-1.0.8/bzlib.h /usr/i686-w64-mingw32/include/
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-i686.cmake -DPLATFORM=glfw -DCMAKE_BUILD_TYPE=Release "-DBUTTERSCOTCH_COMMIT_HASH=${{ steps.commit-info.outputs.hash }}" "-DBUTTERSCOTCH_COMMIT_DATE=${{ steps.commit-info.outputs.date }}"
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: butterscotch-glfw-windows-x86
           path: build/butterscotch.exe
 
   build-ps2:
-    name: Build (PS2)
+    name: Build (PS2)${{ matrix.label }}
     runs-on: ubuntu-latest
     container:
       image: ps2dev/ps2dev:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: ""
+            artifact: butterscotch-ps2
+            extra_flags: ""
+          - label: " [Bytecode Version 16]"
+            artifact: butterscotch-ps2-bc16
+            extra_flags: "-DENABLE_BC16=ON -DENABLE_BC17=OFF"
+          - label: " [Bytecode Version 17]"
+            artifact: butterscotch-ps2-bc17
+            extra_flags: "-DENABLE_BC16=OFF -DENABLE_BC17=ON"
     steps:
       - name: Install build tools
         run: apk add --no-cache cmake make gmp-dev mpfr-dev mpc1-dev git
@@ -94,15 +206,95 @@ jobs:
           echo "date=$(git log -1 --format=%cd --date=format:'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
       - name: Configure
-        run: cmake -B build -DCMAKE_TOOLCHAIN_FILE=$PS2SDK/ps2dev.cmake -DPLATFORM=ps2 -DCMAKE_BUILD_TYPE=Release "-DBUTTERSCOTCH_COMMIT_HASH=${{ steps.commit-info.outputs.hash }}" "-DBUTTERSCOTCH_COMMIT_DATE=${{ steps.commit-info.outputs.date }}"
+        run: |
+          mkdir -p build
+          export CFLAGS="-fopt-info-inline-optimized=$PWD/build/inline_report.txt"
+          cmake -B build -DCMAKE_TOOLCHAIN_FILE=$PS2SDK/ps2dev.cmake -DPLATFORM=ps2 ${{ matrix.extra_flags }} -DCMAKE_BUILD_TYPE=Release "-DBUTTERSCOTCH_COMMIT_HASH=${{ steps.commit-info.outputs.hash }}" "-DBUTTERSCOTCH_COMMIT_DATE=${{ steps.commit-info.outputs.date }}"
 
       - name: Build
         run: |
           cmake --build build -j$(nproc)
           cp build/butterscotch build/butterscotch.elf
 
+      - name: Check executeLoop I-Cache fit
+        run: |
+          # Extract executeLoop function size(s) from the ELF symbol table.
+          # GCC IPA passes (constprop/isra/part) may clone a static function and
+          # suffix the clones (e.g. "executeLoop.constprop.0"). Sum all variants
+          # since they all share the 16 KB I-Cache budget.
+          # nm -S prints: address size type name
+          echo "Getting executeLoop size from ELF symbol table..."
+          SYMBOL_LINES=$(mips64r5900el-ps2-elf-nm -S build/butterscotch.elf | grep -E ' executeLoop(\..*)?$' || true)
+          if [ -z "$SYMBOL_LINES" ]; then
+            echo "::error::Could not find executeLoop symbol in ELF (is it stripped?)"
+            exit 1
+          fi
+          echo "$SYMBOL_LINES"
+          SIZE_DEC=0
+          VARIANT_COUNT=0
+          for SIZE_HEX in $(echo "$SYMBOL_LINES" | awk '{print $2}'); do
+            SIZE_DEC=$((SIZE_DEC + 0x$SIZE_HEX))
+            VARIANT_COUNT=$((VARIANT_COUNT + 1))
+          done
+          LIMIT=16384
+          if [ "$SIZE_DEC" -gt "$LIMIT" ]; then
+            echo "::error::executeLoop is $SIZE_DEC bytes across $VARIANT_COUNT variant(s), exceeding the PS2 16 KB I-Cache ($LIMIT bytes) by $((SIZE_DEC - LIMIT)) bytes"
+            echo "| Function | Size | Limit | Status |" >> $GITHUB_STEP_SUMMARY
+            echo "|----------|------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+            echo "| \`executeLoop\` ($VARIANT_COUNT variant(s)) | $SIZE_DEC bytes | $LIMIT bytes (16 KB) | **EXCEEDED** by $((SIZE_DEC - LIMIT)) bytes |" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          echo "| Function | Size | Limit | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| \`executeLoop\` ($VARIANT_COUNT variant(s)) | $SIZE_DEC bytes | $LIMIT bytes (16 KB) | $((LIMIT - SIZE_DEC)) bytes remaining |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Report executeLoop inlining
+        run: |
+          REPORT=build/inline_report.txt
+          if [ ! -s "$REPORT" ]; then
+            echo "::warning::No inline report produced at $REPORT"
+            exit 0
+          fi
+          # Extract callees that GCC reported as inlined into executeLoop
+          INLINED=$(grep -E "Inlin(ed|ing) .* into executeLoop" "$REPORT" \
+            | awk '{for(i=1;i<=NF;i++) if($i=="into" && $(i+1) ~ /^executeLoop/) {name=$(i-1); sub(/\/[0-9]+$/,"",name); print name}}' \
+            | sort -u)
+          # Cross-check: jal targets still present in the compiled executeLoop
+          # (including GCC-cloned variants like executeLoop.constprop.0).
+          VARIANT_NAMES=$(mips64r5900el-ps2-elf-nm build/butterscotch.elf | awk '/ executeLoop(\..*)?$/ {print $3}')
+          DISASM_ARGS=""
+          for NAME in $VARIANT_NAMES; do
+            DISASM_ARGS="$DISASM_ARGS --disassemble=$NAME"
+          done
+          NOT_INLINED=$(mips64r5900el-ps2-elf-objdump -d $DISASM_ARGS build/butterscotch.elf 2>/dev/null \
+            | grep -oE "jal[[:space:]]+[0-9a-f]+ <[^>]+>" \
+            | sed -E 's/.*<([^>]+)>/\1/' \
+            | sort -u)
+          INLINED_COUNT=$(printf "%s\n" "$INLINED" | grep -c . || true)
+          NOT_INLINED_COUNT=$(printf "%s\n" "$NOT_INLINED" | grep -c . || true)
+          {
+            echo ""
+            echo "### \`executeLoop\` inlining report"
+            echo ""
+            echo "<details><summary>Inlined into <code>executeLoop</code> ($INLINED_COUNT callees, per GCC <code>-fopt-info-inline-optimized</code>)</summary>"
+            echo ""
+            echo '```'
+            printf "%s\n" "$INLINED"
+            echo '```'
+            echo ""
+            echo "</details>"
+            echo ""
+            echo "<details><summary>Still called via <code>jal</code> from <code>executeLoop</code> ($NOT_INLINED_COUNT symbols, per <code>objdump</code>)</summary>"
+            echo ""
+            echo '```'
+            printf "%s\n" "$NOT_INLINED"
+            echo '```'
+            echo ""
+            echo "</details>"
+          } >> $GITHUB_STEP_SUMMARY
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: butterscotch-ps2
+          name: ${{ matrix.artifact }}
           path: build/butterscotch.elf

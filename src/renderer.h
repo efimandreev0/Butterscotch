@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common.h"
 #include <stdint.h>
 #include <math.h>
 
@@ -17,6 +18,9 @@ typedef struct {
     void (*endFrame)(Renderer* renderer);
     void (*beginView)(Renderer* renderer, int32_t viewX, int32_t viewY, int32_t viewW, int32_t viewH, int32_t portX, int32_t portY, int32_t portW, int32_t portH, float viewAngle);
     void (*endView)(Renderer* renderer);
+    // GUI pass: coordinates are (0,0)..(guiW,guiH) mapped to the current view's port rect. Called after endView.
+    void (*beginGUI)(Renderer* renderer, int32_t guiW, int32_t guiH, int32_t portX, int32_t portY, int32_t portW, int32_t portH);
+    void (*endGUI)(Renderer* renderer);
     void (*drawSprite)(Renderer* renderer, int32_t tpagIndex, float x, float y, float originX, float originY, float xscale, float yscale, float angleDeg, uint32_t color, float alpha);
     void (*drawSpritePart)(Renderer* renderer, int32_t tpagIndex, int32_t srcOffX, int32_t srcOffY, int32_t srcW, int32_t srcH, float x, float y, float xscale, float yscale, uint32_t color, float alpha);
     void (*drawRectangle)(Renderer* renderer, float x1, float y1, float x2, float y2, uint32_t color, float alpha, bool outline);
@@ -221,6 +225,37 @@ static void Renderer_drawBackgroundTiled(Renderer* renderer, int32_t tpagIndex, 
             if (!tileX) break;
         }
         if (!tileY) break;
+    }
+}
+
+// Draws a tiled sprite across the room
+static void Renderer_drawSpriteTiled(Renderer* renderer, int32_t spriteIndex, int32_t subimg, float x, float y, float xscale, float yscale, float roomW, float roomH, uint32_t color, float alpha) {
+    DataWin* dw = renderer->dataWin;
+    int32_t tpagIndex = Renderer_resolveTPAGIndex(dw, spriteIndex, subimg);
+    if (0 > tpagIndex) return;
+
+    Sprite* sprite = &dw->sprt.sprites[spriteIndex];
+    TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
+
+    float originX = (float) sprite->originX;
+    float originY = (float) sprite->originY;
+
+    // The tile size is the original sprite dimensions scaled
+    float tileW = (float) tpag->boundingWidth * fabsf(xscale);
+    float tileH = (float) tpag->boundingHeight * fabsf(yscale);
+    if (0 >= tileW || 0 >= tileH) return;
+
+    // Compute the start position so tiles cover the entire room
+    // The origin-adjusted position wraps into the tile grid
+    float startX = fmodf(x - originX * fabsf(xscale), tileW);
+    if (startX > 0) startX -= tileW;
+    float startY = fmodf(y - originY * fabsf(yscale), tileH);
+    if (startY > 0) startY -= tileH;
+
+    for (float dy = startY; roomH > dy; dy += tileH) {
+        for (float dx = startX; roomW > dx; dx += tileW) {
+            renderer->vtable->drawSprite(renderer, tpagIndex, dx + originX * fabsf(xscale), dy + originY * fabsf(yscale), originX, originY, xscale, yscale, 0.0f, color, alpha);
+        }
     }
 }
 

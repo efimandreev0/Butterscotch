@@ -296,7 +296,7 @@ static uint32_t countFreeChunks(GsRenderer* gs) {
 
 // Find the atlas with the oldest lastUsed time (LRU victim).
 // Returns the atlasId, or -1 if no loaded atlases.
-static int16_t findLRUVictim(GsRenderer* gs) {
+static int16_t findLRUVictim(GsRenderer* gs, bool* wasUsedOnThisFrame) {
     uint64_t oldest = UINT64_MAX;
     int16_t victimAtlas = -1;
     forEach(VRAMChunk, chunk, gs->chunks, gs->chunkCount) {
@@ -305,6 +305,8 @@ static int16_t findLRUVictim(GsRenderer* gs) {
             victimAtlas = chunk->atlasId;
         }
     }
+    if (victimAtlas != -1)
+        *wasUsedOnThisFrame = oldest == gs->frameCounter;
     return victimAtlas;
 }
 
@@ -351,9 +353,19 @@ static int32_t allocateChunks(GsRenderer* gs, int chunksNeeded) {
 
     // Attempt 2: evict LRU victims one at a time until space is found
     repeat(gs->chunkCount, attempts) {
-        int16_t victim = findLRUVictim(gs);
+        bool wasUsedOnThisFrame = false;
+
+        int16_t victim = findLRUVictim(gs, &wasUsedOnThisFrame);
         if (0 > victim)
             break;
+
+        // We only need to flush if the victim was used on this frame
+        // If it wasn't, then we can evict with no care in the world
+        if (wasUsedOnThisFrame) {
+            fprintf(stderr, "GsRenderer: Flushing draw queue before VRAM evicting because atlas was used on the current frame\n");
+            gs->evictedAtlasUsedInCurrentFrame = true;
+            gsKit_queue_exec(gs->gsGlobal);
+        }
 
         evictAtlas(gs, victim);
 
@@ -362,6 +374,11 @@ static int32_t allocateChunks(GsRenderer* gs, int chunksNeeded) {
         if (idx >= 0)
             return idx;
     }
+
+    // At this point we are lost, just flush and hope for the best
+    gs->evictedAtlasUsedInCurrentFrame = true;
+    fprintf(stderr, "GsRenderer: Flushing draw queue before VRAM defrag\n");
+    gsKit_queue_exec(gs->gsGlobal);
 
     // Attempt 3: defrag - evict ALL and let them reload on demand
     // Handles fragmentation where enough free chunks exist but aren't consecutive
@@ -378,10 +395,41 @@ static int32_t allocateChunks(GsRenderer* gs, int chunksNeeded) {
 }
 
 // ===[ EE RAM Atlas Cache (Bump Allocator with LRU Eviction + Compaction) ]===
-// Caches compressed atlas data in a 4 MiB EE RAM buffer to avoid repeated
-// CDVD reads when atlases are evicted from VRAM and need to be re-uploaded.
+// Caches uncompressed atlas pixel data in a EE RAM buffer, allowingzero-copy DMA uploads to VRAM without per-upload decompression or temp allocations.
 
 #define EE_CACHE_CAPACITY (2 * 1024 * 1024) // 2 MiB
+
+// Uncompressed pixel data size for a 512x512 atlas at the given bpp.
+static uint32_t atlasUncompressedSize(uint8_t bpp) {
+    return (bpp == 4) ? (ATLAS_WIDTH * ATLAS_HEIGHT / 2) : (ATLAS_WIDTH * ATLAS_HEIGHT);
+}
+
+// Decompress atlas pixel data from a compressed buffer (TEX_HEADER_SIZE header + RLE/raw payload).
+// Writes uncompressed indexed pixels into outBuf (must be large enough and 128-byte aligned).
+static void decompressAtlasPixels(const uint8_t* compressedData, uint8_t* outBuf) {
+    uint16_t width = BinaryUtils_readUint16(compressedData + 1);
+    uint16_t height = BinaryUtils_readUint16(compressedData + 3);
+    uint8_t bpp = BinaryUtils_readUint8(compressedData + 5);
+    uint32_t pixelDataSize = BinaryUtils_readUint32(compressedData + 6);
+    uint8_t compressionType = BinaryUtils_readUint8(compressedData + 10);
+
+    uint32_t uncompressedSize = (bpp == 4) ? (uint32_t) ((width * height + 1) / 2) : (uint32_t) (width * height);
+    const uint8_t* rawData = compressedData + TEX_HEADER_SIZE;
+
+    if (compressionType == 1) {
+        // RLE decompression
+        uint32_t srcPos = 0, dstPos = 0;
+        while (pixelDataSize > srcPos + 1 && uncompressedSize > dstPos) {
+            uint8_t runLength = rawData[srcPos++];
+            uint8_t value = rawData[srcPos++];
+            for (uint8_t j = 0; runLength > j && uncompressedSize > dstPos; j++) {
+                outBuf[dstPos++] = value;
+            }
+        }
+    } else {
+        memcpy(outBuf, rawData, uncompressedSize);
+    }
+}
 
 // Initialize the EE RAM cache. Called from gsInit after opening TEXTURES.BIN.
 static void initEeCache(GsRenderer* gs) {
@@ -414,30 +462,46 @@ static void initEeCache(GsRenderer* gs) {
 }
 
 // Preload atlases sequentially into the EE cache until the buffer is full.
+// Reads compressed data from disc, decompresses, and stores uncompressed pixels in the cache.
 static void preloadEeCache(GsRenderer* gs) {
     uint32_t preloaded = 0;
 
+    // Allocate a temp buffer for reading compressed data from disc
+    uint32_t maxDiskSize = 0;
     repeat(gs->atlasCount, i) {
-        uint32_t dataSize = gs->atlasDataSizes[i];
-        if (gs->eeCacheBumpPtr + dataSize > gs->eeCacheCapacity) {
+        if (gs->atlasDataSizes[i] > maxDiskSize) maxDiskSize = gs->atlasDataSizes[i];
+    }
+    uint8_t* tempBuf = (uint8_t*) safeMemalign(128, maxDiskSize);
+
+    repeat(gs->atlasCount, i) {
+        uint8_t bpp = gs->atlasBpp[i];
+        uint32_t uncompSize = atlasUncompressedSize(bpp);
+        if (gs->eeCacheBumpPtr + uncompSize > gs->eeCacheCapacity) {
             break;
         }
 
+        // Read compressed data from disc into temp buffer
+        uint32_t dataSize = gs->atlasDataSizes[i];
         fseek(gs->texturesFile, (long) gs->atlasOffsets[i], SEEK_SET);
-        size_t bytesRead = fread(gs->eeCache + gs->eeCacheBumpPtr, 1, dataSize, gs->texturesFile);
+        size_t bytesRead = fread(tempBuf, 1, dataSize, gs->texturesFile);
         if (bytesRead != dataSize) {
             fprintf(stderr, "GsRenderer: EE cache preload short read for atlas %u (expected %u, got %zu)\n", i, dataSize, bytesRead);
             break;
         }
 
+        // Decompress directly into the EE cache
+        decompressAtlasPixels(tempBuf, gs->eeCache + gs->eeCacheBumpPtr);
+
         gs->eeCacheEntries[i].atlasId = (int16_t) i;
         gs->eeCacheEntries[i].offset = gs->eeCacheBumpPtr;
-        gs->eeCacheEntries[i].size = dataSize;
+        gs->eeCacheEntries[i].size = uncompSize;
         gs->eeCacheEntries[i].lastUsed = gs->frameCounter;
 
-        gs->eeCacheBumpPtr += dataSize;
+        gs->eeCacheBumpPtr += uncompSize;
         preloaded++;
     }
+
+    free(tempBuf);
 
     fprintf(stderr, "GsRenderer: EE cache initialized - %u MB, %u atlases preloaded (%u KB used)\n", EE_CACHE_CAPACITY / (1024 * 1024), preloaded, gs->eeCacheBumpPtr / 1024);
 }
@@ -545,138 +609,55 @@ static void eeCacheInsert(GsRenderer* gs, uint16_t atlasId, const uint8_t* data,
     gs->eeCacheBumpPtr += size;
 }
 
-// Upload atlas pixel data from TEXTURES.BIN to the given VRAM chunk(s).
+// Upload atlas pixel data to the given VRAM chunk(s).
+// On cache hit: zero-copy DMA directly from EE cache (no decompression, no temp allocations).
+// On cache miss: reads compressed data from TEXTURES.BIN, decompresses, inserts into EE cache, then uploads.
 static void uploadAtlasToChunk(GsRenderer* gs, uint16_t atlasId, int32_t firstChunk) {
-    // Try EE RAM cache first (avoids slow CDVD reads)
-    uint8_t* cached = eeCacheLookup(gs, atlasId);
+    uint8_t* uploadData = eeCacheLookup(gs, atlasId);
+    uint8_t* tempPixelData = nullptr; // Non-null only if we need to free it after upload
     const char* atlasSource = "RAM";
 
-    if (cached == nullptr) {
-        // Cache miss: read from TEXTURES.BIN and insert into EE cache
+    if (uploadData == nullptr) {
+        // Cache miss: read compressed data from TEXTURES.BIN and decompress
         uint32_t dataSize = gs->atlasDataSizes[atlasId];
-        uint8_t* tempBuf = (uint8_t*) safeMemalign(128, dataSize);
+        uint8_t* compressedBuf = (uint8_t*) safeMemalign(128, dataSize);
 
         fseek(gs->texturesFile, (long) gs->atlasOffsets[atlasId], SEEK_SET);
-        size_t bytesRead = fread(tempBuf, 1, dataSize, gs->texturesFile);
+        size_t bytesRead = fread(compressedBuf, 1, dataSize, gs->texturesFile);
         if (bytesRead != dataSize) {
             fprintf(stderr, "GsRenderer: Short read for atlas %u (expected %u, got %zu)\n", atlasId, dataSize, bytesRead);
             abort();
         }
 
-        eeCacheInsert(gs, atlasId, tempBuf, dataSize);
-        free(tempBuf);
+        uint8_t bpp = gs->atlasBpp[atlasId];
+        uint32_t uncompSize = atlasUncompressedSize(bpp);
+        tempPixelData = (uint8_t*) safeMemalign(128, uncompSize);
+        decompressAtlasPixels(compressedBuf, tempPixelData);
+        free(compressedBuf);
 
+        // Try to insert uncompressed data into EE cache
+        eeCacheInsert(gs, atlasId, tempPixelData, uncompSize);
         atlasSource = "disk";
-        cached = eeCacheLookup(gs, atlasId);
-        if (cached == nullptr) {
-            // EE cache insert failed (atlas too large?), fall back to direct file read
-            fprintf(stderr, "GsRenderer: EE cache insert failed for atlas %u, reading directly from CDVD\n", atlasId);
-            fseek(gs->texturesFile, (long) gs->atlasOffsets[atlasId], SEEK_SET);
 
-            uint8_t header[TEX_HEADER_SIZE];
-            fread(header, 1, TEX_HEADER_SIZE, gs->texturesFile);
-
-            uint16_t width = BinaryUtils_readUint16(header + 1);
-            uint16_t height = BinaryUtils_readUint16(header + 3);
-            uint8_t bpp = BinaryUtils_readUint8(header + 5);
-            uint32_t pixelDataSize = BinaryUtils_readUint32(header + 6);
-            uint8_t compressionType = BinaryUtils_readUint8(header + 10);
-
-            uint8_t* rawData = (uint8_t*) safeMemalign(128, pixelDataSize);
-            fread(rawData, 1, pixelDataSize, gs->texturesFile);
-
-            // Decompress + upload (duplicated for fallback path)
-            uint8_t* pixelData;
-            if (compressionType == 1) {
-                uint32_t uncompressedSize = (bpp == 4) ? (uint32_t)((width * height + 1) / 2) : (uint32_t)(width * height);
-                pixelData = (uint8_t*) safeMemalign(128, uncompressedSize);
-                uint32_t srcPos = 0, dstPos = 0;
-                while (pixelDataSize > srcPos + 1 && uncompressedSize > dstPos) {
-                    uint8_t runLength = rawData[srcPos++];
-                    uint8_t value = rawData[srcPos++];
-                    for (uint8_t j = 0; runLength > j && uncompressedSize > dstPos; j++) {
-                        pixelData[dstPos++] = value;
-                    }
-                }
-                free(rawData);
-            } else {
-                pixelData = rawData;
-            }
-
-            uint8_t psm = (bpp == 4) ? GS_PSM_T4 : GS_PSM_T8;
-            uint32_t tbw = ATLAS_WIDTH / 64;
-            uint32_t vramAddr = gs->textureVramBase + (uint32_t) firstChunk * VRAM_CHUNK_SIZE;
-            gsKit_texture_send((u32*) pixelData, ATLAS_WIDTH, ATLAS_HEIGHT, vramAddr, psm, tbw, GS_CLUT_TEXTURE);
-
-            int chunksUsed = (bpp == 8) ? 2 : 1;
-            repeat(chunksUsed, i) {
-                gs->chunks[firstChunk + i].atlasId = (int16_t) atlasId;
-                gs->chunks[firstChunk + i].lastUsed = gs->frameCounter;
-            }
-            gs->atlasToChunk[atlasId] = (int16_t) firstChunk;
-            free(pixelData);
-            return;
+        uploadData = eeCacheLookup(gs, atlasId);
+        if (uploadData != nullptr) {
+            // Insert succeeded, use cached copy for DMA upload
+            free(tempPixelData);
+            tempPixelData = nullptr;
+        } else {
+            // EE cache insert failed, upload directly from temp buffer
+            fprintf(stderr, "GsRenderer: EE cache insert failed for atlas %u, uploading directly\n", atlasId);
+            uploadData = tempPixelData;
         }
     }
 
-    // Parse header from cached data
-    uint8_t* header = cached;
-
-    uint8_t version = header[0];
-    if (version != 0) {
-        fprintf(stderr, "GsRenderer: Unsupported TEX version %u for atlas %u\n", version, atlasId);
-        abort();
-    }
-
-    uint16_t width = BinaryUtils_readUint16(header + 1);
-    uint16_t height = BinaryUtils_readUint16(header + 3);
-    uint8_t bpp = BinaryUtils_readUint8(header + 5);
-    uint32_t pixelDataSize = BinaryUtils_readUint32(header + 6);
-    uint8_t compressionType = BinaryUtils_readUint8(header + 10);
-
-    if (width != ATLAS_WIDTH || height != ATLAS_HEIGHT) {
-        fprintf(stderr, "GsRenderer: Atlas %u unexpected dimensions %ux%u (expected %ux%u)\n", atlasId, width, height, ATLAS_WIDTH, ATLAS_HEIGHT);
-        abort();
-    }
-
-    if (bpp != 4 && bpp != 8) {
-        fprintf(stderr, "GsRenderer: Atlas %u unsupported bpp %u\n", atlasId, bpp);
-        abort();
-    }
-
-    // Copy compressed pixel data into DMA-aligned buffer
-    uint8_t* rawData = (uint8_t*) safeMemalign(128, pixelDataSize);
-    memcpy(rawData, cached + TEX_HEADER_SIZE, pixelDataSize);
-
-    // Decompress if needed
-    uint8_t* pixelData;
-    if (compressionType == 1) {
-        // RLE decompression
-        uint32_t uncompressedSize = (bpp == 4) ? (uint32_t)((width * height + 1) / 2) : (uint32_t)(width * height);
-        pixelData = (uint8_t*) safeMemalign(128, uncompressedSize);
-
-        uint32_t srcPos = 0;
-        uint32_t dstPos = 0;
-        while (pixelDataSize > srcPos + 1 && uncompressedSize > dstPos) {
-            uint8_t runLength = rawData[srcPos++];
-            uint8_t value = rawData[srcPos++];
-            for (uint8_t j = 0; runLength > j && uncompressedSize > dstPos; j++) {
-                pixelData[dstPos++] = value;
-            }
-        }
-
-        free(rawData);
-    } else {
-        // Uncompressed, use data directly
-        pixelData = rawData;
-    }
-
-    // Upload pixel data to VRAM at the chunk's address
+    // Upload pixel data to VRAM
+    uint8_t bpp = gs->atlasBpp[atlasId];
     uint8_t psm = (bpp == 4) ? GS_PSM_T4 : GS_PSM_T8;
     uint32_t tbw = ATLAS_WIDTH / 64;
     uint32_t vramAddr = gs->textureVramBase + (uint32_t) firstChunk * VRAM_CHUNK_SIZE;
 
-    gsKit_texture_send((u32*) pixelData, ATLAS_WIDTH, ATLAS_HEIGHT, vramAddr, psm, tbw, GS_CLUT_TEXTURE);
+    gsKit_texture_send((u32*) uploadData, ATLAS_WIDTH, ATLAS_HEIGHT, vramAddr, psm, tbw, GS_CLUT_TEXTURE);
 
     // Update chunk state
     int chunksUsed = (bpp == 8) ? 2 : 1;
@@ -688,7 +669,7 @@ static void uploadAtlasToChunk(GsRenderer* gs, uint16_t atlasId, int32_t firstCh
 
     fprintf(stderr, "GsRenderer: Atlas %u uploaded to chunk %d (VRAM 0x%08X, %ubpp, src: %s)\n", atlasId, firstChunk, vramAddr, bpp, atlasSource);
 
-    free(pixelData);
+    free(tempPixelData);
 }
 
 // Ensure an atlas is loaded into VRAM, using LRU eviction if needed.
@@ -897,17 +878,18 @@ static void gsDestroy(Renderer* renderer) {
     free(gs);
 }
 
-static void gsBeginFrame(Renderer* renderer, [[maybe_unused]] int32_t gameW, [[maybe_unused]] int32_t gameH, [[maybe_unused]] int32_t windowW, [[maybe_unused]] int32_t windowH) {
+static void gsBeginFrame(Renderer* renderer, MAYBE_UNUSED int32_t gameW, MAYBE_UNUSED int32_t gameH, MAYBE_UNUSED int32_t windowW, MAYBE_UNUSED int32_t windowH) {
     GsRenderer* gs = (GsRenderer*) renderer;
     gs->zCounter = 1;
     gs->frameCounter++;
+    gs->evictedAtlasUsedInCurrentFrame = false;
 }
 
-static void gsEndFrame([[maybe_unused]] Renderer* renderer) {
+static void gsEndFrame(MAYBE_UNUSED Renderer* renderer) {
     // No-op: flip happens in main loop
 }
 
-static void gsBeginView(Renderer* renderer, int32_t viewX, int32_t viewY, int32_t viewW, int32_t viewH, [[maybe_unused]] int32_t portX, [[maybe_unused]] int32_t portY, [[maybe_unused]] int32_t portW, [[maybe_unused]] int32_t portH, [[maybe_unused]] float viewAngle) {
+static void gsBeginView(Renderer* renderer, int32_t viewX, int32_t viewY, int32_t viewW, int32_t viewH, MAYBE_UNUSED int32_t portX, MAYBE_UNUSED int32_t portY, MAYBE_UNUSED int32_t portW, MAYBE_UNUSED int32_t portH, MAYBE_UNUSED float viewAngle) {
     GsRenderer* gs = (GsRenderer*) renderer;
     gs->viewX = viewX;
     gs->viewY = viewY;
@@ -927,7 +909,29 @@ static void gsBeginView(Renderer* renderer, int32_t viewX, int32_t viewY, int32_
     gs->offsetY = (448.0f - renderedH) / 2.0f;
 }
 
-static void gsEndView([[maybe_unused]] Renderer* renderer) {
+static void gsEndView(MAYBE_UNUSED Renderer* renderer) {
+    // No-op
+}
+
+static void gsBeginGUI(Renderer* renderer, int32_t guiW, int32_t guiH, MAYBE_UNUSED int32_t portX, MAYBE_UNUSED int32_t portY, MAYBE_UNUSED int32_t portW, MAYBE_UNUSED int32_t portH) {
+    GsRenderer* gs = (GsRenderer*) renderer;
+    gs->viewX = 0;
+    gs->viewY = 0;
+
+    if (guiW > 0 && guiH > 0) {
+        gs->scaleX = 640.0f / (float) guiW;
+        gs->scaleY = gs->scaleX;
+    } else {
+        gs->scaleX = 2.0f;
+        gs->scaleY = 2.0f;
+    }
+
+    float renderedH = (float) guiH * gs->scaleY;
+    gs->offsetX = 0.0f;
+    gs->offsetY = (448.0f - renderedH) / 2.0f;
+}
+
+static void gsEndGUI(MAYBE_UNUSED Renderer* renderer) {
     // No-op
 }
 
@@ -1107,10 +1111,13 @@ static void gsDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t srcO
     }
 
     AtlasTPAGEntry* atlasEntry = &gs->atlasTPAGEntries[tpagIndex];
+    TexturePageItem* tpag = &renderer->dataWin->tpag.items[tpagIndex];
 
-    // Intersect the requested source rect with the crop region
-    float cX = (float) atlasEntry->cropX;
-    float cY = (float) atlasEntry->cropY;
+    // srcOffX/srcOffY are in source-page space (Renderer_drawSpritePartExt subtracts tpag->targetX/Y to convert from GML sprite-bounding space).
+    // The preprocessor's cropX/cropY, however, are in sprite-bounding space (extractFromTPAG builds a boundingWidth x boundingHeight image with pixels offset by targetX/targetY, then cropTransparentBorders runs on that).
+    // Subtract targetX/targetY here so both sides of the intersection live in the same coordinate system.
+    float cX = (float) atlasEntry->cropX - (float) tpag->targetX;
+    float cY = (float) atlasEntry->cropY - (float) tpag->targetY;
     float cW = (float) atlasEntry->cropW;
     float cH = (float) atlasEntry->cropH;
 
@@ -1185,7 +1192,7 @@ static void gsDrawRectangle(Renderer* renderer, float x1, float y1, float x2, fl
     }
 }
 
-static void gsDrawLine(Renderer* renderer, float x1, float y1, float x2, float y2, [[maybe_unused]] float width, uint32_t color, float alpha) {
+static void gsDrawLine(Renderer* renderer, float x1, float y1, float x2, float y2, MAYBE_UNUSED float width, uint32_t color, float alpha) {
     GsRenderer* gs = (GsRenderer*) renderer;
 
     uint8_t r = BGR_R(color);
@@ -1204,11 +1211,91 @@ static void gsDrawLine(Renderer* renderer, float x1, float y1, float x2, float y
 }
 
 // PS2 gsKit doesn't support per-vertex colors on lines, so we just use color1
-static void gsDrawLineColor(Renderer* renderer, float x1, float y1, float x2, float y2, float width, uint32_t color1, [[maybe_unused]] uint32_t color2, float alpha) {
+static void gsDrawLineColor(Renderer* renderer, float x1, float y1, float x2, float y2, float width, uint32_t color1, MAYBE_UNUSED uint32_t color2, float alpha) {
     renderer->vtable->drawLine(renderer, x1, y1, x2, y2, width, color1, alpha);
 }
 
-static void gsDrawText(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, [[maybe_unused]] float angleDeg) {
+// Resolved font state shared between gsDrawText and gsDrawTextColor
+typedef struct {
+    Font* font;
+    GSTEXTURE tex; // GL equivalent: GLuint texId + int32_t texW/texH
+    AtlasTPAGEntry* atlasEntry; // GL equivalent: TexturePageItem* fontTpag
+    float ratioX, ratioY; // atlas-to-original scale (GL doesn't need this, uses texW/texH directly)
+    Sprite* spriteFontSprite; // source sprite for sprite fonts (nullptr for regular fonts)
+} GsFontState;
+
+// Resolves font texture state
+// Returns false if the font can't be drawn
+static bool gsResolveFontState(GsRenderer* gs, DataWin* dw, Font* font, GsFontState* state) {
+    state->font = font;
+    state->atlasEntry = nullptr;
+    state->ratioX = 1.0f;
+    state->ratioY = 1.0f;
+    state->spriteFontSprite = nullptr;
+
+    if (!font->isSpriteFont) {
+        int32_t fontTpagIndex = DataWin_resolveTPAG(dw, font->textureOffset);
+        if (0 > fontTpagIndex) return false;
+
+        if (!setupTextureForTPAG(gs, &state->tex, fontTpagIndex)) return false;
+
+        state->atlasEntry = &gs->atlasTPAGEntries[fontTpagIndex];
+        TexturePageItem* fontTpag = &dw->tpag.items[fontTpagIndex];
+
+        float origW = (float) fontTpag->sourceWidth;
+        float origH = (float) fontTpag->sourceHeight;
+        state->ratioX = (origW > 0) ? ((float) state->atlasEntry->width / origW) : 1.0f;
+        state->ratioY = (origH > 0) ? ((float) state->atlasEntry->height / origH) : 1.0f;
+    } else if (font->spriteIndex >= 0 && dw->sprt.count > (uint32_t) font->spriteIndex) {
+        state->spriteFontSprite = &dw->sprt.sprites[font->spriteIndex];
+    }
+    return true;
+}
+
+// Resolves UV coordinates, texture ID, and local position for a single glyph
+// Returns false if the glyph can't be drawn
+static bool gsResolveGlyph(GsRenderer* gs, DataWin* dw, GsFontState* state, FontGlyph* glyph, float cursorX, float cursorY, GSTEXTURE* outTex, float* outU0, float* outV0, float* outU1, float* outV1, float* outLocalX0, float* outLocalY0) {
+    Font* font = state->font;
+    if (font->isSpriteFont && state->spriteFontSprite != nullptr) {
+        Sprite* sprite = state->spriteFontSprite;
+        int32_t glyphIndex = (int32_t) (glyph - font->glyphs);
+        if (0 > glyphIndex || glyphIndex >= (int32_t) sprite->textureCount) return false;
+
+        uint32_t tpagOffset = sprite->textureOffsets[glyphIndex];
+        int32_t tpagIdx = DataWin_resolveTPAG(dw, tpagOffset);
+        if (0 > tpagIdx) return false;
+
+        if (!setupTextureForTPAG(gs, outTex, tpagIdx)) return false;
+
+        AtlasTPAGEntry* glyphAtlas = &gs->atlasTPAGEntries[tpagIdx];
+        TexturePageItem* glyphTpag = &dw->tpag.items[tpagIdx];
+        float gOrigW = (float) glyphTpag->sourceWidth;
+        float gOrigH = (float) glyphTpag->sourceHeight;
+        float gRatioX = (gOrigW > 0) ? ((float) glyphAtlas->width / gOrigW) : 1.0f;
+        float gRatioY = (gOrigH > 0) ? ((float) glyphAtlas->height / gOrigH) : 1.0f;
+
+        *outU0 = (float) glyphAtlas->atlasX;
+        *outV0 = (float) glyphAtlas->atlasY;
+        *outU1 = *outU0 + (float) glyph->sourceWidth * gRatioX;
+        *outV1 = *outV0 + (float) glyph->sourceHeight * gRatioY;
+
+        *outLocalX0 = cursorX + (float) glyph->offset;
+        *outLocalY0 = cursorY + (float) ((int32_t) glyphTpag->targetY - sprite->originY);
+    } else {
+        *outTex = state->tex;
+
+        *outU0 = (float) state->atlasEntry->atlasX + (float) glyph->sourceX * state->ratioX;
+        *outV0 = (float) state->atlasEntry->atlasY + (float) glyph->sourceY * state->ratioY;
+        *outU1 = *outU0 + (float) glyph->sourceWidth * state->ratioX;
+        *outV1 = *outV0 + (float) glyph->sourceHeight * state->ratioY;
+
+        *outLocalX0 = cursorX + (float) glyph->offset;
+        *outLocalY0 = cursorY;
+    }
+    return true;
+}
+
+static void gsDrawText(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, MAYBE_UNUSED float angleDeg) {
     GsRenderer* gs = (GsRenderer*) renderer;
     DataWin* dw = renderer->dataWin;
 
@@ -1216,66 +1303,46 @@ static void gsDrawText(Renderer* renderer, const char* text, float x, float y, f
 
     Font* font = &dw->font.fonts[renderer->drawFont];
 
-    // Resolve font texture page and set up GSTEXTURE
-    int32_t fontTpagIndex = DataWin_resolveTPAG(dw, font->textureOffset);
-    bool hasTexture = false;
-    GSTEXTURE tex;
-    AtlasTPAGEntry* atlasEntry = nullptr;
-    float ratioX = 1.0f;
-    float ratioY = 1.0f;
-
-    if (fontTpagIndex >= 0) {
-        hasTexture = setupTextureForTPAG(gs, &tex, fontTpagIndex);
-        if (hasTexture) {
-            atlasEntry = &gs->atlasTPAGEntries[fontTpagIndex];
-            TexturePageItem* fontTpag = &dw->tpag.items[fontTpagIndex];
-
-            // Compute ratio between atlas size and original TPAG size (in case the preprocessor downscaled)
-            float origW = (float) fontTpag->sourceWidth;
-            float origH = (float) fontTpag->sourceHeight;
-            ratioX = (origW > 0) ? ((float) atlasEntry->width / origW) : 1.0f;
-            ratioY = (origH > 0) ? ((float) atlasEntry->height / origH) : 1.0f;
-        }
-    }
+    GsFontState fontState;
+    if (!gsResolveFontState(gs, dw, font, &fontState)) return;
 
     // GS modulate mode: Output = Texture * Vertex / 128
     // Scale vertex RGB from 0-255 to 0-128 so white (255) becomes 1.0x multiplier
     uint32_t color = renderer->drawColor;
-    uint8_t r = hasTexture ? (BGR_R(color) >> 1) : BGR_R(color);
-    uint8_t g = hasTexture ? (BGR_G(color) >> 1) : BGR_G(color);
-    uint8_t b = hasTexture ? (BGR_B(color) >> 1) : BGR_B(color);
     uint8_t a = alphaToGS(renderer->drawAlpha);
-    u64 textColor = GS_SETREG_RGBAQ(r, g, b, a, 0x00);
 
-    // Preprocess GML text (# -> \n, \# -> #)
-    char* processed = TextUtils_preprocessGmlText(text);
-    int32_t textLen = (int32_t) strlen(processed);
+    int32_t textLen = (int32_t) strlen(text);
 
     // Vertical alignment
-    int32_t lineCount = TextUtils_countLines(processed, textLen);
-    float totalHeight = (float) lineCount * (float) font->emSize;
+    int32_t lineCount = TextUtils_countLines(text, textLen);
+    float lineStride = TextUtils_lineStride(font);
     float valignOffset = 0;
-    if (renderer->drawValign == 1) valignOffset = -totalHeight / 2.0f;
-    else if (renderer->drawValign == 2) valignOffset = -totalHeight;
+    if (renderer->drawValign != 0) {
+        float totalHeight = (float) lineCount * lineStride;
+        if (renderer->drawValign == 1) valignOffset = -totalHeight / 2.0f;
+        else if (renderer->drawValign == 2) valignOffset = -totalHeight;
+    }
 
-    float cursorY = valignOffset;
+    float cursorY = valignOffset - (float) font->ascenderOffset;
     int32_t lineStart = 0;
 
     while (textLen >= lineStart) {
         // Find end of current line
         int32_t lineEnd = lineStart;
-        while (textLen > lineEnd && !TextUtils_isNewlineChar(processed[lineEnd])) {
+        while (textLen > lineEnd && !TextUtils_isNewlineChar(text[lineEnd])) {
             lineEnd++;
         }
 
         int32_t lineLen = lineEnd - lineStart;
-        const char* line = processed + lineStart;
+        const char* line = text + lineStart;
 
         // Horizontal alignment
-        float lineWidth = TextUtils_measureLineWidth(font, line, lineLen);
         float halignOffset = 0;
-        if (renderer->drawHalign == 1) halignOffset = -lineWidth / 2.0f;
-        else if (renderer->drawHalign == 2) halignOffset = -lineWidth;
+        if (renderer->drawHalign != 0) {
+            float lineWidth = TextUtils_measureLineWidth(font, line, lineLen);
+            if (renderer->drawHalign == 1) halignOffset = -lineWidth / 2.0f;
+            else if (renderer->drawHalign == 2) halignOffset = -lineWidth;
+        }
 
         float cursorX = halignOffset;
 
@@ -1287,8 +1354,17 @@ static void gsDrawText(Renderer* renderer, const char* text, float x, float y, f
             if (glyph == nullptr) continue;
 
             if (glyph->sourceWidth > 0 && glyph->sourceHeight > 0) {
-                float glyphX = x + (cursorX + (float) glyph->offset) * xscale * font->scaleX;
-                float glyphY = y + cursorY * yscale * font->scaleY;
+                GSTEXTURE glyphTex;
+                float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+                float localX0, localY0;
+
+                if (!gsResolveGlyph(gs, dw, &fontState, glyph, cursorX, cursorY, &glyphTex, &u0, &v0, &u1, &v1, &localX0, &localY0)) {
+                    cursorX += (float) glyph->shift;
+                    continue;
+                }
+
+                float glyphX = x + localX0 * xscale * font->scaleX;
+                float glyphY = y + localY0 * yscale * font->scaleY;
                 float glyphW = (float) glyph->sourceWidth * xscale * font->scaleX;
                 float glyphH = (float) glyph->sourceHeight * yscale * font->scaleY;
 
@@ -1297,18 +1373,11 @@ static void gsDrawText(Renderer* renderer, const char* text, float x, float y, f
                 float sx2 = (glyphX + glyphW - (float) gs->viewX) * gs->scaleX + gs->offsetX;
                 float sy2 = (glyphY + glyphH - (float) gs->viewY) * gs->scaleY + gs->offsetY;
 
-                if (hasTexture) {
-                    // Compute UV coordinates: map glyph position within the font TPAG to atlas space
-                    float u1 = (float) atlasEntry->atlasX + (float) glyph->sourceX * ratioX;
-                    float v1 = (float) atlasEntry->atlasY + (float) glyph->sourceY * ratioY;
-                    float u2 = u1 + (float) glyph->sourceWidth * ratioX;
-                    float v2 = v1 + (float) glyph->sourceHeight * ratioY;
-
-                    gsKit_prim_sprite_texture(gs->gsGlobal, &tex, sx1, sy1, u1, v1, sx2, sy2, u2, v2, gs->zCounter, textColor);
-                } else {
-                    // Fallback: draw colored rectangle if font texture is not available
-                    gsKit_prim_sprite(gs->gsGlobal, sx1, sy1, sx2, sy2, gs->zCounter, textColor);
-                }
+                uint8_t r = BGR_R(color) >> 1;
+                uint8_t g = BGR_G(color) >> 1;
+                uint8_t b = BGR_B(color) >> 1;
+                u64 textColor = GS_SETREG_RGBAQ(r, g, b, a, 0x00);
+                gsKit_prim_sprite_texture(gs->gsGlobal, &glyphTex, sx1, sy1, u0, v0, sx2, sy2, u1, v1, gs->zCounter, textColor);
             }
 
             cursorX += (float) glyph->shift;
@@ -1325,18 +1394,16 @@ static void gsDrawText(Renderer* renderer, const char* text, float x, float y, f
         gs->zCounter++;
 
         // Next line
-        cursorY += (float) font->emSize;
+        cursorY += lineStride;
         if (textLen > lineEnd) {
-            lineStart = TextUtils_skipNewline(processed, lineEnd, textLen);
+            lineStart = TextUtils_skipNewline(text, lineEnd, textLen);
         } else {
             break;
         }
     }
-
-    free(processed);
 }
 
-static void gsDrawTextColor(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, [[maybe_unused]] float angleDeg, int32_t _c1, int32_t _c2, int32_t _c3, int32_t _c4, float alpha) {
+static void gsDrawTextColor(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, MAYBE_UNUSED float angleDeg, int32_t _c1, int32_t _c2, int32_t _c3, int32_t _c4, float alpha) {
     GsRenderer* gs = (GsRenderer*) renderer;
     DataWin* dw = renderer->dataWin;
 
@@ -1344,41 +1411,21 @@ static void gsDrawTextColor(Renderer* renderer, const char* text, float x, float
 
     Font* font = &dw->font.fonts[renderer->drawFont];
 
-    // Resolve font texture page and set up GSTEXTURE
-    int32_t fontTpagIndex = DataWin_resolveTPAG(dw, font->textureOffset);
-    bool hasTexture = false;
-    GSTEXTURE tex;
-    AtlasTPAGEntry* atlasEntry = nullptr;
-    float ratioX = 1.0f;
-    float ratioY = 1.0f;
+    GsFontState fontState;
+    if (!gsResolveFontState(gs, dw, font, &fontState)) return;
 
-    if (fontTpagIndex >= 0) {
-        hasTexture = setupTextureForTPAG(gs, &tex, fontTpagIndex);
-        if (hasTexture) {
-            atlasEntry = &gs->atlasTPAGEntries[fontTpagIndex];
-            TexturePageItem* fontTpag = &dw->tpag.items[fontTpagIndex];
-
-            // Compute ratio between atlas size and original TPAG size (in case the preprocessor downscaled)
-            float origW = (float) fontTpag->sourceWidth;
-            float origH = (float) fontTpag->sourceHeight;
-            ratioX = (origW > 0) ? ((float) atlasEntry->width / origW) : 1.0f;
-            ratioY = (origH > 0) ? ((float) atlasEntry->height / origH) : 1.0f;
-        }
-    }
-
-    // Preprocess GML text (# -> \n, \# -> #)
-    char* processed = TextUtils_preprocessGmlText(text);
-    int32_t textLen = (int32_t) strlen(processed);
+    int32_t textLen = (int32_t) strlen(text);
     if(textLen == 0) return;
 
     // Vertical alignment
-    int32_t lineCount = TextUtils_countLines(processed, textLen);
-    float totalHeight = (float) lineCount * (float) font->emSize;
+    int32_t lineCount = TextUtils_countLines(text, textLen);
+    float lineStride = TextUtils_lineStride(font);
+    float totalHeight = (float) lineCount * lineStride;
     float valignOffset = 0;
     if (renderer->drawValign == 1) valignOffset = -totalHeight / 2.0f;
     else if (renderer->drawValign == 2) valignOffset = -totalHeight;
 
-    float cursorY = valignOffset;
+    float cursorY = valignOffset - (float) font->ascenderOffset;
     int32_t lineStart = 0;
 
     // get delta's  (16.16 format)
@@ -1418,12 +1465,12 @@ static void gsDrawTextColor(Renderer* renderer, const char* text, float x, float
 
         // Find end of current line
         int32_t lineEnd = lineStart;
-        while (textLen > lineEnd && !TextUtils_isNewlineChar(processed[lineEnd])) {
+        while (textLen > lineEnd && !TextUtils_isNewlineChar(text[lineEnd])) {
             lineEnd++;
         }
 
         int32_t lineLen = lineEnd - lineStart;
-        const char* line = processed + lineStart;
+        const char* line = text + lineStart;
 
         // Horizontal alignment
         float lineWidth = TextUtils_measureLineWidth(font, line, lineLen);
@@ -1441,8 +1488,17 @@ static void gsDrawTextColor(Renderer* renderer, const char* text, float x, float
             if (glyph == nullptr) continue;
 
             if (glyph->sourceWidth > 0 && glyph->sourceHeight > 0) {
-                float glyphX = x + (cursorX + (float) glyph->offset) * xscale * font->scaleX;
-                float glyphY = y + cursorY * yscale * font->scaleY;
+                GSTEXTURE glyphTex;
+                float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+                float localX0, localY0;
+
+                if (!gsResolveGlyph(gs, dw, &fontState, glyph, cursorX, cursorY, &glyphTex, &u0, &v0, &u1, &v1, &localX0, &localY0)) {
+                    cursorX += (float) glyph->shift;
+                    continue;
+                }
+
+                float glyphX = x + localX0 * xscale * font->scaleX;
+                float glyphY = y + localY0 * yscale * font->scaleY;
                 float glyphW = (float) glyph->sourceWidth * xscale * font->scaleX;
                 float glyphH = (float) glyph->sourceHeight * yscale * font->scaleY;
 
@@ -1453,52 +1509,37 @@ static void gsDrawTextColor(Renderer* renderer, const char* text, float x, float
 
                 // GS modulate mode: Output = Texture * Vertex / 128
                 // Scale vertex RGB from 0-255 to 0-128 so white (255) becomes 1.0x multiplier
-                uint8_t a = hasTexture ? alphaToGS(alpha) : alpha*255;
-                uint8_t r1 = hasTexture ? (BGR_R(c1) >> 1) : BGR_R(c1);
-                uint8_t g1 = hasTexture ? (BGR_G(c1) >> 1) : BGR_G(c1);
-                uint8_t b1 = hasTexture ? (BGR_B(c1) >> 1) : BGR_B(c1);
-                u64 textColor1 = GS_SETREG_RGBAQ(r1, g1, b1, a, 0x00);
+                uint8_t ga = alphaToGS(alpha);
+                uint8_t r1 = BGR_R(c1) >> 1;
+                uint8_t g1 = BGR_G(c1) >> 1;
+                uint8_t b1 = BGR_B(c1) >> 1;
+                u64 textColor1 = GS_SETREG_RGBAQ(r1, g1, b1, ga, 0x00);
 
-                uint8_t r2 = hasTexture ? (BGR_R(c2) >> 1) : BGR_R(c2);
-                uint8_t g2 = hasTexture ? (BGR_G(c2) >> 1) : BGR_G(c2);
-                uint8_t b2 = hasTexture ? (BGR_B(c2) >> 1) : BGR_B(c2);
-                u64 textColor2 = GS_SETREG_RGBAQ(r2, g2, b2, a, 0x00);
+                uint8_t r2 = BGR_R(c2) >> 1;
+                uint8_t g2 = BGR_G(c2) >> 1;
+                uint8_t b2 = BGR_B(c2) >> 1;
+                u64 textColor2 = GS_SETREG_RGBAQ(r2, g2, b2, ga, 0x00);
 
-                uint8_t r3 = hasTexture ? (BGR_R(c3) >> 1) : BGR_R(c3);
-                uint8_t g3 = hasTexture ? (BGR_G(c3) >> 1) : BGR_G(c3);
-                uint8_t b3 = hasTexture ? (BGR_B(c3) >> 1) : BGR_B(c3);
-                u64 textColor3 = GS_SETREG_RGBAQ(r3, g3, b3, a, 0x00);
+                uint8_t r3 = BGR_R(c3) >> 1;
+                uint8_t g3 = BGR_G(c3) >> 1;
+                uint8_t b3 = BGR_B(c3) >> 1;
+                u64 textColor3 = GS_SETREG_RGBAQ(r3, g3, b3, ga, 0x00);
 
-                uint8_t r4 = hasTexture ? (BGR_R(c4) >> 1) : BGR_R(c4);
-                uint8_t g4 = hasTexture ? (BGR_G(c4) >> 1) : BGR_G(c4);
-                uint8_t b4 = hasTexture ? (BGR_B(c4) >> 1) : BGR_B(c4);
-                u64 textColor4 = GS_SETREG_RGBAQ(r4, g4, b4, a, 0x00);
+                uint8_t r4 = BGR_R(c4) >> 1;
+                uint8_t g4 = BGR_G(c4) >> 1;
+                uint8_t b4 = BGR_B(c4) >> 1;
+                u64 textColor4 = GS_SETREG_RGBAQ(r4, g4, b4, ga, 0x00);
 
-                if (hasTexture) {
-                    // Compute UV coordinates: map glyph position within the font TPAG to atlas space
-                    float u1 = (float) atlasEntry->atlasX + (float) glyph->sourceX * ratioX;
-                    float v1 = (float) atlasEntry->atlasY + (float) glyph->sourceY * ratioY;
-                    float u2 = u1 + (float) glyph->sourceWidth * ratioX;
-                    float v2 = v1 + (float) glyph->sourceHeight * ratioY;
-                    gsKit_prim_triangle_goraud_texture_3d(gs->gsGlobal, &tex,
-                            sx1, sy1, gs->zCounter, u1, v1, 
-                            sx2, sy1, gs->zCounter, u2, v1, 
-                            sx2, sy2, gs->zCounter, u2, v2,
-                            textColor1, textColor2, textColor3);
-                    gsKit_prim_triangle_goraud_texture_3d(gs->gsGlobal, &tex,
-                        sx1, sy1, gs->zCounter, u1, v1,
-                        sx2, sy2, gs->zCounter, u2, v2, 
-                        sx1, sy2, gs->zCounter, u1, v2,
-                        textColor1, textColor3, textColor4);
-                } else {
-                    // Fallback: draw colored rectangle if font texture is not available
-                    gsKit_prim_quad_gouraud(gs->gsGlobal,
-                        sx1, sy1, 
-                        sx2, sy1, 
-                        sx2, sy2, 
-                        sx1, sy2, 
-                        gs->zCounter, textColor1, textColor2, textColor3, textColor4);
-                }
+                gsKit_prim_triangle_goraud_texture_3d(gs->gsGlobal, &glyphTex,
+                        sx1, sy1, gs->zCounter, u0, v0,
+                        sx2, sy1, gs->zCounter, u1, v0,
+                        sx2, sy2, gs->zCounter, u1, v1,
+                        textColor1, textColor2, textColor3);
+                gsKit_prim_triangle_goraud_texture_3d(gs->gsGlobal, &glyphTex,
+                    sx1, sy1, gs->zCounter, u0, v0,
+                    sx2, sy2, gs->zCounter, u1, v1,
+                    sx1, sy2, gs->zCounter, u0, v1,
+                    textColor1, textColor3, textColor4);
             }
 
             cursorX += (float) glyph->shift;
@@ -1515,17 +1556,15 @@ static void gsDrawTextColor(Renderer* renderer, const char* text, float x, float
         gs->zCounter++;
 
         // Next line
-        cursorY += (float) font->emSize;
+        cursorY += lineStride;
         if (textLen > lineEnd) {
-            lineStart = TextUtils_skipNewline(processed, lineEnd, textLen);
+            lineStart = TextUtils_skipNewline(text, lineEnd, textLen);
         } else {
             break;
         }
         c4 = c3;    // set left edge to be what the last right edge was....
 		c1 = c2;    //
     }
-
-    free(processed);
 }
 
 static void gsDrawTriangle(Renderer *renderer, float x1, float y1, float x2, float y2, float x3, float y3, bool outline)
@@ -1558,16 +1597,16 @@ static void gsDrawTriangle(Renderer *renderer, float x1, float y1, float x2, flo
     }
 }
 
-static void gsFlush([[maybe_unused]] Renderer* renderer) {
+static void gsFlush(MAYBE_UNUSED Renderer* renderer) {
     // No-op: gsKit queues commands, executed in main loop
 }
 
-static int32_t gsCreateSpriteFromSurface([[maybe_unused]] Renderer* renderer, [[maybe_unused]] int32_t x, [[maybe_unused]] int32_t y, [[maybe_unused]] int32_t w, [[maybe_unused]] int32_t h, [[maybe_unused]] bool removeback, [[maybe_unused]] bool smooth, [[maybe_unused]] int32_t xorig, [[maybe_unused]] int32_t yorig) {
+static int32_t gsCreateSpriteFromSurface(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t x, MAYBE_UNUSED int32_t y, MAYBE_UNUSED int32_t w, MAYBE_UNUSED int32_t h, MAYBE_UNUSED bool removeback, MAYBE_UNUSED bool smooth, MAYBE_UNUSED int32_t xorig, MAYBE_UNUSED int32_t yorig) {
     fprintf(stderr, "GsRenderer: createSpriteFromSurface not supported on PS2\n");
     return -1;
 }
 
-static void gsDeleteSprite([[maybe_unused]] Renderer* renderer, [[maybe_unused]] int32_t spriteIndex) {
+static void gsDeleteSprite(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t spriteIndex) {
     // No-op
 }
 
@@ -1634,6 +1673,8 @@ static RendererVtable gsVtable = {
     .endFrame = gsEndFrame,
     .beginView = gsBeginView,
     .endView = gsEndView,
+    .beginGUI = gsBeginGUI,
+    .endGUI = gsEndGUI,
     .drawSprite = gsDrawSprite,
     .drawSpritePart = gsDrawSpritePart,
     .drawRectangle = gsDrawRectangle,

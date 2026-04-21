@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common.h"
 #include "../audio_system.h"
 
 #include <stdint.h>
@@ -15,8 +16,12 @@
 // Streaming music: decode ADPCM in chunks, double-buffered
 // Each buffer holds STREAM_DECODE_SAMPLES decoded PCM samples
 #define MAX_MUSIC_STREAMS 4
+#define PS2_AUDIO_STREAM_INDEX_BASE 300000
 #define STREAM_ADPCM_CHUNK_BYTES 4096
 #define STREAM_DECODE_SAMPLES (STREAM_ADPCM_CHUNK_BYTES * 2) // 2 samples per ADPCM byte
+
+// Maximum decoded PCM size for a single cached SFX. Anything larger is routed through the streaming path.
+#define PS2_SFX_CACHE_MAX_BYTES (512 * 1024)
 
 // ===[ SOUNDBNK.BIN Structs ]===
 
@@ -34,7 +39,22 @@ typedef struct {
     uint8_t channels;
     uint8_t bitsPerSample;
     uint8_t format;      // 0=PCM, 1=IMA ADPCM
+    uint32_t sampleCount; // decoded samples per channel; length in seconds = sampleCount / sampleRate
 } Ps2AudoEntry;
+
+// ===[ SOUNDBNK.BIN MUS (Streamed Music) Structs ]===
+
+#define MAX_MUS_ENTRIES 256
+
+typedef struct {
+    char* name;              // path string (e.g. "mus/field_of_hopes.ogg")
+    uint32_t dataOffset;     // byte offset in SOUNDS.BIN
+    uint32_t dataSize;       // bytes in SOUNDS.BIN
+    uint16_t sampleRate;
+    uint8_t channels;
+    uint8_t format;          // 0=PCM, 1=IMA ADPCM
+    uint32_t sampleCount;    // decoded samples per channel; length in seconds = sampleCount / sampleRate
+} Ps2MusEntry;
 
 // ===[ LRU Decoded PCM Cache ]===
 
@@ -123,8 +143,10 @@ typedef struct {
     // SOUNDBNK.BIN index
     uint16_t sondEntryCount;
     uint16_t audoEntryCount;
+    uint16_t musEntryCount;
     Ps2SondEntry* sondEntries;
     Ps2AudoEntry* audoEntries;
+    Ps2MusEntry* musEntries;
 
     // SOUNDS.BIN file handle (streamed on demand, not loaded into RAM)
     FILE* soundsFile;
