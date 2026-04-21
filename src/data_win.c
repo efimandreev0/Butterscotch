@@ -1570,7 +1570,27 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd) {
         t->textures[i].blobData = BinaryReader_readBytesAt(reader, t->textures[i].blobOffset, t->textures[i].blobSize);
     }
 }
+#ifdef __3DS__
+static void parseAUDO(BinaryReader* reader, DataWin* dw) {
+    Audo* a = &dw->audo;
 
+    uint32_t count;
+    uint32_t* ptrs = readPointerTable(reader, &count);
+    a->count = count;
+
+    if (count == 0) { free(ptrs); a->entries = nullptr; return; }
+
+    a->entries = safeMalloc(count * sizeof(AudioEntry));
+    repeat(count, i) {
+        BinaryReader_seek(reader, ptrs[i]);
+        a->entries[i].dataSize = BinaryReader_readUint32(reader);
+        a->entries[i].dataOffset = (uint32_t)BinaryReader_getPosition(reader);
+
+        a->entries[i].data = nullptr;
+    }
+    free(ptrs);
+}
+#else
 static void parseAUDO(BinaryReader* reader, DataWin* dw) {
     Audo* a = &dw->audo;
 
@@ -1595,7 +1615,7 @@ static void parseAUDO(BinaryReader* reader, DataWin* dw) {
     }
     free(ptrs);
 }
-
+#endif
 // ===[ MAIN PARSE FUNCTION ]===
 
 DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {

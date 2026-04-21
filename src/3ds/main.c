@@ -4,6 +4,7 @@
 
 #include <3ds.h>
 #include <NovaGL.h>
+#include <SDL/SDL.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,8 +17,12 @@
 #include "runner_keyboard.h"
 #include "ctr_renderer.h"
 #include "ctr_file_system.h"
-#include "noop_audio_system.h"
+#include "sdl12_audio_system.h"
 #include "utils.h"
+
+u32 __ctru_heap_size = 0;
+u32 __ctru_linear_heap_size = 35 * 1024 * 1024; // anything lower crashes on launch
+u32 __stacksize__ = 64 * 1024;
 
 #define DATA_WIN_PATH "sdmc:/3ds/butterscotch/data.win"
 #define BUTTERSCOTCH_NOVA_CMD_BUF_SIZE      (1024 * 1024)
@@ -51,7 +56,7 @@ static void updateKey(RunnerKeyboardState* kb, u32 kDown, u32 kUp, u32 btn, int3
 }
 void initLogging() {
     freopen("sdmc:/3ds/butter_out.txt", "w", stdout);
-    freopen("sdmc:/3ds/butter_err.txt", "a", stderr);
+    freopen("sdmc:/3ds/butter_err.txt", "w", stderr);
 
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
@@ -107,6 +112,12 @@ int main(int argc, char* argv[]) {
         }
     );
 
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_AUDIO) != 0) {
+        fprintf(stderr, "Failed to initialize SDL: %s\n", SDL_GetError());
+        DataWin_free(dataWin);
+        return 1;
+    }
+
     if (dataWin == nullptr) {
         // Only bring up the bottom-screen console here so the user can see the error
         // on real hardware. We haven't initialized NovaGL yet, so the bottom screen
@@ -144,7 +155,9 @@ int main(int argc, char* argv[]) {
 
     CtrFileSystem* fs = CtrFileSystem_create(DATA_WIN_PATH);
     Renderer* renderer = CtrRenderer_create();
-    AudioSystem* audio = (AudioSystem*) NoopAudioSystem_create();
+    AudioSystem* audio = (AudioSystem*) SdlMixerAudioSystem_create();
+    if (audio)
+        audio->dataWin = dataWin;
 
     Runner* runner = Runner_create(dataWin, vm, renderer, (FileSystem*) fs, audio);
     runner->osType = OS_3DS;

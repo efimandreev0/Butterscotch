@@ -9,8 +9,8 @@ typedef struct {
     Renderer base; // Must be first field for struct embedding
 
     GLuint* glTextures;       // one GL texture per TXTR page
-    int32_t* textureWidths;   // needed for UV normalization
-    int32_t* textureHeights;
+    float* uvScaleX;          // X Scaler
+    float* uvScaleY;          // Y Scaler
     bool* textureLoaded;      // lazy loading: true once PNG decoded and uploaded
     uint32_t* lastUsedFrame;  // last frame index that touched the page through a draw path
     bool* keepResident;       // true if the page is required by the current room (don't auto-unload)

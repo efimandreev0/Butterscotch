@@ -51,13 +51,12 @@ static void ctrFlushBatch(CtrRenderer* gl) {
     if (gl->quadBatchCount == 0 || gl->quadBatchTexture == 0 || gl->quadBatchVertices == nullptr) return;
 
     glBindTexture(GL_TEXTURE_2D, gl->quadBatchTexture);
-    glDrawArrays(GL_QUADS, 0, (GLsizei) (gl->quadBatchCount * 4));
+    glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (gl->quadBatchCount * 6));
 
     gl->quadBatchCount = 0;
     gl->quadBatchTexture = 0;
 }
 
-// Закидывает спрайт в буфер
 static void ctrPushQuad(CtrRenderer* gl, GLuint textureId, float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3, float u0, float v0, float u1, float v1, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     if (gl->quadBatchVertices == nullptr || textureId == 0) return;
 
@@ -71,12 +70,17 @@ static void ctrPushQuad(CtrRenderer* gl, GLuint textureId, float x0, float y0, f
     gl->quadBatchTexture = textureId;
 
     CtrPackedVertex* verts = (CtrPackedVertex*) gl->quadBatchVertices;
-    CtrPackedVertex* quad = verts + gl->quadBatchCount * 4;
+    CtrPackedVertex* tri = verts + gl->quadBatchCount * 6; // 6 вершин (2 треугольника)
 
-    quad[0] = (CtrPackedVertex) { .x = x0, .y = y0, .z = 0.0f, .u = u0, .v = v0, .r = r, .g = g, .b = b, .a = a };
-    quad[1] = (CtrPackedVertex) { .x = x1, .y = y1, .z = 0.0f, .u = u1, .v = v0, .r = r, .g = g, .b = b, .a = a };
-    quad[2] = (CtrPackedVertex) { .x = x2, .y = y2, .z = 0.0f, .u = u1, .v = v1, .r = r, .g = g, .b = b, .a = a };
-    quad[3] = (CtrPackedVertex) { .x = x3, .y = y3, .z = 0.0f, .u = u0, .v = v1, .r = r, .g = g, .b = b, .a = a };
+    // Первый треугольник (Левый-Верх, Правый-Верх, Правый-Низ)
+    tri[0] = (CtrPackedVertex) { .x = x0, .y = y0, .z = 0.0f, .u = u0, .v = v0, .r = r, .g = g, .b = b, .a = a };
+    tri[1] = (CtrPackedVertex) { .x = x1, .y = y1, .z = 0.0f, .u = u1, .v = v0, .r = r, .g = g, .b = b, .a = a };
+    tri[2] = (CtrPackedVertex) { .x = x2, .y = y2, .z = 0.0f, .u = u1, .v = v1, .r = r, .g = g, .b = b, .a = a };
+
+    // Второй треугольник (Левый-Верх, Правый-Низ, Левый-Низ)
+    tri[3] = (CtrPackedVertex) { .x = x0, .y = y0, .z = 0.0f, .u = u0, .v = v0, .r = r, .g = g, .b = b, .a = a };
+    tri[4] = (CtrPackedVertex) { .x = x2, .y = y2, .z = 0.0f, .u = u1, .v = v1, .r = r, .g = g, .b = b, .a = a };
+    tri[5] = (CtrPackedVertex) { .x = x3, .y = y3, .z = 0.0f, .u = u0, .v = v1, .r = r, .g = g, .b = b, .a = a };
 
     gl->quadBatchCount++;
 }
@@ -92,8 +96,8 @@ static void ctrInit(Renderer* renderer, DataWin* dataWin) {
 
     gl->textureCount = dataWin->txtr.count;
     gl->glTextures = safeMalloc(gl->textureCount * sizeof(GLuint));
-    gl->textureWidths = safeMalloc(gl->textureCount * sizeof(int32_t));
-    gl->textureHeights = safeMalloc(gl->textureCount * sizeof(int32_t));
+    gl->uvScaleX = safeMalloc(gl->textureCount * sizeof(float));
+    gl->uvScaleY = safeMalloc(gl->textureCount * sizeof(float));
     gl->textureLoaded = safeMalloc(gl->textureCount * sizeof(bool));
     gl->lastUsedFrame = safeMalloc(gl->textureCount * sizeof(uint32_t));
     gl->keepResident = safeMalloc(gl->textureCount * sizeof(bool));
@@ -102,7 +106,7 @@ static void ctrInit(Renderer* renderer, DataWin* dataWin) {
     gl->quadBatchCapacity = CTR_QUAD_BATCH_CAPACITY;
     gl->quadBatchCount = 0;
     gl->quadBatchTexture = 0;
-    gl->quadBatchVertices = safeMalloc((size_t) gl->quadBatchCapacity * 4 * sizeof(CtrPackedVertex));
+    gl->quadBatchVertices = safeMalloc((size_t) gl->quadBatchCapacity * 6 * sizeof(CtrPackedVertex));
 
     // Sticky client-state: enabled once here, never toggled on the hot path.
     // The vertex buffer base pointer never moves (we reuse the same scratch), so
@@ -121,8 +125,8 @@ static void ctrInit(Renderer* renderer, DataWin* dataWin) {
     // don't eat PICA linear-heap name slots for pages we may never touch.
     for (uint32_t i = 0; gl->textureCount > i; i++) {
         gl->glTextures[i] = 0;
-        gl->textureWidths[i] = 0;
-        gl->textureHeights[i] = 0;
+        gl->uvScaleX[i] = 0.0f;
+        gl->uvScaleY[i] = 0.0f;
         gl->textureLoaded[i] = false;
         gl->lastUsedFrame[i] = 0;
         gl->keepResident[i] = false;
@@ -159,8 +163,8 @@ static void ctrDestroy(Renderer* renderer) {
     }
 
     free(gl->glTextures);
-    free(gl->textureWidths);
-    free(gl->textureHeights);
+    free(gl->uvScaleX);
+    free(gl->uvScaleY);
     free(gl->textureLoaded);
     free(gl->lastUsedFrame);
     free(gl->keepResident);
@@ -189,13 +193,25 @@ static void ctrBeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int3
     // the batcher is flushed and empty.
     if (gl->pendingResidencyUpdate && g_frameCounter >= gl->pendingResidencyReadyFrame) {
         gl->pendingResidencyUpdate = false;
+        uint32_t freed = 0;
         uint32_t warmed = 0;
+
+        // 1. СНАЧАЛА выгружаем все ненужные текстуры прошлой комнаты,
+        // чтобы освободить критически важный Linear Heap (VRAM)
+        for (uint32_t i = 0; i < gl->textureCount; i++) {
+            if (!gl->keepResident[i] && gl->textureLoaded[i]) {
+                unloadPageTexture(gl, i);
+                freed++;
+            }
+        }
+
         for (uint32_t i = 0; i < gl->textureCount; i++) {
             if (!gl->keepResident[i]) continue;
-            bool wasLoaded = gl->textureLoaded[i] && gl->textureWidths[i] != 0;
+            bool wasLoaded = gl->textureLoaded[i] && gl->uvScaleX[i] != 0.0f;
             if (ensureTextureLoaded(gl, i) && !wasLoaded) warmed++;
         }
-        if (warmed > 0) fprintf(stderr, "CTR: prefetched %u room texture pages\n", warmed);
+        
+        fprintf(stderr, "CTR: Deferred residency sweep - freed %u pages, prefetched %u pages\n", freed, warmed);
     }
 
     gl->windowW = windowW;
@@ -212,7 +228,7 @@ static void ctrBeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int3
         uint32_t freed = 0;
         for (uint32_t i = 0; i < gl->textureCount; i++) {
             if (gl->keepResident[i]) continue;
-            if (!gl->textureLoaded[i] || gl->textureWidths[i] == 0) continue;
+            if (!gl->textureLoaded[i] || gl->uvScaleX[i] == 0.0f) continue;
             uint32_t age = g_frameCounter - gl->lastUsedFrame[i];
             if (age > LRU_IDLE_THRESHOLD) {
                 unloadPageTexture(gl, i);
@@ -297,8 +313,8 @@ static void ctrRendererFlush(MAYBE_UNUSED Renderer* renderer) {}
 // No persistent cache — we always go PNG blob -> stb_image -> glTexImage2D.
 static bool ensureTextureLoaded(CtrRenderer* gl, uint32_t pageId) {
     gl->lastUsedFrame[pageId] = g_frameCounter;
-    if (gl->textureLoaded[pageId]) return (gl->textureWidths[pageId] != 0);
-    gl->textureLoaded[pageId] = true;  // mark early; on failure we leave width=0 to signal "don't render"
+    if (gl->textureLoaded[pageId]) return (gl->uvScaleX[pageId] != 0.0f);
+    gl->textureLoaded[pageId] = true;
 
     DataWin* dw = gl->base.dataWin;
     Texture* txtr = &dw->txtr.textures[pageId];
@@ -308,26 +324,75 @@ static bool ensureTextureLoaded(CtrRenderer* gl, uint32_t pageId) {
     }
     glBindTexture(GL_TEXTURE_2D, gl->glTextures[pageId]);
 
-    int w, h, channels;
-    uint8_t* pixels = stbi_load_from_memory(txtr->blobData, (int) txtr->blobSize, &w, &h, &channels, 4);
+    int origW, origH, channels;
+    uint8_t* pixels = stbi_load_from_memory(txtr->blobData, (int) txtr->blobSize, &origW, &origH, &channels, 4);
     if (pixels == nullptr) {
-        const char* reason = stbi_failure_reason();
-        fprintf(stderr, "CTR: Failed to decode TXTR page %u (blobSize=%u): %s\n",
-                pageId, txtr->blobSize, reason ? reason : "<null>");
+        fprintf(stderr, "CTR: Failed to decode TXTR page %u\n", pageId);
         return false;
     }
 
-    gl->textureWidths[pageId] = w;
-    gl->textureHeights[pageId] = h;
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    int uploadW = origW;
+    int uploadH = origH;
+    uint8_t* uploadPixels = pixels;
+    bool freeUploadPixels = false;
+
+    // Сжимаем, пока не влезет в 1024x1024 (чтобы NovaGL не делала malloc и не падала)
+    while (uploadW > 1024 || uploadH > 1024) {
+        int nextW = uploadW / 2;
+        int nextH = uploadH / 2;
+        if (nextW < 1) nextW = 1;
+        if (nextH < 1) nextH = 1;
+
+        uint8_t* nextPixels = malloc(nextW * nextH * 4);
+        if (nextPixels == nullptr) {
+            fprintf(stderr, "CTR: Out of memory during downscale! Breaking...\n");
+            break;
+        }
+
+        for (int y = 0; y < nextH; y++) {
+            for (int x = 0; x < nextW; x++) {
+                int px00 = (y * 2 * uploadW + x * 2) * 4;
+                int px10 = (y * 2 * uploadW + (x * 2 + 1 < uploadW ? x * 2 + 1 : x * 2)) * 4;
+                int px01 = ((y * 2 + 1 < uploadH ? y * 2 + 1 : y * 2) * uploadW + x * 2) * 4;
+                int px11 = ((y * 2 + 1 < uploadH ? y * 2 + 1 : y * 2) * uploadW + (x * 2 + 1 < uploadW ? x * 2 + 1 : x * 2)) * 4;
+
+                int dstIdx = (y * nextW + x) * 4;
+                for (int c = 0; c < 4; c++) {
+                    nextPixels[dstIdx + c] = (uploadPixels[px00 + c] + uploadPixels[px10 + c] + uploadPixels[px01 + c] + uploadPixels[px11 + c]) / 4;
+                }
+            }
+        }
+
+        if (freeUploadPixels) free(uploadPixels);
+        uploadPixels = nextPixels;
+        uploadW = nextW;
+        uploadH = nextH;
+        freeUploadPixels = true;
+    }
+
+    // Считаем размер аппаратной текстуры (ближайшая степень двойки - Power-Of-Two)
+    int potW = uploadW;
+    potW--; potW |= potW >> 1; potW |= potW >> 2; potW |= potW >> 4; potW |= potW >> 8; potW |= potW >> 16; potW++;
+    if (potW < 8) potW = 8;
+
+    int potH = uploadH;
+    potH--; potH |= potH >> 1; potH |= potH >> 2; potH |= potH >> 4; potH |= potH >> 8; potH |= potH >> 16; potH++;
+    if (potH < 8) potH = 8;
+
+    // Идеальный скейлер! Зависит от оригинального размера, размера ужатой текстуры и аппаратного размера
+    gl->uvScaleX[pageId] = ((float)uploadW / (float)origW) / (float)potW;
+    gl->uvScaleY[pageId] = ((float)uploadH / (float)origH) / (float)potH;
+
+    // Отправляем сжатую текстуру
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, uploadW, uploadH, 0, GL_RGBA, GL_UNSIGNED_BYTE, uploadPixels);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
+    if (freeUploadPixels) free(uploadPixels);
     stbi_image_free(pixels);
 
-    fprintf(stderr, "CTR: Decoded TXTR page %u (%dx%d)\n", pageId, w, h);
     return true;
 }
 
@@ -338,8 +403,8 @@ static void unloadPageTexture(CtrRenderer* gl, uint32_t pageId) {
         gl->glTextures[pageId] = 0;
     }
     gl->textureLoaded[pageId] = false;
-    gl->textureWidths[pageId] = 0;
-    gl->textureHeights[pageId] = 0;
+    gl->uvScaleX[pageId] = 0.0f;
+    gl->uvScaleY[pageId] = 0.0f;
 }
 
 void CtrRenderer_prefetchSprite(Renderer* renderer, int32_t spriteIndex) {
@@ -476,7 +541,7 @@ unload_stale:
         for (uint32_t i = 0; i < gl->textureCount; i++) {
             if (gl->keepResident[i]) {
                 kept++;
-                if (gl->textureLoaded[i] && gl->textureWidths[i] != 0) alreadyLoaded++;
+                if (gl->textureLoaded[i] && gl->uvScaleX[i] != 0.0f) alreadyLoaded++;
             }
         }
         gl->pendingResidencyUpdate = true;
@@ -500,14 +565,12 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
     if (!ensureTextureLoaded(gl, (uint32_t) pageId)) return;
 
     GLuint texId = gl->glTextures[pageId];
-    int32_t texW = gl->textureWidths[pageId];
-    int32_t texH = gl->textureHeights[pageId];
 
     const float insetEps = 0.01f;
-    float u0 = ((float) tpag->sourceX + insetEps) / (float) texW;
-    float v0 = ((float) tpag->sourceY + insetEps) / (float) texH;
-    float u1 = ((float) (tpag->sourceX + tpag->sourceWidth) - insetEps) / (float) texW;
-    float v1 = ((float) (tpag->sourceY + tpag->sourceHeight) - insetEps) / (float) texH;
+    float u0 = ((float) tpag->sourceX + insetEps) * gl->uvScaleX[pageId];
+    float v0 = ((float) tpag->sourceY + insetEps) * gl->uvScaleY[pageId];
+    float u1 = ((float) (tpag->sourceX + tpag->sourceWidth) - insetEps) * gl->uvScaleX[pageId];
+    float v1 = ((float) (tpag->sourceY + tpag->sourceHeight) - insetEps) * gl->uvScaleY[pageId];
 
     // БЫСТРАЯ МАТЕМАТИКА вместо тяжелых 4x4 матриц
     float lx0 = ((float) tpag->targetX - originX) * xscale;
@@ -554,14 +617,12 @@ static void ctrDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t src
     if (!ensureTextureLoaded(gl, (uint32_t) pageId)) return;
 
     GLuint texId = gl->glTextures[pageId];
-    int32_t texW = gl->textureWidths[pageId];
-    int32_t texH = gl->textureHeights[pageId];
 
     const float insetEps = 0.01f;
-    float u0 = ((float) (tpag->sourceX + srcOffX) + insetEps) / (float) texW;
-    float v0 = ((float) (tpag->sourceY + srcOffY) + insetEps) / (float) texH;
-    float u1 = ((float) (tpag->sourceX + srcOffX + srcW) - insetEps) / (float) texW;
-    float v1 = ((float) (tpag->sourceY + srcOffY + srcH) - insetEps) / (float) texH;
+    float u0 = ((float) (tpag->sourceX + srcOffX) + insetEps) * gl->uvScaleX[pageId];
+    float v0 = ((float) (tpag->sourceY + srcOffY) + insetEps) * gl->uvScaleY[pageId];
+    float u1 = ((float) (tpag->sourceX + srcOffX + srcW) - insetEps) * gl->uvScaleX[pageId];
+    float v1 = ((float) (tpag->sourceY + srcOffY + srcH) - insetEps) * gl->uvScaleY[pageId];
 
     float x0 = x;
     float y0 = y;
@@ -690,7 +751,7 @@ typedef struct {
     Font* font;
     TexturePageItem* fontTpag;
     GLuint texId;
-    int32_t texW, texH;
+    float uvScaleX, uvScaleY;
     Sprite* spriteFontSprite;
 } CtrFontState;
 
@@ -698,8 +759,8 @@ static bool ctrResolveFontState(CtrRenderer* gl, DataWin* dw, Font* font, CtrFon
     state->font = font;
     state->fontTpag = nullptr;
     state->texId = 0;
-    state->texW = 0;
-    state->texH = 0;
+    state->uvScaleX = 0.0f;
+    state->uvScaleY = 0.0f;
     state->spriteFontSprite = nullptr;
 
     if (!font->isSpriteFont) {
@@ -712,8 +773,8 @@ static bool ctrResolveFontState(CtrRenderer* gl, DataWin* dw, Font* font, CtrFon
         if (!ensureTextureLoaded(gl, (uint32_t) pageId)) return false;
 
         state->texId = gl->glTextures[pageId];
-        state->texW = gl->textureWidths[pageId];
-        state->texH = gl->textureHeights[pageId];
+        state->uvScaleX = gl->uvScaleX[pageId];
+        state->uvScaleY = gl->uvScaleY[pageId];
     } else if (font->spriteIndex >= 0 && dw->sprt.count > (uint32_t) font->spriteIndex) {
         state->spriteFontSprite = &dw->sprt.sprites[font->spriteIndex];
     }
@@ -737,24 +798,22 @@ static bool ctrResolveGlyph(CtrRenderer* gl, DataWin* dw, CtrFontState* state, F
         if (!ensureTextureLoaded(gl, (uint32_t) pid)) return false;
 
         *outTexId = gl->glTextures[pid];
-        int32_t tw = gl->textureWidths[pid];
-        int32_t th = gl->textureHeights[pid];
 
         const float insetEps = 0.01f;
-        *outU0 = ((float) glyphTpag->sourceX + insetEps) / (float) tw;
-        *outV0 = ((float) glyphTpag->sourceY + insetEps) / (float) th;
-        *outU1 = ((float) (glyphTpag->sourceX + glyphTpag->sourceWidth) - insetEps) / (float) tw;
-        *outV1 = ((float) (glyphTpag->sourceY + glyphTpag->sourceHeight) - insetEps) / (float) th;
+        *outU0 = ((float) glyphTpag->sourceX + insetEps) * gl->uvScaleX[pid];
+        *outV0 = ((float) glyphTpag->sourceY + insetEps) * gl->uvScaleY[pid];
+        *outU1 = ((float) (glyphTpag->sourceX + glyphTpag->sourceWidth) - insetEps) * gl->uvScaleX[pid];
+        *outV1 = ((float) (glyphTpag->sourceY + glyphTpag->sourceHeight) - insetEps) * gl->uvScaleY[pid];
 
         *outLocalX0 = cursorX + (float) glyph->offset;
         *outLocalY0 = cursorY + (float) ((int32_t) glyphTpag->targetY - sprite->originY);
     } else {
         *outTexId = state->texId;
         const float insetEps = 0.01f;
-        *outU0 = ((float) (state->fontTpag->sourceX + glyph->sourceX) + insetEps) / (float) state->texW;
-        *outV0 = ((float) (state->fontTpag->sourceY + glyph->sourceY) + insetEps) / (float) state->texH;
-        *outU1 = ((float) (state->fontTpag->sourceX + glyph->sourceX + glyph->sourceWidth) - insetEps) / (float) state->texW;
-        *outV1 = ((float) (state->fontTpag->sourceY + glyph->sourceY + glyph->sourceHeight) - insetEps) / (float) state->texH;
+        *outU0 = ((float) (state->fontTpag->sourceX + glyph->sourceX) + insetEps) * state->uvScaleX;
+        *outV0 = ((float) (state->fontTpag->sourceY + glyph->sourceY) + insetEps) * state->uvScaleY;
+        *outU1 = ((float) (state->fontTpag->sourceX + glyph->sourceX + glyph->sourceWidth) - insetEps) * state->uvScaleX;
+        *outV1 = ((float) (state->fontTpag->sourceY + glyph->sourceY + glyph->sourceHeight) - insetEps) * state->uvScaleY;
 
         *outLocalX0 = cursorX + glyph->offset;
         *outLocalY0 = cursorY;

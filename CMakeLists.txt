@@ -285,7 +285,16 @@ elseif(PLATFORM STREQUAL "3ds")
     endif()
 
     # libctru defines __3DS__ via toolchain; we don't need to add it manually.
-    target_link_libraries(butterscotch NovaGL citro3d ctru m)
+    target_link_libraries(butterscotch
+            SDL_mixer
+            mad
+            vorbisidec
+            ogg
+            mikmod
+            SDL
+            NovaGL
+            citro3d
+            ctru m)
 
     # Aggressive optimization for the VM interpreter hot path (big rooms, battles).
     # -ffunction-sections/-fdata-sections + --gc-sections strips dead code, shrinking
