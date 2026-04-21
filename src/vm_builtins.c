@@ -2059,7 +2059,7 @@ static RValue builtinDsListFindIndex(VMContext* ctx, RValue* args, MAYBE_UNUSED 
 static RValue builtinArrayLength1d(VMContext* ctx, RValue* args, int32_t argCount) {
     (void) ctx; (void) argCount;
     if (args[0].type != RVALUE_ARRAY || args[0].array == nullptr) return RValue_makeReal(0.0);
-    return RValue_makeReal((GMLReal) args[0].array->length);
+    return RValue_makeReal((GMLReal) GMLArray_length1D(args[0].array));
 }
 
 // ===[ COLLISION FUNCTIONS]===
