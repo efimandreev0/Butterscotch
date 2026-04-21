@@ -1823,7 +1823,55 @@ static RValue builtinScriptExecute(VMContext* ctx, RValue* args, int32_t argCoun
 }
 
 // ===[ OS FUNCTIONS ]===
+#ifdef __3DS__
+static const char* langToStr(u8 lang) {
+    switch (lang) {
+        case CFG_LANGUAGE_JP: return "ja";
+        case CFG_LANGUAGE_EN: return "en";
+        case CFG_LANGUAGE_FR: return "fr";
+        case CFG_LANGUAGE_DE: return "de";
+        case CFG_LANGUAGE_IT: return "it";
+        case CFG_LANGUAGE_ES: return "es";
+        case CFG_LANGUAGE_ZH: return "zh";
+        case CFG_LANGUAGE_KO: return "ko";
+        case CFG_LANGUAGE_NL: return "nl";
+        case CFG_LANGUAGE_PT: return "pt";
+        case CFG_LANGUAGE_RU: return "ru";
+        case CFG_LANGUAGE_TW: return "zh"; // традиционный китайский
+        default: return "en";
+    }
+}
 
+static RValue builtinOsGetLanguage(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    u8 lang;
+    if (R_FAILED(CFGU_GetSystemLanguage(&lang))) {
+        return RValue_makeOwnedString(safeStrdup("en"));
+    }
+
+    return RValue_makeOwnedString(safeStrdup(langToStr(lang)));
+}
+static const char* regionToStr(u8 region) {
+    switch (region) {
+        case CFG_REGION_JPN: return "JP";
+        case CFG_REGION_USA: return "US";
+        case CFG_REGION_EUR: return "EU";
+        case CFG_REGION_AUS: return "AU";
+        case CFG_REGION_CHN: return "CN";
+        case CFG_REGION_KOR: return "KR";
+        case CFG_REGION_TWN: return "TW";
+        default: return "US";
+    }
+}
+
+static RValue builtinOsGetRegion(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    u8 region;
+    if (R_FAILED(CFGU_SecureInfoGetRegion(&region))) {
+        return RValue_makeOwnedString(safeStrdup("US"));
+    }
+
+    return RValue_makeOwnedString(safeStrdup(regionToStr(region)));
+}
+#else
 static RValue builtinOsGetLanguage(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     return RValue_makeOwnedString(safeStrdup("en"));
 }
@@ -1831,7 +1879,7 @@ static RValue builtinOsGetLanguage(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RVa
 static RValue builtinOsGetRegion(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     return RValue_makeOwnedString(safeStrdup("US"));
 }
-
+#endif
 // ===[ DS_MAP BUILTIN FUNCTIONS ]===
 
 static inline ptrdiff_t getValueIndexInMap(DsMapEntry** mapPtr, RValue keyRvalue) {
