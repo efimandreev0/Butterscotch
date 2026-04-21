@@ -1766,16 +1766,31 @@ static RValue builtinScriptExecute(VMContext* ctx, RValue* args, int32_t argCoun
     } else
 #endif
     {
-        // Numeric script index
-        int32_t scriptIdx = RValue_toInt32(args[0]);
+        // Numeric script/function index
+        int32_t rawArg = RValue_toInt32(args[0]);
+        codeId = -1;
 
-        // Look up the script to get its codeId
-        if (scriptIdx < 0 || (uint32_t) scriptIdx >= ctx->dataWin->scpt.count) {
-            fprintf(stderr, "VM: script_execute - invalid script index %d\n", scriptIdx);
-            return RValue_makeUndefined();
+#if IS_BC17_OR_HIGHER_ENABLED
+        // In GMS 2 BC17+, "scriptName" in source code is compiled as a FUNC-table index (same as builtinMethod). Resolve funcIdx -> codeIndex via funcMap.
+        if (IS_BC17_OR_HIGHER(ctx) && rawArg >= 0 && ctx->dataWin->func.functionCount > (uint32_t) rawArg) {
+            const char* funcName = ctx->dataWin->func.functions[rawArg].name;
+            if (funcName != nullptr) {
+                ptrdiff_t idx = shgeti(ctx->funcMap, (char*) funcName);
+                if (idx >= 0) {
+                    codeId = ctx->funcMap[idx].value;
+                }
+            }
         }
+#endif
 
-        codeId = ctx->dataWin->scpt.scripts[scriptIdx].codeId;
+        // Fallback: treat as SCPT index (BC16 and earlier, or when FUNC lookup failed)
+        if (0 > codeId) {
+            if (0 > rawArg || (uint32_t) rawArg >= ctx->dataWin->scpt.count) {
+                fprintf(stderr, "VM: script_execute - invalid script index %d\n", rawArg);
+                return RValue_makeUndefined();
+            }
+            codeId = ctx->dataWin->scpt.scripts[rawArg].codeId;
+        }
     }
 
     if (0 > codeId || ctx->dataWin->code.count <= (uint32_t) codeId) {
@@ -4608,6 +4623,13 @@ static RValue builtinSurfaceGetHeight(VMContext* ctx, RValue* args, MAYBE_UNUSED
 }
 
 // Sprite functions
+static RValue builtin_spriteExists(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    if (args[0].type == RVALUE_UNDEFINED) return RValue_makeBool(false);
+    int32_t spriteIndex = RValue_toInt32(args[0]);
+    if (0 > spriteIndex || (uint32_t) spriteIndex >= ctx->dataWin->sprt.count) return RValue_makeBool(false);
+    return RValue_makeBool(true);
+}
+
 static RValue builtin_spriteGetWidth(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     int32_t spriteIndex = (int32_t) RValue_toReal(args[0]);
     if (0 > spriteIndex || (uint32_t) spriteIndex >= ctx->dataWin->sprt.count) return RValue_makeReal(0.0);
@@ -6459,6 +6481,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "surface_get_height", builtinSurfaceGetHeight);
 
     // Sprite info
+    VM_registerBuiltin(ctx, "sprite_exists", builtin_spriteExists);
     VM_registerBuiltin(ctx, "sprite_get_width", builtin_spriteGetWidth);
     VM_registerBuiltin(ctx, "sprite_get_height", builtin_spriteGetHeight);
     VM_registerBuiltin(ctx, "sprite_get_number", builtin_spriteGetNumber);
