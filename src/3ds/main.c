@@ -21,7 +21,7 @@
 #include "utils.h"
 
 u32 __ctru_heap_size = 0;
-u32 __ctru_linear_heap_size = 35 * 1024 * 1024; // anything lower crashes on launch
+u32 __ctru_linear_heap_size = 50 * 1024 * 1024;
 u32 __stacksize__ = 64 * 1024;
 
 #define DATA_WIN_PATH "sdmc:/3ds/butterscotch/data.win"
@@ -170,6 +170,8 @@ int main(int argc, char* argv[]) {
 
     static u32 prevKeysHeld = 0;
     while (aptMainLoop() && !runner->shouldExit) {
+        Uint32 frameStart = SDL_GetTicks();
+
         hidScanInput();
 
         u32 kHeld = hidKeysHeld();
@@ -208,13 +210,10 @@ int main(int argc, char* argv[]) {
 
         Room* activeRoom = runner->currentRoom;
 
-        // Pick output (top screen) and clear.
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-
         int32_t gameW = (int32_t) gen8->defaultWindowWidth;
         int32_t gameH = (int32_t) gen8->defaultWindowHeight;
 
+        // Вычисляем размеры экрана (делаем это ОДИН РАЗ до цикла отрисовки)
         bool viewsEnabled = (activeRoom->flags & 1) != 0;
         if (viewsEnabled) {
             int32_t maxRight = 0, maxBottom = 0;
@@ -231,63 +230,92 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // On 3DS we always draw to the full 400x240 top screen.
         renderer->vtable->beginFrame(renderer, gameW, gameH, NOVA_SCREEN_W, NOVA_SCREEN_H);
 
-        if (runner->drawBackgroundColor) {
-            int rInt = BGR_R(runner->backgroundColor);
-            int gInt = BGR_G(runner->backgroundColor);
-            int bInt = BGR_B(runner->backgroundColor);
-            glClearColor(rInt / 255.0f, gInt / 255.0f, bInt / 255.0f, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
-        }
+        // ===[ НАЧАЛО 3D ЦИКЛА (1 или 2 прохода) ]===
+        int eyes = novaGetEyeCount();
+        for (int eye = 0; eye < eyes; eye++) {
+            novaBeginEye(eye);
 
-        bool anyViewRendered = false;
-        if (viewsEnabled) {
-            for (int vi = 0; vi < 8; vi++) {
-                if (!activeRoom->views[vi].enabled) continue;
-                int32_t viewX = activeRoom->views[vi].viewX;
-                int32_t viewY = activeRoom->views[vi].viewY;
-                int32_t viewW = activeRoom->views[vi].viewWidth;
-                int32_t viewH = activeRoom->views[vi].viewHeight;
-                int32_t portX = activeRoom->views[vi].portX;
-                int32_t portY = activeRoom->views[vi].portY;
-                int32_t portW = activeRoom->views[vi].portWidth;
-                int32_t portH = activeRoom->views[vi].portHeight;
-                float viewAngle = runner->viewAngles[vi];
+            // Очищаем экраны для каждого глаза
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-                runner->viewCurrent = vi;
-                renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH, portX, portY, portW, portH, viewAngle);
+            if (runner->drawBackgroundColor) {
+                int rInt = BGR_R(runner->backgroundColor);
+                int gInt = BGR_G(runner->backgroundColor);
+                int bInt = BGR_B(runner->backgroundColor);
+                glClearColor(rInt / 255.0f, gInt / 255.0f, bInt / 255.0f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            }
+
+            bool anyViewRendered = false;
+            if (viewsEnabled) {
+                for (int vi = 0; vi < 8; vi++) {
+                    if (!activeRoom->views[vi].enabled) continue;
+                    int32_t viewX = activeRoom->views[vi].viewX;
+                    int32_t viewY = activeRoom->views[vi].viewY;
+                    int32_t viewW = activeRoom->views[vi].viewWidth;
+                    int32_t viewH = activeRoom->views[vi].viewHeight;
+                    int32_t portX = activeRoom->views[vi].portX;
+                    int32_t portY = activeRoom->views[vi].portY;
+                    int32_t portW = activeRoom->views[vi].portWidth;
+                    int32_t portH = activeRoom->views[vi].portHeight;
+                    float viewAngle = runner->viewAngles[vi];
+
+                    runner->viewCurrent = vi;
+
+                    // 1. Рисуем сам мир в глубине (3D)
+                    // Значение 0.05f - это сила эффекта. Можешь сделать 0.03f если глазам больно
+                    novaSet3DDepth(0.05f);
+                    renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH, portX, portY, portW, portH, viewAngle);
+                    Runner_draw(runner);
+                    renderer->vtable->endView(renderer);
+
+                    // 2. Рисуем интерфейс плоским (поверх экрана)
+                    novaSet3DDepth(0.0f);
+                    int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : portW;
+                    int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : portH;
+                    renderer->vtable->beginGUI(renderer, guiW, guiH, portX, portY, portW, portH);
+                    Runner_drawGUI(runner);
+                    renderer->vtable->endGUI(renderer);
+
+                    anyViewRendered = true;
+                }
+            }
+
+            if (!anyViewRendered) {
+                runner->viewCurrent = 0;
+
+                // 1. Рисуем сам мир в глубине (3D)
+                novaSet3DDepth(0.05f);
+                renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, 0, 0, gameW, gameH, 0.0f);
                 Runner_draw(runner);
                 renderer->vtable->endView(renderer);
 
-                int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : portW;
-                int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : portH;
-                renderer->vtable->beginGUI(renderer, guiW, guiH, portX, portY, portW, portH);
+                // 2. Рисуем интерфейс плоским (поверх экрана)
+                novaSet3DDepth(0.0f);
+                int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : gameW;
+                int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : gameH;
+                renderer->vtable->beginGUI(renderer, guiW, guiH, 0, 0, gameW, gameH);
                 Runner_drawGUI(runner);
                 renderer->vtable->endGUI(renderer);
-
-                anyViewRendered = true;
             }
-        }
 
-        if (!anyViewRendered) {
             runner->viewCurrent = 0;
-            renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, 0, 0, gameW, gameH, 0.0f);
-            Runner_draw(runner);
-            renderer->vtable->endView(renderer);
-
-            int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : gameW;
-            int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : gameH;
-            renderer->vtable->beginGUI(renderer, guiW, guiH, 0, 0, gameW, gameH);
-            Runner_drawGUI(runner);
-            renderer->vtable->endGUI(renderer);
+            renderer->vtable->flush(renderer); // Отправляем батчи на GPU для текущего глаза
         }
+        // ===[ КОНЕЦ 3D ЦИКЛА ]===
 
-        runner->viewCurrent = 0;
         renderer->vtable->endFrame(renderer);
 
         novaSwapBuffers();
+
+        // Наш лимитер в 30 FPS (оставляем его здесь!)
+        Uint32 frameTime = SDL_GetTicks() - frameStart;
+        if (frameTime < 24) {
+            gspWaitForVBlank();
+        }
     }
 
     runner->audioSystem->vtable->destroy(runner->audioSystem);

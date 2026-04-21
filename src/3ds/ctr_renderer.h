@@ -39,6 +39,9 @@ typedef struct {
     uint32_t originalTexturePageCount;
     uint32_t originalTpagCount;
     uint32_t originalSpriteCount;
+
+    bool* textureFailed;
+    uint32_t vramUsed;
 } CtrRenderer;
 
 Renderer* CtrRenderer_create(void);

@@ -200,8 +200,15 @@ static void ctrBeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int3
         // чтобы освободить критически важный Linear Heap (VRAM)
         for (uint32_t i = 0; i < gl->textureCount; i++) {
             if (!gl->keepResident[i] && gl->textureLoaded[i]) {
-                unloadPageTexture(gl, i);
-                freed++;
+
+                uint32_t age = g_frameCounter - gl->lastUsedFrame[i];
+
+                if (age > 2) {
+                    unloadPageTexture(gl, i);
+                    freed++;
+                } else {
+                    gl->keepResident[i] = true;
+                }
             }
         }
 
@@ -210,7 +217,7 @@ static void ctrBeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int3
             bool wasLoaded = gl->textureLoaded[i] && gl->uvScaleX[i] != 0.0f;
             if (ensureTextureLoaded(gl, i) && !wasLoaded) warmed++;
         }
-        
+
         fprintf(stderr, "CTR: Deferred residency sweep - freed %u pages, prefetched %u pages\n", freed, warmed);
     }
 
@@ -307,7 +314,10 @@ static void ctrEndFrame(Renderer* renderer) {
     g_frameCounter++;
 }
 
-static void ctrRendererFlush(MAYBE_UNUSED Renderer* renderer) {}
+static void ctrRendererFlush(Renderer* renderer) {
+    CtrRenderer* gl = (CtrRenderer*) renderer;
+    ctrFlushBatch(gl);
+}
 
 // Lazily decode + upload a TXTR page on first use in the current room.
 // No persistent cache — we always go PNG blob -> stb_image -> glTexImage2D.
@@ -321,6 +331,11 @@ static bool ensureTextureLoaded(CtrRenderer* gl, uint32_t pageId) {
 
     if (gl->glTextures[pageId] == 0) {
         glGenTextures(1, &gl->glTextures[pageId]);
+        if (gl->glTextures[pageId] == 0) {
+            fprintf(stderr, "CTR: Failed to allocate GL texture for TXTR page %u\n", pageId);
+            gl->textureLoaded[pageId] = false;
+            return false;
+        }
     }
     glBindTexture(GL_TEXTURE_2D, gl->glTextures[pageId]);
 
@@ -328,6 +343,7 @@ static bool ensureTextureLoaded(CtrRenderer* gl, uint32_t pageId) {
     uint8_t* pixels = stbi_load_from_memory(txtr->blobData, (int) txtr->blobSize, &origW, &origH, &channels, 4);
     if (pixels == nullptr) {
         fprintf(stderr, "CTR: Failed to decode TXTR page %u\n", pageId);
+        gl->textureLoaded[pageId] = false;
         return false;
     }
 
@@ -385,6 +401,18 @@ static bool ensureTextureLoaded(CtrRenderer* gl, uint32_t pageId) {
 
     // Отправляем сжатую текстуру
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, uploadW, uploadH, 0, GL_RGBA, GL_UNSIGNED_BYTE, uploadPixels);
+
+    // Проверка что текстура действительно загружена в GPU (C3D_TexInit мог не выделить память)
+    if (glGetError() != GL_NO_ERROR) {
+        fprintf(stderr, "CTR: glTexImage2D failed for TXTR page %u (%dx%d)\n", pageId, uploadW, uploadH);
+        gl->textureLoaded[pageId] = false;
+        gl->uvScaleX[pageId] = 0.0f;
+        gl->uvScaleY[pageId] = 0.0f;
+        if (freeUploadPixels) free(uploadPixels);
+        stbi_image_free(pixels);
+        return false;
+    }
+
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -393,6 +421,9 @@ static bool ensureTextureLoaded(CtrRenderer* gl, uint32_t pageId) {
     if (freeUploadPixels) free(uploadPixels);
     stbi_image_free(pixels);
 
+    fprintf(stderr, "CTR: Loaded TXTR page %u (%dx%d -> %dx%d POT=%dx%d uvScale=%f/%f)\n",
+            pageId, origW, origH, uploadW, uploadH, potW, potH,
+            gl->uvScaleX[pageId], gl->uvScaleY[pageId]);
     return true;
 }
 
@@ -546,7 +577,11 @@ unload_stale:
         }
         gl->pendingResidencyUpdate = true;
         gl->pendingResidencyMarkFrame = g_frameCounter;
-        gl->pendingResidencyReadyFrame = g_frameCounter;
+
+        // [ИСПРАВЛЕНИЕ]: Ждем 3 кадра! Даем время динамическим/persistent
+        // объектам нарисоваться в новой комнате и обновить свой lastUsedFrame.
+        gl->pendingResidencyReadyFrame = g_frameCounter + 3;
+
         fprintf(stderr, "CTR: Room %d residency: keep=%u, already_loaded=%u\n", roomIndex, kept, alreadyLoaded);
     }
 }
