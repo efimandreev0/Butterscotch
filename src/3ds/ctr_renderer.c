@@ -11,21 +11,6 @@
 #include "stb_ds.h"
 #include "utils.h"
 
-// 3DS texture management:
-//   * No persistent SD cache — every page is PNG-decoded fresh on first use.
-//     (We used to have a NovaGL on-SD cache here; it kept paging in during play
-//      and made hitches worse, so it's gone.)
-//   * Lazy per-draw load: the first drawSprite that touches a page decodes +
-//     uploads it. Subsequent frames in the same room are zero-cost.
-//   * Per-room unload: on every room change we scan the new room's static
-//     references (tiles, backgrounds, layer sprites, instance object sprites)
-//     and free every GL texture that isn't on that list. Dynamically-set
-//     sprites (GML changing spriteIndex at runtime) are still safe because
-//     ensureTextureLoaded will lazily re-decode them on first draw.
-//
-// Net result: on OLD 3DS only the atlases actually visible in the current
-// room live in linear-heap memory at any time.
-
 #define CTR_QUAD_BATCH_CAPACITY 4096       // До 4096 спрайтов за 1 вызов (16k вершин)
 
 #define LRU_SWEEP_INTERVAL 180
@@ -33,7 +18,6 @@
 
 // ===[ Vtable Implementations ]===
 
-// Forward declarations — renderer-internal helpers used before their definitions.
 static bool ensureTextureLoaded(CtrRenderer* gl, uint32_t pageId);
 static void unloadPageTexture(CtrRenderer* gl, uint32_t pageId);
 
@@ -43,10 +27,6 @@ typedef struct {
     uint8_t r, g, b, a;
 } CtrPackedVertex;
 
-// Выплевывает накопленные спрайты на GPU.
-// Client-state enables and vertex-array pointers are set ONCE at renderer init
-// (buffer base never moves for our re-used vertex scratch), so the hot path here
-// is just bind + draw.
 static void ctrFlushBatch(CtrRenderer* gl) {
     if (gl->quadBatchCount == 0 || gl->quadBatchTexture == 0 || gl->quadBatchVertices == nullptr) return;
 
@@ -70,14 +50,12 @@ static void ctrPushQuad(CtrRenderer* gl, GLuint textureId, float x0, float y0, f
     gl->quadBatchTexture = textureId;
 
     CtrPackedVertex* verts = (CtrPackedVertex*) gl->quadBatchVertices;
-    CtrPackedVertex* tri = verts + gl->quadBatchCount * 6; // 6 вершин (2 треугольника)
+    CtrPackedVertex* tri = verts + gl->quadBatchCount * 6;
 
-    // Первый треугольник (Левый-Верх, Правый-Верх, Правый-Низ)
     tri[0] = (CtrPackedVertex) { .x = x0, .y = y0, .z = 0.0f, .u = u0, .v = v0, .r = r, .g = g, .b = b, .a = a };
     tri[1] = (CtrPackedVertex) { .x = x1, .y = y1, .z = 0.0f, .u = u1, .v = v0, .r = r, .g = g, .b = b, .a = a };
     tri[2] = (CtrPackedVertex) { .x = x2, .y = y2, .z = 0.0f, .u = u1, .v = v1, .r = r, .g = g, .b = b, .a = a };
 
-    // Второй треугольник (Левый-Верх, Правый-Низ, Левый-Низ)
     tri[3] = (CtrPackedVertex) { .x = x0, .y = y0, .z = 0.0f, .u = u0, .v = v0, .r = r, .g = g, .b = b, .a = a };
     tri[4] = (CtrPackedVertex) { .x = x2, .y = y2, .z = 0.0f, .u = u1, .v = v1, .r = r, .g = g, .b = b, .a = a };
     tri[5] = (CtrPackedVertex) { .x = x3, .y = y3, .z = 0.0f, .u = u0, .v = v1, .r = r, .g = g, .b = b, .a = a };
@@ -91,7 +69,7 @@ static void ctrInit(Renderer* renderer, DataWin* dataWin) {
 
     glEnable(GL_TEXTURE_2D);
     glDisable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE); // <--- ФИКС ПРОПАДАЮЩИХ ВРАГОВ (исправляет проблему с image_xscale = -1)
+    glDisable(GL_CULL_FACE);
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 
     gl->textureCount = dataWin->txtr.count;
@@ -102,15 +80,11 @@ static void ctrInit(Renderer* renderer, DataWin* dataWin) {
     gl->lastUsedFrame = safeMalloc(gl->textureCount * sizeof(uint32_t));
     gl->keepResident = safeMalloc(gl->textureCount * sizeof(bool));
 
-    // Инициализация мощного батчера
     gl->quadBatchCapacity = CTR_QUAD_BATCH_CAPACITY;
     gl->quadBatchCount = 0;
     gl->quadBatchTexture = 0;
     gl->quadBatchVertices = safeMalloc((size_t) gl->quadBatchCapacity * 6 * sizeof(CtrPackedVertex));
 
-    // Sticky client-state: enabled once here, never toggled on the hot path.
-    // The vertex buffer base pointer never moves (we reuse the same scratch), so
-    // the per-attribute pointers are also set once.
     {
         CtrPackedVertex* verts = (CtrPackedVertex*) gl->quadBatchVertices;
         glEnableClientState(GL_VERTEX_ARRAY);
@@ -121,8 +95,6 @@ static void ctrInit(Renderer* renderer, DataWin* dataWin) {
         glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(CtrPackedVertex), &verts[0].r);
     }
 
-    // GL handles are generated lazily per-page inside ensureTextureLoaded so we
-    // don't eat PICA linear-heap name slots for pages we may never touch.
     for (uint32_t i = 0; gl->textureCount > i; i++) {
         gl->glTextures[i] = 0;
         gl->uvScaleX[i] = 0.0f;
@@ -154,7 +126,6 @@ static void ctrDestroy(Renderer* renderer) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
 
     glDeleteTextures(1, &gl->whiteTexture);
-    // Only delete handles that were actually generated.
     for (uint32_t i = 0; i < gl->textureCount; i++) {
         if (gl->glTextures[i] != 0) {
             glDeleteTextures(1, &gl->glTextures[i]);
@@ -172,7 +143,6 @@ static void ctrDestroy(Renderer* renderer) {
     free(gl);
 }
 
-// Per-frame diagnostic counters. Incremented by each draw path; dumped at endFrame.
 static uint32_t g_drawSpriteCalls = 0;
 static uint32_t g_drawSpritePartCalls = 0;
 static uint32_t g_drawTextCalls = 0;
@@ -185,24 +155,14 @@ static void ctrBeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int3
     ctrFlushBatch(gl);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // Deferred residency update. ctrOnRoomChanged can't safely glDeleteTextures
-    // during Runner_step — the previous frame's GPU commands may still reference
-    // those handles via NovaGL's deferred command buffer, and deleting a handle
-    // that was bound in the last frame occasionally hangs PICA200. Doing the
-    // delete here is safe: we're past novaSwapBuffers, no texture is bound, and
-    // the batcher is flushed and empty.
     if (gl->pendingResidencyUpdate && g_frameCounter >= gl->pendingResidencyReadyFrame) {
         gl->pendingResidencyUpdate = false;
         uint32_t freed = 0;
         uint32_t warmed = 0;
 
-        // 1. СНАЧАЛА выгружаем все ненужные текстуры прошлой комнаты,
-        // чтобы освободить критически важный Linear Heap (VRAM)
         for (uint32_t i = 0; i < gl->textureCount; i++) {
             if (!gl->keepResident[i] && gl->textureLoaded[i]) {
-
                 uint32_t age = g_frameCounter - gl->lastUsedFrame[i];
-
                 if (age > 2) {
                     unloadPageTexture(gl, i);
                     freed++;
@@ -253,8 +213,6 @@ static void ctrBeginView(Renderer* renderer, int32_t viewX, int32_t viewY, int32
     ctrFlushBatch(gl);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // On 3DS we always render the game to the full top screen (400x240).
-    // Map the game's port rect onto the whole top screen by scaling the ortho projection.
     glViewport(0, 0, gl->windowW, gl->windowH);
     glDisable(GL_SCISSOR_TEST);
 
@@ -319,8 +277,7 @@ static void ctrRendererFlush(Renderer* renderer) {
     ctrFlushBatch(gl);
 }
 
-// Lazily decode + upload a TXTR page on first use in the current room.
-// No persistent cache — we always go PNG blob -> stb_image -> glTexImage2D.
+// ===[ ИСПРАВЛЕННЫЙ ЗАГРУЗЧИК ТЕКСТУР ]===
 static bool ensureTextureLoaded(CtrRenderer* gl, uint32_t pageId) {
     gl->lastUsedFrame[pageId] = g_frameCounter;
     if (gl->textureLoaded[pageId]) return (gl->uvScaleX[pageId] != 0.0f);
@@ -347,82 +304,135 @@ static bool ensureTextureLoaded(CtrRenderer* gl, uint32_t pageId) {
         return false;
     }
 
-    int uploadW = origW;
-    int uploadH = origH;
-    uint8_t* uploadPixels = pixels;
-    bool freeUploadPixels = false;
+    int curW = origW;
+    int curH = origH;
+    uint8_t* curPixels = pixels;
+    bool curPixelsOwned = false;
 
-    // Сжимаем, пока не влезет в 1024x1024 (чтобы NovaGL не делала malloc и не падала)
-    while (uploadW > 1024 || uploadH > 1024) {
-        int nextW = uploadW / 2;
-        int nextH = uploadH / 2;
+    // 1. АППАРАТНЫЙ ЛИМИТ 3DS: PICA200 поддерживает максимум 1024x1024!
+    // Если текстура больше, мы обязаны сжать её до загрузки в GPU, иначе будет краш.
+    while (curW > 1024 || curH > 1024) {
+        fprintf(stderr, "CTR: Hardware limit exceeded for TXTR %u (%dx%d), downscaling...\n", pageId, curW, curH);
+
+        int nextW = curW / 2;
+        int nextH = curH / 2;
         if (nextW < 1) nextW = 1;
         if (nextH < 1) nextH = 1;
 
         uint8_t* nextPixels = malloc(nextW * nextH * 4);
-        if (nextPixels == nullptr) {
-            fprintf(stderr, "CTR: Out of memory during downscale! Breaking...\n");
-            break;
-        }
+        if (!nextPixels) break;
 
         for (int y = 0; y < nextH; y++) {
             for (int x = 0; x < nextW; x++) {
-                int px00 = (y * 2 * uploadW + x * 2) * 4;
-                int px10 = (y * 2 * uploadW + (x * 2 + 1 < uploadW ? x * 2 + 1 : x * 2)) * 4;
-                int px01 = ((y * 2 + 1 < uploadH ? y * 2 + 1 : y * 2) * uploadW + x * 2) * 4;
-                int px11 = ((y * 2 + 1 < uploadH ? y * 2 + 1 : y * 2) * uploadW + (x * 2 + 1 < uploadW ? x * 2 + 1 : x * 2)) * 4;
+                int px00 = (y * 2 * curW + x * 2) * 4;
+                int px10 = (y * 2 * curW + (x * 2 + 1 < curW ? x * 2 + 1 : x * 2)) * 4;
+                int px01 = ((y * 2 + 1 < curH ? y * 2 + 1 : y * 2) * curW + x * 2) * 4;
+                int px11 = ((y * 2 + 1 < curH ? y * 2 + 1 : y * 2) * curW + (x * 2 + 1 < curW ? x * 2 + 1 : x * 2)) * 4;
 
                 int dstIdx = (y * nextW + x) * 4;
                 for (int c = 0; c < 4; c++) {
-                    nextPixels[dstIdx + c] = (uploadPixels[px00 + c] + uploadPixels[px10 + c] + uploadPixels[px01 + c] + uploadPixels[px11 + c]) / 4;
+                    nextPixels[dstIdx + c] =
+                        (curPixels[px00 + c] +
+                         curPixels[px10 + c] +
+                         curPixels[px01 + c] +
+                         curPixels[px11 + c]) / 4;
                 }
             }
         }
 
-        if (freeUploadPixels) free(uploadPixels);
-        uploadPixels = nextPixels;
-        uploadW = nextW;
-        uploadH = nextH;
-        freeUploadPixels = true;
+        if (curPixelsOwned) free(curPixels);
+        curPixels = nextPixels;
+        curPixelsOwned = true;
+        curW = nextW;
+        curH = nextH;
     }
 
-    // Считаем размер аппаратной текстуры (ближайшая степень двойки - Power-Of-Two)
-    int potW = uploadW;
-    potW--; potW |= potW >> 1; potW |= potW >> 2; potW |= potW >> 4; potW |= potW >> 8; potW |= potW >> 16; potW++;
-    if (potW < 8) potW = 8;
+    // Очищаем старые ошибки OpenGL
+    while (glGetError() != GL_NO_ERROR);
 
-    int potH = uploadH;
-    potH--; potH |= potH >> 1; potH |= potH >> 2; potH |= potH >> 4; potH |= potH >> 8; potH |= potH >> 16; potH++;
-    if (potH < 8) potH = 8;
+    bool uploaded = false;
 
-    // Идеальный скейлер! Зависит от оригинального размера, размера ужатой текстуры и аппаратного размера
-    gl->uvScaleX[pageId] = ((float)uploadW / (float)origW) / (float)potW;
-    gl->uvScaleY[pageId] = ((float)uploadH / (float)origH) / (float)potH;
+    // 2. Отправляем в видеокарту. Если VRAM всё ещё не хватает, сжимаем ещё сильнее.
+    while (!uploaded) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, curW, curH, 0, GL_RGBA, GL_UNSIGNED_BYTE, curPixels);
 
-    // Отправляем сжатую текстуру
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, uploadW, uploadH, 0, GL_RGBA, GL_UNSIGNED_BYTE, uploadPixels);
+        if (glGetError() == GL_NO_ERROR) {
+            uploaded = true;
+            break;
+        }
 
-    // Проверка что текстура действительно загружена в GPU (C3D_TexInit мог не выделить память)
-    if (glGetError() != GL_NO_ERROR) {
-        fprintf(stderr, "CTR: glTexImage2D failed for TXTR page %u (%dx%d)\n", pageId, uploadW, uploadH);
+        fprintf(stderr, "CTR: OOM for TXTR %u at %dx%d, downscaling...\n", pageId, curW, curH);
+
+        if (curW <= 64 || curH <= 64) {
+            break; // Меньше некуда
+        }
+
+        int nextW = curW / 2;
+        int nextH = curH / 2;
+        if (nextW < 1) nextW = 1;
+        if (nextH < 1) nextH = 1;
+
+        uint8_t* nextPixels = malloc(nextW * nextH * 4);
+        if (!nextPixels) break;
+
+        for (int y = 0; y < nextH; y++) {
+            for (int x = 0; x < nextW; x++) {
+                int px00 = (y * 2 * curW + x * 2) * 4;
+                int px10 = (y * 2 * curW + (x * 2 + 1 < curW ? x * 2 + 1 : x * 2)) * 4;
+                int px01 = ((y * 2 + 1 < curH ? y * 2 + 1 : y * 2) * curW + x * 2) * 4;
+                int px11 = ((y * 2 + 1 < curH ? y * 2 + 1 : y * 2) * curW + (x * 2 + 1 < curW ? x * 2 + 1 : x * 2)) * 4;
+
+                int dstIdx = (y * nextW + x) * 4;
+                for (int c = 0; c < 4; c++) {
+                    nextPixels[dstIdx + c] =
+                        (curPixels[px00 + c] +
+                         curPixels[px10 + c] +
+                         curPixels[px01 + c] +
+                         curPixels[px11 + c]) / 4;
+                }
+            }
+        }
+
+        if (curPixelsOwned) free(curPixels);
+        curPixels = nextPixels;
+        curPixelsOwned = true;
+        curW = nextW;
+        curH = nextH;
+    }
+
+    if (!uploaded) {
+        fprintf(stderr, "CTR: glTexImage2D failed completely for TXTR page %u\n", pageId);
         gl->textureLoaded[pageId] = false;
         gl->uvScaleX[pageId] = 0.0f;
         gl->uvScaleY[pageId] = 0.0f;
-        if (freeUploadPixels) free(uploadPixels);
+        if (curPixelsOwned) free(curPixels);
         stbi_image_free(pixels);
         return false;
     }
+
+    // Считаем размер аппаратной текстуры (POT)
+    int potW = curW;
+    potW--; potW |= potW >> 1; potW |= potW >> 2; potW |= potW >> 4; potW |= potW >> 8; potW |= potW >> 16; potW++;
+    if (potW < 8) potW = 8;
+
+    int potH = curH;
+    potH--; potH |= potH >> 1; potH |= potH >> 2; potH |= potH >> 4; potH |= potH >> 8; potH |= potH >> 16; potH++;
+    if (potH < 8) potH = 8;
+
+    // Скейлер для UV координат (важно: используем финальные curW/curH!)
+    gl->uvScaleX[pageId] = ((float)curW / (float)origW) / (float)potW;
+    gl->uvScaleY[pageId] = ((float)curH / (float)origH) / (float)potH;
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    if (freeUploadPixels) free(uploadPixels);
+    if (curPixelsOwned) free(curPixels);
     stbi_image_free(pixels);
 
     fprintf(stderr, "CTR: Loaded TXTR page %u (%dx%d -> %dx%d POT=%dx%d uvScale=%f/%f)\n",
-            pageId, origW, origH, uploadW, uploadH, potW, potH,
+            pageId, origW, origH, curW, curH, potW, potH,
             gl->uvScaleX[pageId], gl->uvScaleY[pageId]);
     return true;
 }
@@ -455,9 +465,6 @@ void CtrRenderer_prefetchSprite(Renderer* renderer, int32_t spriteIndex) {
     }
 }
 
-// ===[ Per-room texture-page residency ]===
-
-// Mark the texture page behind a TPAG offset as needed (if resolvable).
 static void markTpagOffsetResident(CtrRenderer* gl, DataWin* dw, uint32_t tpagOffset) {
     int32_t tpagIdx = DataWin_resolveTPAG(dw, tpagOffset);
     if (tpagIdx < 0 || (uint32_t) tpagIdx >= dw->tpag.count) return;
@@ -466,7 +473,6 @@ static void markTpagOffsetResident(CtrRenderer* gl, DataWin* dw, uint32_t tpagOf
     gl->keepResident[pageId] = true;
 }
 
-// All pages referenced by every frame of a sprite.
 static void markSpriteResident(CtrRenderer* gl, DataWin* dw, int32_t spriteIndex) {
     if (spriteIndex < 0 || (uint32_t) spriteIndex >= dw->sprt.count) return;
     Sprite* s = &dw->sprt.sprites[spriteIndex];
@@ -481,10 +487,6 @@ static void markBackgroundResident(CtrRenderer* gl, DataWin* dw, int32_t bgndInd
     markTpagOffsetResident(gl, dw, bg->textureOffset);
 }
 
-// Build the "keep" set from the new room's static references, then unload every
-// page outside that set. Kept as pragmatic as possible — we don't try to solve
-// the "GML changes spriteIndex at runtime" case (that's handled by lazy reload
-// on next draw), but we cover everything visible from data.win up front.
 static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
     DataWin* dw = renderer->dataWin;
@@ -492,22 +494,14 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
     if (roomIndex < 0 || (uint32_t) roomIndex >= dw->room.count) return;
     Room* room = &dw->room.rooms[roomIndex];
 
-    // Reset resident mask.
     for (uint32_t i = 0; i < gl->textureCount; i++) gl->keepResident[i] = false;
 
-    // Pin every font atlas. Fonts are small and text can be drawn at any time
-    // (debug overlays, UI). Re-decoding them every transition is pure waste.
     for (uint32_t i = 0; i < dw->font.count; i++) {
         markTpagOffsetResident(gl, dw, dw->font.fonts[i].textureOffset);
     }
 
-    if (!room->payloadLoaded) {
-        // Payload hasn't been loaded yet — nothing room-specific to pin. Bail
-        // out and let lazy-load on first draw handle it.
-        goto unload_stale;
-    }
+    if (!room->payloadLoaded) goto unload_stale;
 
-    // Room-level backgrounds (up to 8 layers on pre-GMS2 or GMS2 compat).
     if (room->backgrounds != nullptr) {
         for (int i = 0; i < 8; i++) {
             if (!room->backgrounds[i].enabled) continue;
@@ -515,23 +509,16 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
         }
     }
 
-    // Legacy (pre-GMS2) tiles on the room itself.
     for (uint32_t i = 0; i < room->tileCount; i++) {
         RoomTile* tile = &room->tiles[i];
-        if (tile->useSpriteDefinition) {
-            markSpriteResident(gl, dw, tile->backgroundDefinition);
-        } else {
-            markBackgroundResident(gl, dw, tile->backgroundDefinition);
-        }
+        if (tile->useSpriteDefinition) markSpriteResident(gl, dw, tile->backgroundDefinition);
+        else markBackgroundResident(gl, dw, tile->backgroundDefinition);
     }
 
-    // Instances: mark the default sprite of the GameObject the instance spawns
-    // from. If GML later swaps spriteIndex, lazy-load picks it up at draw time.
     for (uint32_t i = 0; i < room->gameObjectCount; i++) {
         int32_t objectIndex = room->gameObjects[i].objectDefinition;
         if (objectIndex < 0 || (uint32_t) objectIndex >= dw->objt.count) continue;
         markSpriteResident(gl, dw, dw->objt.objects[objectIndex].spriteId);
-        // Cover parent-chain sprites too: child objects sometimes inherit visuals.
         int32_t parent = dw->objt.objects[objectIndex].parentId;
         int guard = 8;
         while (parent >= 0 && (uint32_t) parent < dw->objt.count && guard-- > 0) {
@@ -540,23 +527,15 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
         }
     }
 
-    // GMS2 layered data.
     for (uint32_t li = 0; li < room->layerCount; li++) {
         RoomLayer* layer = &room->layers[li];
-        if (layer->backgroundData != nullptr) {
-            markSpriteResident(gl, dw, layer->backgroundData->spriteIndex);
-        }
-        if (layer->tilesData != nullptr) {
-            markBackgroundResident(gl, dw, layer->tilesData->backgroundIndex);
-        }
+        if (layer->backgroundData != nullptr) markSpriteResident(gl, dw, layer->backgroundData->spriteIndex);
+        if (layer->tilesData != nullptr) markBackgroundResident(gl, dw, layer->tilesData->backgroundIndex);
         if (layer->assetsData != nullptr) {
             for (uint32_t i = 0; i < layer->assetsData->legacyTileCount; i++) {
                 RoomTile* tile = &layer->assetsData->legacyTiles[i];
-                if (tile->useSpriteDefinition) {
-                    markSpriteResident(gl, dw, tile->backgroundDefinition);
-                } else {
-                    markBackgroundResident(gl, dw, tile->backgroundDefinition);
-                }
+                if (tile->useSpriteDefinition) markSpriteResident(gl, dw, tile->backgroundDefinition);
+                else markBackgroundResident(gl, dw, tile->backgroundDefinition);
             }
             for (uint32_t i = 0; i < layer->assetsData->spriteCount; i++) {
                 markSpriteResident(gl, dw, layer->assetsData->sprites[i].spriteIndex);
@@ -566,8 +545,6 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
 
 unload_stale:
     {
-        // Don't glDeleteTextures here — defer to the next ctrBeginFrame so the
-        // PICA200 is guaranteed idle for these handles.
         uint32_t kept = 0, alreadyLoaded = 0;
         for (uint32_t i = 0; i < gl->textureCount; i++) {
             if (gl->keepResident[i]) {
@@ -577,9 +554,6 @@ unload_stale:
         }
         gl->pendingResidencyUpdate = true;
         gl->pendingResidencyMarkFrame = g_frameCounter;
-
-        // [ИСПРАВЛЕНИЕ]: Ждем 3 кадра! Даем время динамическим/persistent
-        // объектам нарисоваться в новой комнате и обновить свой lastUsedFrame.
         gl->pendingResidencyReadyFrame = g_frameCounter + 3;
 
         fprintf(stderr, "CTR: Room %d residency: keep=%u, already_loaded=%u\n", roomIndex, kept, alreadyLoaded);
@@ -607,7 +581,6 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
     float u1 = ((float) (tpag->sourceX + tpag->sourceWidth) - insetEps) * gl->uvScaleX[pageId];
     float v1 = ((float) (tpag->sourceY + tpag->sourceHeight) - insetEps) * gl->uvScaleY[pageId];
 
-    // БЫСТРАЯ МАТЕМАТИКА вместо тяжелых 4x4 матриц
     float lx0 = ((float) tpag->targetX - originX) * xscale;
     float ly0 = ((float) tpag->targetY - originY) * yscale;
     float lx1 = lx0 + ((float) tpag->sourceWidth) * xscale;
@@ -619,13 +592,10 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
 
     float x0 = lx0 * c - ly0 * s + x;
     float y0 = lx0 * s + ly0 * c + y;
-
     float x1 = lx1 * c - ly0 * s + x;
     float y1 = lx1 * s + ly0 * c + y;
-
     float x2 = lx1 * c - ly1 * s + x;
     float y2 = lx1 * s + ly1 * c + y;
-
     float x3 = lx0 * c - ly1 * s + x;
     float y3 = lx0 * s + ly1 * c + y;
 
@@ -634,7 +604,6 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
     uint8_t b = BGR_B(color);
     uint8_t a = (uint8_t)(alpha * 255.0f);
 
-    // Кидаем прямо в батчер! Никаких glBegin!
     ctrPushQuad(gl, texId, x0, y0, x1, y1, x2, y2, x3, y3, u0, v0, u1, v1, r, g, b, a);
 }
 
@@ -669,7 +638,6 @@ static void ctrDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t src
     uint8_t b = BGR_B(color);
     uint8_t a = (uint8_t)(alpha * 255.0f);
 
-    // Загоняем в батчер
     ctrPushQuad(gl, texId, x0, y0, x1, y0, x1, y1, x0, y1, u0, v0, u1, v1, r, g, b, a);
 }
 
@@ -679,13 +647,11 @@ static void emitColoredQuad(CtrRenderer* gl, float x0, float y0, float x1, float
     uint8_t cb = (uint8_t)(b * 255.0f);
     uint8_t ca = (uint8_t)(a * 255.0f);
 
-    // Прямоугольники теперь тоже рисуются пачками!
     ctrPushQuad(gl, gl->whiteTexture, x0, y0, x1, y0, x1, y1, x0, y1, 0.5f, 0.5f, 0.5f, 0.5f, cr, cg, cb, ca);
 }
 
 static void ctrDrawRectangle(Renderer* renderer, float x1, float y1, float x2, float y2, uint32_t color, float alpha, bool outline) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
-
     g_drawRectCalls++;
 
     float r = (float) BGR_R(color) / 255.0f;
@@ -720,12 +686,11 @@ static void ctrDrawLine(Renderer* renderer, float x1, float y1, float x2, float 
 
     glBindTexture(GL_TEXTURE_2D, gl->whiteTexture);
 
-    // Strip order: A, B, D, C (so tri1=A-B-D, tri2=B-D-C cover the rect).
     glBegin(GL_TRIANGLE_STRIP);
-        glColor4f(r, g, b, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x1 + px, y1 + py); // A
-        glColor4f(r, g, b, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x1 - px, y1 - py); // B
-        glColor4f(r, g, b, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x2 + px, y2 + py); // D
-        glColor4f(r, g, b, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x2 - px, y2 - py); // C
+        glColor4f(r, g, b, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x1 + px, y1 + py);
+        glColor4f(r, g, b, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x1 - px, y1 - py);
+        glColor4f(r, g, b, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x2 + px, y2 + py);
+        glColor4f(r, g, b, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x2 - px, y2 - py);
     glEnd();
 }
 
@@ -735,7 +700,6 @@ static void ctrDrawLineColor(Renderer* renderer, float x1, float y1, float x2, f
     float r1 = (float) BGR_R(color1) / 255.0f;
     float g1 = (float) BGR_G(color1) / 255.0f;
     float b1 = (float) BGR_B(color1) / 255.0f;
-
     float r2 = (float) BGR_R(color2) / 255.0f;
     float g2 = (float) BGR_G(color2) / 255.0f;
     float b2 = (float) BGR_B(color2) / 255.0f;
@@ -752,10 +716,10 @@ static void ctrDrawLineColor(Renderer* renderer, float x1, float y1, float x2, f
     glBindTexture(GL_TEXTURE_2D, gl->whiteTexture);
 
     glBegin(GL_TRIANGLE_STRIP);
-        glColor4f(r1, g1, b1, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x1 + px, y1 + py); // A
-        glColor4f(r1, g1, b1, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x1 - px, y1 - py); // B
-        glColor4f(r2, g2, b2, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x2 + px, y2 + py); // D
-        glColor4f(r2, g2, b2, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x2 - px, y2 - py); // C
+        glColor4f(r1, g1, b1, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x1 + px, y1 + py);
+        glColor4f(r1, g1, b1, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x1 - px, y1 - py);
+        glColor4f(r2, g2, b2, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x2 + px, y2 + py);
+        glColor4f(r2, g2, b2, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x2 - px, y2 - py);
     glEnd();
 }
 
@@ -967,7 +931,6 @@ static void ctrDrawText(Renderer* renderer, const char* text, float x, float y, 
 }
 
 static void ctrDrawTextColor(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, float angleDeg, int32_t _c1, int32_t _c2, int32_t _c3, int32_t _c4, float alpha) {
-    // For simplicity on 3DS we ignore the 4-corner gradient coloring and render as a flat-colored text.
     (void) _c1; (void) _c2; (void) _c3; (void) _c4;
     float savedAlpha = renderer->drawAlpha;
     renderer->drawAlpha = alpha;
@@ -975,8 +938,6 @@ static void ctrDrawTextColor(Renderer* renderer, const char* text, float x, floa
     renderer->drawAlpha = savedAlpha;
 }
 
-// ===[ Dynamic sprite creation/deletion ]===
-// createSpriteFromSurface is not supported on 3DS (readPixels from PICA200 targets is not implemented in NovaGL).
 static int32_t ctrCreateSpriteFromSurface(Renderer* renderer, int32_t x, int32_t y, int32_t w, int32_t h, bool removeback, bool smooth, int32_t xorig, int32_t yorig) {
     (void) renderer; (void) x; (void) y; (void) w; (void) h; (void) removeback; (void) smooth; (void) xorig; (void) yorig;
     fprintf(stderr, "CTR: createSpriteFromSurface not supported\n");

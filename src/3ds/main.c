@@ -21,7 +21,7 @@
 #include "utils.h"
 
 u32 __ctru_heap_size = 0;
-u32 __ctru_linear_heap_size = 50 * 1024 * 1024;
+u32 __ctru_linear_heap_size = 45 * 1024 * 1024;
 u32 __stacksize__ = 64 * 1024;
 
 #define DATA_WIN_PATH "sdmc:/3ds/butterscotch/data.win"
@@ -30,30 +30,15 @@ u32 __stacksize__ = 64 * 1024;
 #define BUTTERSCOTCH_NOVA_INDEX_BUF_SIZE    (512 * 1024)
 #define BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE  (512 * 1024)
 
-// Override devkitARM/ctrulib defaults so we have enough room to decode large TXTR pages.
-// stb_image malloc's the full decoded RGBA buffer on the application heap, and GameMaker
-// atlases can be 1024x2048 (8 MB each). The default heap fragments quickly once VM
-// allocations come into play, causing late-loaded TXTR pages to fail to decode.
-// The linear heap must also be large because every uploaded texture lives in linear
-// memory for PICA200 DMA.
-// These symbols are weakly defined by ctrulib; overriding them lets us size the heaps
-// up front. Values picked to fit O3DS extended-memory mode (~96 MB user app RAM).
-// Heap: stb_image decode of 1024x2048 RGBA = 8 MB transient. VM + DataWin take ~8-12 MB.
-// Linear heap: each TXTR page uploaded via glTexImage2D lives here for the whole session,
-// averaging ~2-4 MB each, plus NovaGL command/vertex buffers (~9 MB).
-//u32 __ctru_heap_size = 32 * 1024 * 1024;         // 32 MB application heap
-//u32 __ctru_linear_heap_size = 48 * 1024 * 1024;  // 48 MB linear heap for GPU textures
-
-// 3DS HID button -> GML virtual key.
-static void pushKey(RunnerKeyboardState* kb, int32_t gmlKey, bool pressed) {
-    if (pressed) RunnerKeyboard_onKeyDown(kb, gmlKey);
-    else RunnerKeyboard_onKeyUp(kb, gmlKey);
+// Умный помощник для ввода
+static void processCombinedKey(RunnerKeyboardState* kb, u32 kDown, u32 kUp, u32 kHeld, u32 mask, int32_t gmlKey) {
+    if (kDown & mask) {
+        RunnerKeyboard_onKeyDown(kb, gmlKey);
+    } else if ((kUp & mask) && !(kHeld & mask)) {
+        RunnerKeyboard_onKeyUp(kb, gmlKey);
+    }
 }
 
-static void updateKey(RunnerKeyboardState* kb, u32 kDown, u32 kUp, u32 btn, int32_t gmlKey) {
-    if (kDown & btn) pushKey(kb, gmlKey, true);
-    if (kUp & btn) pushKey(kb, gmlKey, false);
-}
 void initLogging() {
     freopen("sdmc:/3ds/butter_out.txt", "w", stdout);
     freopen("sdmc:/3ds/butter_err.txt", "w", stderr);
@@ -64,16 +49,12 @@ void initLogging() {
     printf("Logging initialized!\n");
     fprintf(stderr, "This goes to stderr!\n");
 }
+
 int main(int argc, char* argv[]) {
     (void) argc; (void) argv;
     initLogging();
     gfxInitDefault();
-    // Note: we do NOT consoleInit(GFX_BOTTOM) — NovaGL owns both screens' framebuffers.
-    // Diagnostic output goes to stderr (visible in Citra/debuggers but not on hardware).
 
-    // Ask APT for a larger CPU slice (default is 30% for homebrew — bump to 30 max the OS
-    // will grant without audio-priority churn) and enable N3DS 804 MHz + L2 cache.
-    // On O3DS osSetSpeedupEnable is a no-op. Free ~2x CPU headroom on N3DS for the VM.
     APT_SetAppCpuTimeLimit(30);
     osSetSpeedupEnable(true);
 
@@ -119,16 +100,12 @@ int main(int argc, char* argv[]) {
     }
 
     if (dataWin == nullptr) {
-        // Only bring up the bottom-screen console here so the user can see the error
-        // on real hardware. We haven't initialized NovaGL yet, so the bottom screen
-        // framebuffer is still ours to use.
         consoleInit(GFX_BOTTOM, NULL);
         printf("Butterscotch 3DS: failed to parse data.win\n");
         printf("Expected at: %s\n", DATA_WIN_PATH);
         printf("\nPress START to exit.\n");
         while (aptMainLoop()) {
             hidScanInput();
-            //if (hidKeysDown() & KEY_START) break;
             gspWaitForVBlank();
         }
         gfxExit();
@@ -138,22 +115,11 @@ int main(int argc, char* argv[]) {
     Gen8* gen8 = &dataWin->gen8;
     fprintf(stderr, "Loaded \"%s\" (%d) [BC%u]\n", gen8->name, gen8->gameID, gen8->bytecodeVersion);
 
-    // Console must release the bottom screen before we can init NovaGL which uses it.
-    // Current NovaGL sources implement nova_init() as nova_init_ex() with a 512 KB command
-    // buffer. NovaGL clamps the client/index buffers to 8 MB / 512 KB respectively, and the
-    // current tex-staging argument is ignored internally, so the only knob that materially
-    // helps our sprite-heavy scenes is a slightly larger command buffer.
-    //nova_init_ex(
-    //    BUTTERSCOTCH_NOVA_CMD_BUF_SIZE,
-    //    BUTTERSCOTCH_NOVA_CLIENT_BUF_SIZE,
-    //    BUTTERSCOTCH_NOVA_INDEX_BUF_SIZE,
-    //    BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE
-    //);
     nova_init();
 
     VMContext* vm = VM_create(dataWin);
 
-    CtrFileSystem* fs = CtrFileSystem_create(DATA_WIN_PATH);
+    N3dsFileSystem* fs = N3dsFileSystem_create(DATA_WIN_PATH);
     Renderer* renderer = CtrRenderer_create();
     AudioSystem* audio = (AudioSystem*) SdlMixerAudioSystem_create();
     if (audio)
@@ -166,44 +132,31 @@ int main(int argc, char* argv[]) {
 
     Runner_initFirstRoom(runner);
 
-    double targetFrameSec = 1.0 / 30.0; // 3DS defaults to 30 Hz for homebrew
+    double targetFrameSec = 1.0 / 30.0;
 
-    static u32 prevKeysHeld = 0;
     while (aptMainLoop() && !runner->shouldExit) {
-        Uint32 frameStart = SDL_GetTicks();
+        u64 frameStart = osGetTime();
 
         hidScanInput();
 
         u32 kHeld = hidKeysHeld();
+        u32 kDown = hidKeysDown();
+        u32 kUp   = hidKeysUp();
 
-        u32 kDown = (~prevKeysHeld) & kHeld;
-        u32 kUp   = prevKeysHeld & (~kHeld);
-
-        prevKeysHeld = kHeld;
-
-        // --- input mapping ---
         RunnerKeyboard_beginFrame(runner->keyboard);
 
-        // Circle Pad
-        updateKey(runner->keyboard, kDown, kUp, KEY_CPAD_UP,     VK_UP);
-        updateKey(runner->keyboard, kDown, kUp, KEY_CPAD_DOWN,   VK_DOWN);
-        updateKey(runner->keyboard, kDown, kUp, KEY_CPAD_LEFT,   VK_LEFT);
-        updateKey(runner->keyboard, kDown, kUp, KEY_CPAD_RIGHT,  VK_RIGHT);
+        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_CPAD_UP | KEY_DUP, VK_UP);
+        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_CPAD_DOWN | KEY_DDOWN, VK_DOWN);
+        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_CPAD_LEFT | KEY_DLEFT, VK_LEFT);
+        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_CPAD_RIGHT | KEY_DRIGHT, VK_RIGHT);
 
-        // D-Pad
-        updateKey(runner->keyboard, kDown, kUp, KEY_DUP,     VK_UP);
-        updateKey(runner->keyboard, kDown, kUp, KEY_DDOWN,   VK_DOWN);
-        updateKey(runner->keyboard, kDown, kUp, KEY_DLEFT,   VK_LEFT);
-        updateKey(runner->keyboard, kDown, kUp, KEY_DRIGHT,  VK_RIGHT);
-
-        // Buttons
-        updateKey(runner->keyboard, kDown, kUp, KEY_A,       'Z');
-        updateKey(runner->keyboard, kDown, kUp, KEY_B,       'X');
-        updateKey(runner->keyboard, kDown, kUp, KEY_X,       'C');
-        updateKey(runner->keyboard, kDown, kUp, KEY_Y,       VK_SHIFT);
-        updateKey(runner->keyboard, kDown, kUp, KEY_L,       VK_ENTER);
-        updateKey(runner->keyboard, kDown, kUp, KEY_R,       VK_SPACE);
-        updateKey(runner->keyboard, kDown, kUp, KEY_SELECT,  VK_ESCAPE);
+        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_A, 'Z');
+        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_B, 'X');
+        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_X, 'C');
+        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_Y, VK_SHIFT);
+        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_L, VK_ENTER);
+        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_R, VK_SPACE);
+        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_SELECT, VK_ESCAPE);
 
         Runner_step(runner);
         runner->audioSystem->vtable->update(runner->audioSystem, (float) targetFrameSec);
@@ -213,7 +166,6 @@ int main(int argc, char* argv[]) {
         int32_t gameW = (int32_t) gen8->defaultWindowWidth;
         int32_t gameH = (int32_t) gen8->defaultWindowHeight;
 
-        // Вычисляем размеры экрана (делаем это ОДИН РАЗ до цикла отрисовки)
         bool viewsEnabled = (activeRoom->flags & 1) != 0;
         if (viewsEnabled) {
             int32_t maxRight = 0, maxBottom = 0;
@@ -234,10 +186,21 @@ int main(int argc, char* argv[]) {
 
         // ===[ НАЧАЛО 3D ЦИКЛА (1 или 2 прохода) ]===
         int eyes = novaGetEyeCount();
+
+        // ФИКС 3D: Сохраняем состояние клавиатуры!
+        // GML скрипты будут вызываться дважды, если включен 3D.
+        RunnerKeyboardState kb_backup = *(runner->keyboard);
+
         for (int eye = 0; eye < eyes; eye++) {
             novaBeginEye(eye);
 
-            // Очищаем экраны для каждого глаза
+            // ФИКС 3D: Если это второй проход (правый глаз), прячем импульсные нажатия от игры!
+            // Зажатые кнопки (keyDown) оставляем, чтобы анимации бега не мерцали.
+            if (eye == 1) {
+                memset(runner->keyboard->keyPressed, 0, sizeof(runner->keyboard->keyPressed));
+                memset(runner->keyboard->keyReleased, 0, sizeof(runner->keyboard->keyReleased));
+            }
+
             glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -265,14 +228,11 @@ int main(int argc, char* argv[]) {
 
                     runner->viewCurrent = vi;
 
-                    // 1. Рисуем сам мир в глубине (3D)
-                    // Значение 0.05f - это сила эффекта. Можешь сделать 0.03f если глазам больно
                     novaSet3DDepth(0.05f);
                     renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH, portX, portY, portW, portH, viewAngle);
                     Runner_draw(runner);
                     renderer->vtable->endView(renderer);
 
-                    // 2. Рисуем интерфейс плоским (поверх экрана)
                     novaSet3DDepth(0.0f);
                     int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : portW;
                     int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : portH;
@@ -287,13 +247,11 @@ int main(int argc, char* argv[]) {
             if (!anyViewRendered) {
                 runner->viewCurrent = 0;
 
-                // 1. Рисуем сам мир в глубине (3D)
                 novaSet3DDepth(0.05f);
                 renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, 0, 0, gameW, gameH, 0.0f);
                 Runner_draw(runner);
                 renderer->vtable->endView(renderer);
 
-                // 2. Рисуем интерфейс плоским (поверх экрана)
                 novaSet3DDepth(0.0f);
                 int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : gameW;
                 int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : gameH;
@@ -303,17 +261,20 @@ int main(int argc, char* argv[]) {
             }
 
             runner->viewCurrent = 0;
-            renderer->vtable->flush(renderer); // Отправляем батчи на GPU для текущего глаза
+            renderer->vtable->flush(renderer);
         }
+
+        // ФИКС 3D: Возвращаем состояние клавиш обратно для следующего шага игры
+        *(runner->keyboard) = kb_backup;
+
         // ===[ КОНЕЦ 3D ЦИКЛА ]===
 
         renderer->vtable->endFrame(renderer);
 
         novaSwapBuffers();
 
-        // Наш лимитер в 30 FPS (оставляем его здесь!)
-        Uint32 frameTime = SDL_GetTicks() - frameStart;
-        if (frameTime < 24) {
+        // 30 FPS Limiter
+        while (osGetTime() - frameStart < 33) {
             gspWaitForVBlank();
         }
     }
@@ -323,7 +284,7 @@ int main(int argc, char* argv[]) {
     renderer->vtable->destroy(renderer);
 
     Runner_free(runner);
-    CtrFileSystem_destroy(fs);
+    N3dsFileSystem_destroy(fs);
     VM_free(vm);
     DataWin_free(dataWin);
 
