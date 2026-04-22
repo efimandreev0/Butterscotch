@@ -15,11 +15,9 @@
 
 #define CTR_QUAD_BATCH_CAPACITY 1024
 
-// 🔥 ОПТИМИЗАЦИЯ СТАТТЕРОВ:
-// Увеличиваем жизнь кэша до 30 секунд (1800 кадров при 60 FPS).
-// Теперь снаряды Азгора, Санса и Андайн не будут выгружаться прямо посреди битвы!
-#define LRU_SWEEP_INTERVAL 120
-#define LRU_IDLE_THRESHOLD 1800
+// LRU кэш: очищает VRAM от неиспользуемых динамических текстур (выстрелы, UI) через 10 секунд
+#define LRU_SWEEP_INTERVAL 60
+#define LRU_IDLE_THRESHOLD 600
 
 static int next_pot(int x) {
     x--;
@@ -98,10 +96,14 @@ static void ctrDrawTpagRegion(CtrRenderer* gl, uint32_t tpagIndex, float srcOffX
 
     if (drawSrcW <= 0.001f || drawSrcH <= 0.001f) return;
 
-    float u0 = drawSrcX * tpagData->uvScaleX;
-    float v0 = drawSrcY * tpagData->uvScaleY;
-    float u1 = (drawSrcX + drawSrcW) * tpagData->uvScaleX;
-    float v1 = (drawSrcY + drawSrcH) * tpagData->uvScaleY;
+    // Half-Texel Inset: сшивает графику без зазоров
+    float halfU = 0.5f * tpagData->uvScaleX;
+    float halfV = 0.5f * tpagData->uvScaleY;
+
+    float u0 = drawSrcX * tpagData->uvScaleX + halfU;
+    float v0 = drawSrcY * tpagData->uvScaleY + halfV;
+    float u1 = (drawSrcX + drawSrcW) * tpagData->uvScaleX - halfU;
+    float v1 = (drawSrcY + drawSrcH) * tpagData->uvScaleY - halfV;
 
     ctrPushQuad(gl, tpagData->tex, x0, y0, x1, y1, x2, y2, x3, y3, u0, v0, u1, v1, r, g, b, a);
 }
@@ -109,8 +111,7 @@ static void ctrDrawTpagRegion(CtrRenderer* gl, uint32_t tpagIndex, float srcOffX
 static void unloadTpagTexture(CtrRenderer* gl, uint32_t tpagIndex) {
     if (tpagIndex >= gl->tpagCount) return;
     CtrTpagData* tpag = &gl->tpags[tpagIndex];
-
-    if (tpag->isLoaded && tpag->tex != 0 && tpag->tex != gl->whiteTexture) {
+    if (tpag->isLoaded && tpag->tex != 0) {
         glDeleteTextures(1, &tpag->tex);
     }
     tpag->tex = 0;
@@ -132,9 +133,6 @@ static uint32_t compute_tpag_hash(Texture* txtr, uint32_t pId, uint32_t tId) {
     hash ^= (txtr->blobSize * 199999);
     return hash;
 }
-
-static uint16_t* g_conversionBuffer = NULL;
-static size_t g_conversionBufferCap = 0;
 
 static void prefetchRoomTextures(CtrRenderer* gl) {
     DataWin* dw = gl->base.dataWin;
@@ -163,6 +161,7 @@ static void prefetchRoomTextures(CtrRenderer* gl) {
 
         if (!all_in_cache) {
             uint8_t* tempPngBuffer = nullptr;
+
 #ifdef __3DS__
             if (txtr->blobOffset > 0 && txtr->blobSize > 0 && dw->lazyLoadFile != nullptr) {
                 tempPngBuffer = malloc(txtr->blobSize);
@@ -174,6 +173,7 @@ static void prefetchRoomTextures(CtrRenderer* gl) {
 #else
             tempPngBuffer = txtr->blobData;
 #endif
+
             if (tempPngBuffer != nullptr) {
                 pixels = stbi_load_from_memory(tempPngBuffer, (int) txtr->blobSize, &origW, &origH, &channels, 4);
 #ifdef __3DS__
@@ -217,6 +217,7 @@ static void prefetchRoomTextures(CtrRenderer* gl) {
 
                 int potW = next_pot(extW);
                 int potH = next_pot(extH);
+
                 if (potW > 1024) potW = 1024;
                 if (potH > 1024) potH = 1024;
 
@@ -227,28 +228,23 @@ static void prefetchRoomTextures(CtrRenderer* gl) {
                         int srcX = extractX + x;
                         if (srcY < origH && srcX < origW) {
                             if (pixels[(srcY * origW + srcX) * 4 + 3] < 255) {
-                                has_alpha = true; goto alpha_found;
+                                has_alpha = true;
+                                goto alpha_found;
                             }
                         }
                     }
                 }
                 alpha_found:;
 
-                // 🔥 ФИКС ПАМЯТИ: Используем глобальный буфер. Никаких malloc в цикле!
-                size_t neededSize = potW * potH * sizeof(uint16_t);
-                if (neededSize > g_conversionBufferCap) {
-                    g_conversionBuffer = realloc(g_conversionBuffer, neededSize);
-                    g_conversionBufferCap = neededSize;
-                }
-
-                uint16_t* pixels16 = g_conversionBuffer;
+                uint16_t* pixels16 = malloc(potW * potH * sizeof(uint16_t));
                 if (pixels16) {
-                    memset(pixels16, 0, neededSize); // Зануляем для паддинга (прозрачности по краям)
+                    memset(pixels16, 0, potW * potH * sizeof(uint16_t));
 
                     for (int y = 0; y < extH; y++) {
                         for (int x = 0; x < extW; x++) {
                             int srcY = extractY + y;
                             int srcX = extractX + x;
+
                             if (srcY >= origH || srcX >= origW) continue;
 
                             int srcOffset = (srcY * origW + srcX) * 4;
@@ -257,15 +253,21 @@ static void prefetchRoomTextures(CtrRenderer* gl) {
                             uint8_t b = pixels[srcOffset + 2];
                             uint8_t a = pixels[srcOffset + 3];
 
-                            if (has_alpha) pixels16[y * potW + x] = pack_rgba4444(r, g, b, a);
-                            else           pixels16[y * potW + x] = pack_rgb565(r, g, b);
+                            int dstOffset = y * potW + x;
+
+                            if (has_alpha) {
+                                pixels16[dstOffset] = pack_rgba4444(r, g, b, a);
+                            } else {
+                                pixels16[dstOffset] = pack_rgb565(r, g, b);
+                            }
                         }
                     }
 
                     GLenum format = has_alpha ? GL_RGBA : GL_RGB;
                     GLenum type   = has_alpha ? GL_UNSIGNED_SHORT_4_4_4_4 : GL_UNSIGNED_SHORT_5_6_5;
 
-                    while (glGetError() != GL_NO_ERROR); // Очищаем старые ошибки GL
+                    while (glGetError() != GL_NO_ERROR);
+
                     glTexImage2D(GL_TEXTURE_2D, 0, format, potW, potH, 0, format, type, pixels16);
 
                     if (glGetError() == GL_NO_ERROR) {
@@ -283,14 +285,9 @@ static void prefetchRoomTextures(CtrRenderer* gl) {
 
                         nova_texture_cache_save(hash);
                     } else {
-                        // 🔥 ФИКС ОШИБОК VRAM: Если LinearRAM забилась, не пытаемся грузить текстуру бесконечно (это роняло FPS до 0)
                         glDeleteTextures(1, &tex);
-                        gl->tpags[tId].tex = gl->whiteTexture; // Ставим заглушку
-                        gl->tpags[tId].uvScaleX = 1.0f;
-                        gl->tpags[tId].uvScaleY = 1.0f;
-                        gl->tpags[tId].downscaleFactor = 1.0f;
-                        gl->tpags[tId].isLoaded = true; // Отмечаем как загруженный, чтобы движок отстал от нее
                     }
+                    free(pixels16);
                 }
             }
         }
@@ -298,6 +295,9 @@ static void prefetchRoomTextures(CtrRenderer* gl) {
     }
 }
 
+// 🔥 ИСПРАВЛЕНИЕ УТЕЧКИ: Функция динамической загрузки спрайтов.
+// Она временно помечает текстуры для префетча, а потом снимает метку,
+// чтобы LRU кэш смог удалить их через 10 секунд, если битва закончилась.
 static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
     if (tpagIndex < 0 || (uint32_t)tpagIndex >= gl->tpagCount || gl->tpags[tpagIndex].isLoaded) return;
 
@@ -330,6 +330,7 @@ static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
 
     prefetchRoomTextures(gl);
 
+    // Снимаем метку вечной резиденции! Теперь мусорщик LRU удалит их при ненадобности.
     for (int i = 0; i < tempCount; i++) {
         gl->tpags[tempTpags[i]].keepResident = false;
         gl->tpags[tempTpags[i]].lastUsedFrame = g_frameCounter;
@@ -411,6 +412,18 @@ static void ctrBeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int3
     ctrFlushBatch(gl);
     glBindTexture(GL_TEXTURE_2D, 0);
 
+    if (gl->pendingResidencyUpdate && g_frameCounter >= gl->pendingResidencyReadyFrame) {
+        gl->pendingResidencyUpdate = false;
+
+        for (uint32_t i = 0; i < gl->tpagCount; i++) {
+            if (!gl->tpags[i].keepResident && gl->tpags[i].isLoaded) {
+                unloadTpagTexture(gl, i);
+            }
+        }
+
+        prefetchRoomTextures(gl);
+    }
+
     gl->windowW = windowW;
     gl->windowH = windowH;
     gl->gameW = gameW;
@@ -491,6 +504,8 @@ static void ctrRendererFlush(Renderer* renderer) {
     ctrFlushBatch((CtrRenderer*) renderer);
 }
 
+// ===[ УПРАВЛЕНИЕ ЗАВИСИМОСТЯМИ (РЕЗИДЕНТНОСТЬ) ]===
+
 static void markTpagResident(CtrRenderer* gl, int32_t tpagIndex) {
     if (tpagIndex >= 0 && (uint32_t)tpagIndex < gl->tpagCount) {
         gl->tpags[tpagIndex].keepResident = true;
@@ -541,6 +556,9 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
 
     for (uint32_t i = 0; i < gl->tpagCount; i++) gl->tpags[i].keepResident = false;
 
+    // 🔥 ИСПРАВЛЕНИЕ УТЕЧКИ: Вырезан цикл, который жестко грузил все 81 шрифт игры
+    // Теперь шрифты подгружаются и выгружаются динамически, спасая ~5 МБ VRAM!
+
     if (!room->payloadLoaded) goto unload_stale;
 
     if (room->backgrounds) {
@@ -580,15 +598,11 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
     }
 
 unload_stale:
-    for (uint32_t i = 0; i < gl->tpagCount; i++) {
-        if (!gl->tpags[i].keepResident && gl->tpags[i].isLoaded) {
-            unloadTpagTexture(gl, i);
-        }
-    }
-
-    prefetchRoomTextures(gl);
-    gl->pendingResidencyUpdate = false;
+    gl->pendingResidencyUpdate = true;
+    gl->pendingResidencyReadyFrame = g_frameCounter;
 }
+
+// ===[ ОТРИСОВКА ]===
 
 static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y, float originX, float originY, float xscale, float yscale, float angleDeg, uint32_t color, float alpha) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
@@ -597,6 +611,7 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
     if (tpagIndex < 0 || (uint32_t)tpagIndex >= gl->tpagCount) return;
 
     if (!gl->tpags[tpagIndex].isLoaded) {
+        // Динамическая подгрузка с последующим сбросом резидентности
         loadDynamicSprite(gl, dw, tpagIndex);
         if (!gl->tpags[tpagIndex].isLoaded) return;
     }
@@ -616,8 +631,8 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
         float cy = roundf(y);
         float x0 = cx + roundf(lx0);
         float y0 = cy + roundf(ly0);
-        float x1 = x0 + roundf(((float) tpag->sourceWidth) * xscale);
-        float y1 = y0 + roundf(((float) tpag->sourceHeight) * yscale);
+        float x1 = cx + roundf(lx1);
+        float y1 = cy + roundf(ly1);
 
         ctrDrawTpagRegion(gl, tpagIndex, 0.0f, 0.0f, (float)tpag->sourceWidth, (float)tpag->sourceHeight,
                           x0, y0, x1, y0, x1, y1, x0, y1, r, g, b, a);
@@ -668,85 +683,113 @@ static void emitColoredQuad(CtrRenderer* gl, float x0, float y0, float x1, float
 static void ctrDrawRectangle(Renderer* renderer, float x1, float y1, float x2, float y2, uint32_t color, float alpha, bool outline) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
     float r = (float) BGR_R(color) / 255.0f; float g = (float) BGR_G(color) / 255.0f; float b = (float) BGR_B(color) / 255.0f;
-
-    float minX = fminf(x1, x2); float maxX = fmaxf(x1, x2);
-    float minY = fminf(y1, y2); float maxY = fmaxf(y1, y2);
-
     if (outline) {
-        emitColoredQuad(gl, minX, minY, maxX + 1.0f, minY + 1.0f, r, g, b, alpha);
-        emitColoredQuad(gl, minX, maxY, maxX + 1.0f, maxY + 1.0f, r, g, b, alpha);
-        emitColoredQuad(gl, minX, minY + 1.0f, minX + 1.0f, maxY, r, g, b, alpha);
-        emitColoredQuad(gl, maxX, minY + 1.0f, maxX + 1.0f, maxY, r, g, b, alpha);
+        emitColoredQuad(gl, x1, y1, x2 + 1.0f, y1 + 1.0f, r, g, b, alpha);
+        emitColoredQuad(gl, x1, y2, x2 + 1.0f, y2 + 1.0f, r, g, b, alpha);
+        emitColoredQuad(gl, x1, y1 + 1.0f, x1 + 1.0f, y2, r, g, b, alpha);
+        emitColoredQuad(gl, x2, y1 + 1.0f, x2 + 1.0f, y2, r, g, b, alpha);
     } else {
-        emitColoredQuad(gl, minX, minY, maxX + 1.0f, maxY + 1.0f, r, g, b, alpha);
+        emitColoredQuad(gl, x1, y1, x2 + 1.0f, y2 + 1.0f, r, g, b, alpha);
     }
 }
 
+// 🔥 ИДЕАЛЬНЫЕ ПРЯМЫЕ ЛИНИИ (Оружие, рамки, UI боев)
 static void ctrDrawLine(Renderer* renderer, float x1, float y1, float x2, float y2, float width, uint32_t color, float alpha) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
     uint8_t cr = BGR_R(color); uint8_t cg = BGR_G(color); uint8_t cb = BGR_B(color);
     uint8_t ca = (uint8_t)(alpha * 255.0f);
 
-    float w = fmaxf(1.0f, width);
+    // Специальный фикс для ровных горизонтальных/вертикальных линий UI.
+    // +1.0f гарантирует, что GameMaker закрасит последнюю координату
+    if (width <= 1.0f && (fabsf(x1 - x2) < 0.01f || fabsf(y1 - y2) < 0.01f)) {
+        float rx1 = roundf(fminf(x1, x2));
+        float ry1 = roundf(fminf(y1, y2));
+        float rx2 = roundf(fmaxf(x1, x2)) + 1.0f;
+        float ry2 = roundf(fmaxf(y1, y2)) + 1.0f;
 
-    if (fabsf(x1 - x2) < 0.01f || fabsf(y1 - y2) < 0.01f) {
-        float minX = fminf(x1, x2); float maxX = fmaxf(x1, x2) + 1.0f;
-        float minY = fminf(y1, y2); float maxY = fmaxf(y1, y2) + 1.0f;
-
-        if (fabsf(x1 - x2) < 0.01f) { // Вертикально
-            minX -= floorf(w * 0.5f); maxX = minX + w;
-        } else { // Горизонтально
-            minY -= floorf(w * 0.5f); maxY = minY + w;
-        }
-        ctrPushQuad(gl, gl->whiteTexture, minX, minY, maxX, minY, maxX, maxY, minX, maxY, 0.5f, 0.5f, 0.5f, 0.5f, cr, cg, cb, ca);
+        ctrPushQuad(gl, gl->whiteTexture,
+            rx1, ry1, rx2, ry1, rx2, ry2, rx1, ry2,
+            0.5f, 0.5f, 0.5f, 0.5f, cr, cg, cb, ca);
         return;
     }
 
-    // Диагональные
-    float dx = x2 - x1; float dy = y2 - y1; float len = sqrtf(dx * dx + dy * dy);
-    if (len < 0.0001f) {
-        ctrPushQuad(gl, gl->whiteTexture, x1, y1, x1+1, y1, x1+1, y1+1, x1, y1+1, 0.5f, 0.5f, 0.5f, 0.5f, cr, cg, cb, ca);
-        return;
-    }
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (0.0001f > len) return;
 
-    x2 += (dx / len); y2 += (dy / len); dx = x2 - x1; dy = y2 - y1; len += 1.0f;
-    float halfW = w * 0.5f; float px = (-dy / len) * halfW; float py = (dx / len) * halfW;
+    // Удлиняем обычные линии на 1 пиксель (физика GameMaker)
+    x2 += (dx / len);
+    y2 += (dy / len);
+    dx = x2 - x1; dy = y2 - y1; len += 1.0f;
 
-    ctrPushQuad(gl, gl->whiteTexture, x1 + px, y1 + py, x1 - px, y1 - py, x2 - px, y2 - py, x2 + px, y2 + py, 0.5f, 0.5f, 0.5f, 0.5f, cr, cg, cb, ca);
+    float halfW = width * 0.5f;
+    float px = (-dy / len) * halfW;
+    float py = (dx / len) * halfW;
+
+    ctrPushQuad(gl, gl->whiteTexture,
+        x1 + px, y1 + py,
+        x1 - px, y1 - py,
+        x2 - px, y2 - py,
+        x2 + px, y2 + py,
+        0.5f, 0.5f, 0.5f, 0.5f,
+        cr, cg, cb, ca);
 }
 
+// 🔥 ИДЕАЛЬНЫЕ ПРЯМЫЕ ЛИНИИ (с градиентом)
 static void ctrDrawLineColor(Renderer* renderer, float x1, float y1, float x2, float y2, float width, uint32_t color1, uint32_t color2, float alpha) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
     uint8_t c1r = BGR_R(color1); uint8_t c1g = BGR_G(color1); uint8_t c1b = BGR_B(color1);
     uint8_t c2r = BGR_R(color2); uint8_t c2g = BGR_G(color2); uint8_t c2b = BGR_B(color2);
     uint8_t ca = (uint8_t)(alpha * 255.0f);
 
-    float w = fmaxf(1.0f, width);
-
-    if (fabsf(x1 - x2) < 0.01f || fabsf(y1 - y2) < 0.01f) {
-        float minX = fminf(x1, x2); float maxX = fmaxf(x1, x2) + 1.0f;
-        float minY = fminf(y1, y2); float maxY = fmaxf(y1, y2) + 1.0f;
-
-        if (fabsf(x1 - x2) < 0.01f) { minX -= floorf(w * 0.5f); maxX = minX + w; }
-        else { minY -= floorf(w * 0.5f); maxY = minY + w; }
+    if (width <= 1.0f && (fabsf(x1 - x2) < 0.01f || fabsf(y1 - y2) < 0.01f)) {
+        float rx1 = roundf(fminf(x1, x2));
+        float ry1 = roundf(fminf(y1, y2));
+        float rx2 = roundf(fmaxf(x1, x2)) + 1.0f;
+        float ry2 = roundf(fmaxf(y1, y2)) + 1.0f;
 
         uint8_t r0, g0, b0, r1, g1, b1;
         if (x1 <= x2 && y1 <= y2) { r0=c1r; g0=c1g; b0=c1b; r1=c2r; g1=c2g; b1=c2b; }
         else { r0=c2r; g0=c2g; b0=c2b; r1=c1r; g1=c1g; b1=c1b; }
 
         if (fabsf(y1 - y2) < 0.01f) {
-            ctrPushQuadGradient(gl, gl->whiteTexture, minX, minY, maxX, minY, maxX, maxY, minX, maxY, 0.5f, 0.5f, 0.5f, 0.5f, r0, g0, b0, ca, r1, g1, b1, ca, r1, g1, b1, ca, r0, g0, b0, ca);
+            ctrPushQuadGradient(gl, gl->whiteTexture,
+                rx1, ry1, rx2, ry1, rx2, ry2, rx1, ry2,
+                0.5f, 0.5f, 0.5f, 0.5f,
+                r0, g0, b0, ca, r1, g1, b1, ca, r1, g1, b1, ca, r0, g0, b0, ca);
         } else {
-            ctrPushQuadGradient(gl, gl->whiteTexture, minX, minY, maxX, minY, maxX, maxY, minX, maxY, 0.5f, 0.5f, 0.5f, 0.5f, r0, g0, b0, ca, r0, g0, b0, ca, r1, g1, b1, ca, r1, g1, b1, ca);
+            ctrPushQuadGradient(gl, gl->whiteTexture,
+                rx1, ry1, rx2, ry1, rx2, ry2, rx1, ry2,
+                0.5f, 0.5f, 0.5f, 0.5f,
+                r0, g0, b0, ca, r0, g0, b0, ca, r1, g1, b1, ca, r1, g1, b1, ca);
         }
         return;
     }
 
-    float dx = x2 - x1; float dy = y2 - y1; float len = sqrtf(dx * dx + dy * dy);
-    x2 += (dx / len); y2 += (dy / len); dx = x2 - x1; dy = y2 - y1; len += 1.0f;
-    float halfW = w * 0.5f; float px = (-dy / len) * halfW; float py = (dx / len) * halfW;
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (0.0001f > len) return;
 
-    ctrPushQuadGradient(gl, gl->whiteTexture, x1 + px, y1 + py, x1 - px, y1 - py, x2 - px, y2 - py, x2 + px, y2 + py, 0.5f, 0.5f, 0.5f, 0.5f, c1r, c1g, c1b, ca, c1r, c1g, c1b, ca, c2r, c2g, c2b, ca, c2r, c2g, c2b, ca);
+    x2 += (dx / len);
+    y2 += (dy / len);
+    dx = x2 - x1; dy = y2 - y1; len += 1.0f;
+
+    float halfW = width * 0.5f;
+    float px = (-dy / len) * halfW;
+    float py = (dx / len) * halfW;
+
+    ctrPushQuadGradient(gl, gl->whiteTexture,
+        x1 + px, y1 + py,
+        x1 - px, y1 - py,
+        x2 - px, y2 - py,
+        x2 + px, y2 + py,
+        0.5f, 0.5f, 0.5f, 0.5f,
+        c1r, c1g, c1b, ca,
+        c1r, c1g, c1b, ca,
+        c2r, c2g, c2b, ca,
+        c2r, c2g, c2b, ca);
 }
 
 static void ctrDrawTriangle(Renderer* renderer, float x1, float y1, float x2, float y2, float x3, float y3, bool outline) {
