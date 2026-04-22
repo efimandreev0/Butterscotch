@@ -213,6 +213,24 @@ typedef struct {
     bool isValid;        // false after buffer_delete (tombstone)
 } GmlBuffer;
 
+typedef struct {
+    bool enabled;
+    int32_t viewX;
+    int32_t viewY;
+    int32_t viewWidth;
+    int32_t viewHeight;
+    int32_t portX;
+    int32_t portY;
+    int32_t portWidth;
+    int32_t portHeight;
+    uint32_t borderX;
+    uint32_t borderY;
+    int32_t speedX;
+    int32_t speedY;
+    int32_t objectId;
+    float viewAngle;
+} RuntimeView;
+#define MAX_VIEWS 8
 // Open text file handle for GML file_text_* functions
 #define MAX_OPEN_TEXT_FILES 32
 typedef struct {
@@ -236,6 +254,7 @@ typedef struct {
     bool drawBackgroundColor;
     TileLayerMapEntry* tileLayerMap; // stb_ds hashmap: depth -> tile layer state
     RuntimeLayer* runtimeLayers; // stb_ds array, index-parallel to currentRoom->layers
+    RuntimeView views[MAX_VIEWS];
 } SavedRoomState;
 
 typedef struct Runner {
@@ -253,6 +272,7 @@ typedef struct Runner {
     int frameCount;
     uint32_t nextInstanceId;
     RunnerKeyboardState* keyboard;
+    RuntimeView views[MAX_VIEWS];
     RuntimeBackground backgrounds[8];
     uint32_t backgroundColor;      // runtime-mutable (BGR format)
     bool drawBackgroundColor;
@@ -274,6 +294,7 @@ typedef struct Runner {
     // The real runner uses a persistent YYObjectBase for this, the YYObjectBase is a "parent" of Instance
     // For now, we'll use a dummy Instance with objectIndex = -1 as a hack
     Instance* globalScopeInstance;
+    Instance** structInstances;
     int32_t forcedDepth;
 
     // ===[ Builtin function state ]===

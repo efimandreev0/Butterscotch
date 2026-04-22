@@ -64,6 +64,7 @@ void printMemoryStats() {
 int main(int argc, char* argv[]) {
     (void) argc; (void) argv;
     initLogging();
+    cfguInit();
     gfxInitDefault();
 
     APT_SetAppCpuTimeLimit(30);
@@ -306,6 +307,7 @@ int main(int argc, char* argv[]) {
     N3dsFileSystem_destroy(fs);
     VM_free(vm);
     DataWin_free(dataWin);
+    cfguExit();
 
     nova_fini();
     gfxExit();

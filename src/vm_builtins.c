@@ -1766,16 +1766,31 @@ static RValue builtinScriptExecute(VMContext* ctx, RValue* args, int32_t argCoun
     } else
 #endif
     {
-        // Numeric script index
-        int32_t scriptIdx = RValue_toInt32(args[0]);
+        // Numeric script/function index
+        int32_t rawArg = RValue_toInt32(args[0]);
+        codeId = -1;
 
-        // Look up the script to get its codeId
-        if (scriptIdx < 0 || (uint32_t) scriptIdx >= ctx->dataWin->scpt.count) {
-            fprintf(stderr, "VM: script_execute - invalid script index %d\n", scriptIdx);
-            return RValue_makeUndefined();
+#if IS_BC17_OR_HIGHER_ENABLED
+        // In GMS 2 BC17+, "scriptName" in source code is compiled as a FUNC-table index (same as builtinMethod). Resolve funcIdx -> codeIndex via funcMap.
+        if (IS_BC17_OR_HIGHER(ctx) && rawArg >= 0 && ctx->dataWin->func.functionCount > (uint32_t) rawArg) {
+            const char* funcName = ctx->dataWin->func.functions[rawArg].name;
+            if (funcName != nullptr) {
+                ptrdiff_t idx = shgeti(ctx->funcMap, (char*) funcName);
+                if (idx >= 0) {
+                    codeId = ctx->funcMap[idx].value;
+                }
+            }
         }
+#endif
 
-        codeId = ctx->dataWin->scpt.scripts[scriptIdx].codeId;
+        // Fallback: treat as SCPT index (BC16 and earlier, or when FUNC lookup failed)
+        if (0 > codeId) {
+            if (0 > rawArg || (uint32_t) rawArg >= ctx->dataWin->scpt.count) {
+                fprintf(stderr, "VM: script_execute - invalid script index %d\n", rawArg);
+                return RValue_makeUndefined();
+            }
+            codeId = ctx->dataWin->scpt.scripts[rawArg].codeId;
+        }
     }
 
     if (0 > codeId || ctx->dataWin->code.count <= (uint32_t) codeId) {
@@ -1808,7 +1823,55 @@ static RValue builtinScriptExecute(VMContext* ctx, RValue* args, int32_t argCoun
 }
 
 // ===[ OS FUNCTIONS ]===
+#ifdef __3DS__
+static const char* langToStr(u8 lang) {
+    switch (lang) {
+        case CFG_LANGUAGE_JP: return "ja";
+        case CFG_LANGUAGE_EN: return "en";
+        case CFG_LANGUAGE_FR: return "fr";
+        case CFG_LANGUAGE_DE: return "de";
+        case CFG_LANGUAGE_IT: return "it";
+        case CFG_LANGUAGE_ES: return "es";
+        case CFG_LANGUAGE_ZH: return "zh";
+        case CFG_LANGUAGE_KO: return "ko";
+        case CFG_LANGUAGE_NL: return "nl";
+        case CFG_LANGUAGE_PT: return "pt";
+        case CFG_LANGUAGE_RU: return "ru";
+        case CFG_LANGUAGE_TW: return "zh"; // традиционный китайский
+        default: return "en";
+    }
+}
 
+static RValue builtinOsGetLanguage(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    u8 lang;
+    if (R_FAILED(CFGU_GetSystemLanguage(&lang))) {
+        return RValue_makeOwnedString(safeStrdup("en"));
+    }
+
+    return RValue_makeOwnedString(safeStrdup(langToStr(lang)));
+}
+static const char* regionToStr(u8 region) {
+    switch (region) {
+        case CFG_REGION_JPN: return "JP";
+        case CFG_REGION_USA: return "US";
+        case CFG_REGION_EUR: return "EU";
+        case CFG_REGION_AUS: return "AU";
+        case CFG_REGION_CHN: return "CN";
+        case CFG_REGION_KOR: return "KR";
+        case CFG_REGION_TWN: return "TW";
+        default: return "US";
+    }
+}
+
+static RValue builtinOsGetRegion(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    u8 region;
+    if (R_FAILED(CFGU_SecureInfoGetRegion(&region))) {
+        return RValue_makeOwnedString(safeStrdup("US"));
+    }
+
+    return RValue_makeOwnedString(safeStrdup(regionToStr(region)));
+}
+#else
 static RValue builtinOsGetLanguage(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     return RValue_makeOwnedString(safeStrdup("en"));
 }
@@ -1816,7 +1879,7 @@ static RValue builtinOsGetLanguage(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RVa
 static RValue builtinOsGetRegion(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     return RValue_makeOwnedString(safeStrdup("US"));
 }
-
+#endif
 // ===[ DS_MAP BUILTIN FUNCTIONS ]===
 
 static inline ptrdiff_t getValueIndexInMap(DsMapEntry** mapPtr, RValue keyRvalue) {
@@ -2044,7 +2107,7 @@ static RValue builtinDsListFindIndex(VMContext* ctx, RValue* args, MAYBE_UNUSED 
 static RValue builtinArrayLength1d(VMContext* ctx, RValue* args, int32_t argCount) {
     (void) ctx; (void) argCount;
     if (args[0].type != RVALUE_ARRAY || args[0].array == nullptr) return RValue_makeReal(0.0);
-    return RValue_makeReal((GMLReal) args[0].array->length);
+    return RValue_makeReal((GMLReal) GMLArray_length1D(args[0].array));
 }
 
 // ===[ COLLISION FUNCTIONS]===
@@ -4608,6 +4671,13 @@ static RValue builtinSurfaceGetHeight(VMContext* ctx, RValue* args, MAYBE_UNUSED
 }
 
 // Sprite functions
+static RValue builtin_spriteExists(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    if (args[0].type == RVALUE_UNDEFINED) return RValue_makeBool(false);
+    int32_t spriteIndex = RValue_toInt32(args[0]);
+    if (0 > spriteIndex || (uint32_t) spriteIndex >= ctx->dataWin->sprt.count) return RValue_makeBool(false);
+    return RValue_makeBool(true);
+}
+
 static RValue builtin_spriteGetWidth(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     int32_t spriteIndex = (int32_t) RValue_toReal(args[0]);
     if (0 > spriteIndex || (uint32_t) spriteIndex >= ctx->dataWin->sprt.count) return RValue_makeReal(0.0);
@@ -6459,6 +6529,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "surface_get_height", builtinSurfaceGetHeight);
 
     // Sprite info
+    VM_registerBuiltin(ctx, "sprite_exists", builtin_spriteExists);
     VM_registerBuiltin(ctx, "sprite_get_width", builtin_spriteGetWidth);
     VM_registerBuiltin(ctx, "sprite_get_height", builtin_spriteGetHeight);
     VM_registerBuiltin(ctx, "sprite_get_number", builtin_spriteGetNumber);
