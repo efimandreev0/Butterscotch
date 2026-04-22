@@ -224,6 +224,8 @@ typedef struct VMContext {
     LocalSlotEntry** codeLocalsSlotMaps;
     // varName -> varID hash map for global variables (stb_ds)
     struct { char* key; int32_t value; }* globalVarNameMap;
+    // varName -> varID hash map for self/instance-scoped variables (stb_ds).
+    struct { char* key; int32_t value; }* selfVarNameMap;
     // "codeName\tfuncName" -> true, for deduplicating unknown function warnings
     StringBooleanEntry* loggedUnknownFuncs;
     // "codeName\tfuncName" -> true, for deduplicating stubbed function warnings
@@ -232,7 +234,7 @@ typedef struct VMContext {
     struct { int32_t key; int32_t* value; }* crossRefMap;
     bool alwaysLogUnknownFunctions;
     bool alwaysLogStubbedFunctions;
-#ifndef DISABLE_VM_TRACING
+#ifdef ENABLE_VM_TRACING
     StringBooleanEntry* varReadsToBeTraced;
     StringBooleanEntry* varWritesToBeTraced;
     StringBooleanEntry* functionCallsToBeTraced;

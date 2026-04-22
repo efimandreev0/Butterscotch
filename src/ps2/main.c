@@ -20,7 +20,7 @@
 #include "../data_win.h"
 #include "../json_reader.h"
 #include "ps2_file_system.h"
-#ifndef DISABLE_PS2_AUDIO
+#ifdef ENABLE_PS2_AUDIO
 #include "ps2_audio_system.h"
 #endif
 #include "gs_renderer.h"
@@ -47,7 +47,7 @@ extern unsigned char usbd_irx[];
 extern unsigned int size_usbd_irx;
 extern unsigned char ps2kbd_irx[];
 extern unsigned int size_ps2kbd_irx;
-#ifndef DISABLE_PS2_AUDIO
+#ifdef ENABLE_PS2_AUDIO
 extern unsigned char freesd_irx[];
 extern unsigned int size_freesd_irx;
 extern unsigned char audsrv_irx[];
@@ -502,7 +502,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-#ifndef DISABLE_PS2_AUDIO
+#ifdef ENABLE_PS2_AUDIO
     // ===[ Load Audio IOP Modules ]===
     ret = SifExecModuleBuffer(freesd_irx, size_freesd_irx, 0, nullptr, nullptr);
     if (0 > ret) {
@@ -628,7 +628,7 @@ int main(int argc, char* argv[]) {
     Renderer* renderer = GsRenderer_create(gsGlobal);
 
     // ===[ Initialize Audio System ]===
-#ifndef DISABLE_PS2_AUDIO
+#ifdef ENABLE_PS2_AUDIO
     drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Initializing audio...", &loadingState);
     Ps2AudioSystem* ps2Audio = Ps2AudioSystem_create();
     AudioSystem* audioSystem = (AudioSystem*) ps2Audio;
@@ -896,7 +896,11 @@ int main(int argc, char* argv[]) {
                     profilerFramesInWindow = 0;
                 }
                 float profilerY = 10.0f + (15.6f * 5.0f) + 6.0f;
+#ifdef ENABLE_VM_PROFILER
                 const char* profilerDisplay = profilerOverlayText[0] != '\0' ? profilerOverlayText : "GML Profiler (collecting...)";
+#else
+                const char* profilerDisplay = "Butterscotch GML Profiler is disabled on this build :(";
+#endif
                 gsKit_fontm_print_scaled(gsGlobal, gsFontM, 10.0f, profilerY, 10, 0.35f, debugColor, profilerDisplay);
             }
         }

@@ -267,10 +267,7 @@ static void parseGEN8(BinaryReader* reader, DataWin* dw) {
 
     // Seed the detected version from GEN8.
     // Later chunk parsers may bump these upward when they identify newer-format features, because since GM:S 2 the value in the GEN8 chunk is not accurate.
-    dw->detectedFormat.major = g->major;
-    dw->detectedFormat.minor = g->minor;
-    dw->detectedFormat.release = g->release;
-    dw->detectedFormat.build = g->build;
+    DataWin_bumpVersionTo(dw, g->major, g->minor, g->release, g->build);
 }
 
 static void parseOPTN(BinaryReader* reader, DataWin* dw) {
@@ -349,6 +346,7 @@ static void parseLANG(BinaryReader* reader, DataWin* dw) {
 }
 
 static void parseEXTN(BinaryReader* reader, DataWin* dw) {
+    // TODO: Update EXTN parser because it is broken for newer GM:S 2 versions
     Extn* e = &dw->extn;
 
     uint32_t extCount;
@@ -760,6 +758,24 @@ static void parseFONT(BinaryReader* reader, DataWin* dw) {
 
     if (count == 0) { free(ptrs); f->fonts = nullptr; return; }
 
+    // We need to figure out how many uint32 fields are between here and the PointerList
+    uint32_t fontOptionalCount = (dw->gen8.bytecodeVersion >= 17) ? 1u : 0u;
+    {
+        size_t baseAfterScaleY = (size_t) ptrs[0] + 40;
+        for (uint32_t trial = fontOptionalCount; 4 >= trial; trial++) {
+            size_t listStart = baseAfterScaleY + 4u * trial;
+            BinaryReader_seek(reader, listStart);
+            uint32_t probedGlyphCount = BinaryReader_readUint32(reader);
+            if (probedGlyphCount == 0 || probedGlyphCount > 0x10000) continue;
+            uint32_t probedFirstPtr = BinaryReader_readUint32(reader);
+            size_t expectedFirstPtr = listStart + 4u + 4u * probedGlyphCount;
+            if ((size_t) probedFirstPtr == expectedFirstPtr) {
+                fontOptionalCount = trial;
+                break;
+            }
+        }
+    }
+
     f->fonts = safeMalloc(count * sizeof(Font));
     repeat(count, i) {
         BinaryReader_seek(reader, ptrs[i]);
@@ -776,9 +792,34 @@ static void parseFONT(BinaryReader* reader, DataWin* dw) {
         font->textureOffset = BinaryReader_readUint32(reader);
         font->scaleX = BinaryReader_readFloat32(reader);
         font->scaleY = BinaryReader_readFloat32(reader);
-        font->ascenderOffset = 0; // default for BC < 17
-        if (dw->gen8.bytecodeVersion >= 17) {
+        // Optional fields appear in this order when present: AscenderOffset (BC17+),
+        // Ascender, SDFSpread, LineHeight. `fontOptionalCount` says how many are actually on disk.
+        font->ascenderOffset = 0;
+        font->ascender = 0;
+        font->sdfSpread = 0;
+        font->lineHeight = 0;
+        font->hasAscender = false;
+        font->hasSDFSpread = false;
+        font->hasLineHeight = false;
+        uint32_t readSoFar = 0;
+        if (dw->gen8.bytecodeVersion >= 17 && fontOptionalCount > readSoFar) {
             font->ascenderOffset = BinaryReader_readInt32(reader);
+            readSoFar++;
+        }
+        if (fontOptionalCount > readSoFar) {
+            font->ascender = BinaryReader_readUint32(reader);
+            font->hasAscender = true;
+            readSoFar++;
+        }
+        if (fontOptionalCount > readSoFar) {
+            font->sdfSpread = BinaryReader_readUint32(reader);
+            font->hasSDFSpread = true;
+            readSoFar++;
+        }
+        if (fontOptionalCount > readSoFar) {
+            font->lineHeight = BinaryReader_readUint32(reader);
+            font->hasLineHeight = true;
+            readSoFar++;
         }
         font->isSpriteFont = false;
         font->spriteIndex = -1;
@@ -875,6 +916,30 @@ static void parseOBJT(BinaryReader* reader, DataWin* dw) {
 
     if (count == 0) { free(ptrs); o->objects = nullptr; return; }
 
+    // Detect GMS 2022.5+ by probing the first game object's event list structure.
+    if (DataWin_isVersionAtLeast(dw, 2, 3, 0, 0) && !DataWin_isVersionAtLeast(dw, 2022, 5, 0, 0)) {
+        // Skip the 16 fixed uint32 header fields (name..angularDamping) to reach physicsVertexCount.
+        BinaryReader_seek(reader, ptrs[0] + 16 * 4);
+        int32_t vertexCount = BinaryReader_readInt32(reader);
+        if (vertexCount >= 0) {
+            // Skip friction + awake + kinematic (12 bytes) and physics vertices (8 bytes each).
+            BinaryReader_skip(reader, 12 + vertexCount * 8);
+            uint32_t eventTypeCount = BinaryReader_readUint32(reader);
+            bool isOldFormat = false;
+            if (eventTypeCount == OBJT_EVENT_TYPE_COUNT) {
+                uint32_t firstSubEventPtr = BinaryReader_readUint32(reader);
+                uint32_t currentAbsPos = (uint32_t) BinaryReader_getPosition(reader);
+                // The remaining 14 outer-list pointers sit between here and the first sub-event list.
+                if (firstSubEventPtr == currentAbsPos + 14 * 4) {
+                    isOldFormat = true;
+                }
+            }
+            if (!isOldFormat) {
+                DataWin_bumpVersionTo(dw, 2022, 5, 0, 0);
+            }
+        }
+    }
+
     o->objects = safeMalloc(count * sizeof(GameObject));
     repeat(count, i) {
         BinaryReader_seek(reader, ptrs[i]);
@@ -882,6 +947,11 @@ static void parseOBJT(BinaryReader* reader, DataWin* dw) {
         obj->name = readStringPtr(reader, dw);
         obj->spriteId = BinaryReader_readInt32(reader);
         obj->visible = BinaryReader_readBool32(reader);
+        if (DataWin_isVersionAtLeast(dw, 2022, 5, 0, 0)) {
+            obj->managed = BinaryReader_readBool32(reader);
+        } else {
+            obj->managed = false;
+        }
         obj->solid = BinaryReader_readBool32(reader);
         obj->depth = BinaryReader_readInt32(reader);
         obj->persistent = BinaryReader_readBool32(reader);
@@ -1103,9 +1173,26 @@ static void readRoomLayers(BinaryReader* reader, DataWin* dw, Room* room) {
         layer->backgroundData = nullptr;
         layer->instancesData = nullptr;
         layer->tilesData = nullptr;
+        if (DataWin_isVersionAtLeast(dw, 2022, 1, 0, 0)) {
+            // EffectEnabled (bool32), EffectType (string ptr), EffectProperties (SimpleList<EffectProperty>)
+            BinaryReader_skip(reader, 4); // EffectEnabled
+            BinaryReader_skip(reader, 4); // EffectType (string ptr)
+            uint32_t effectPropCount = BinaryReader_readUint32(reader);
+            // Each EffectProperty is 12 bytes: Kind(int32) + Name(ptr) + Value(ptr)
+            BinaryReader_skip(reader, effectPropCount * 12);
+        }
         switch (layer->type) {
             case RoomLayerType_Path:
+            case RoomLayerType_Path2:
                 break; // Nothing to do
+            case RoomLayerType_Effect:
+                // In GMS 2022.1+, Effect layer data is empty (fields moved to layer header).
+                if (!DataWin_isVersionAtLeast(dw, 2022, 1, 0, 0)) {
+                    BinaryReader_skip(reader, 4); // EffectType (string ptr)
+                    uint32_t propCount = BinaryReader_readUint32(reader);
+                    BinaryReader_skip(reader, propCount * 12);
+                }
+                break;
 
             case RoomLayerType_Assets: {
                 RoomLayerAssetsData* assets = safeMalloc(sizeof(RoomLayerAssetsData));
@@ -1283,6 +1370,68 @@ static void parseROOM(BinaryReader* reader, DataWin* dw, bool lazyLoadRooms, Str
                 }
                 break;
             }
+        }
+    }
+
+    // Detect whether Layer headers include EffectEnabled/EffectType/EffectProperties fields (added in GMS 2022.1).
+    if (DataWin_isVersionAtLeast(dw, 2, 3, 0, 0) && !DataWin_isVersionAtLeast(dw, 2022, 1, 0, 0)) {
+        repeat(count, i) {
+            BinaryReader_seek(reader, ptrs[i]);
+            // Room header before layersPtr: 22 uint32s (name..metersPerPixel).
+            BinaryReader_skip(reader, 22 * 4);
+            uint32_t layersPtr = BinaryReader_readUint32(reader);
+            uint32_t seqnPtr = BinaryReader_readUint32(reader);
+            BinaryReader_seek(reader, layersPtr);
+            uint32_t layerCount = BinaryReader_readUint32(reader);
+            if (layerCount == 0) continue;
+            uint32_t jumpOffset = BinaryReader_readUint32(reader);
+            uint32_t nextOffset = (layerCount == 1) ? seqnPtr : BinaryReader_readUint32(reader);
+            // Layer header: name(4) id(4) type(4) depth(4) xOff(4) yOff(4) hSpd(4) vSpd(4) visible(4) = 9 uint32s = 36 bytes.
+            // jumpOffset points to start of the layer; we seek to jumpOffset+8 to skip name+id then read type.
+            BinaryReader_seek(reader, jumpOffset + 8);
+            uint32_t layerType = BinaryReader_readUint32(reader);
+            if (layerType == RoomLayerType_Path || layerType == RoomLayerType_Path2) continue;
+            bool detected = false;
+            switch (layerType) {
+                case RoomLayerType_Background: {
+                    // After type, there's depth+xOff+yOff+hSpd+vSpd+visible = 6*4 = 24, then 10 background fields = 40 bytes.
+                    // Total legacy body after type read: 24 + 40 = 64 bytes. 2022.1 adds effect data > 64 bytes of additional data past the next layer boundary.
+                    size_t absPos = BinaryReader_getPosition(reader);
+                    if (nextOffset - absPos > 16 * 4) detected = true;
+                    break;
+                }
+                case RoomLayerType_Instances: {
+                    BinaryReader_skip(reader, 6 * 4);
+                    uint32_t instanceCount = BinaryReader_readUint32(reader);
+                    size_t absPos = BinaryReader_getPosition(reader);
+                    if (nextOffset - absPos != instanceCount * 4) detected = true;
+                    break;
+                }
+                case RoomLayerType_Assets: {
+                    BinaryReader_skip(reader, 6 * 4);
+                    uint32_t tileOffset = BinaryReader_readUint32(reader);
+                    size_t absPos = BinaryReader_getPosition(reader);
+                    if (tileOffset != absPos + 8 && tileOffset != absPos + 12) detected = true;
+                    break;
+                }
+                case RoomLayerType_Tiles: {
+                    BinaryReader_skip(reader, 7 * 4);
+                    uint32_t tileMapWidth = BinaryReader_readUint32(reader);
+                    uint32_t tileMapHeight = BinaryReader_readUint32(reader);
+                    size_t absPos = BinaryReader_getPosition(reader);
+                    if (nextOffset - absPos != tileMapWidth * tileMapHeight * 4) detected = true;
+                    break;
+                }
+                case RoomLayerType_Effect: {
+                    BinaryReader_skip(reader, 7 * 4);
+                    uint32_t propertyCount = BinaryReader_readUint32(reader);
+                    size_t absPos = BinaryReader_getPosition(reader);
+                    if (nextOffset - absPos != propertyCount * 3 * 4) detected = true;
+                    break;
+                }
+            }
+            if (detected) DataWin_bumpVersionTo(dw, 2022, 1, 0, 0);
+            break;
         }
     }
 
@@ -1526,7 +1675,6 @@ static void parseSTRG(BinaryReader* reader, DataWin* dw) {
     free(ptrs);
 }
 
-
 static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd) {
     Txtr* t = &dw->txtr;
 
@@ -1538,6 +1686,27 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd) {
 
     // Read metadata entries
     bool hasGeneratedMips = DataWin_isVersionAtLeast(dw, 2, 0, 0, 0);
+
+    // Detect GMS 2022.3+ (TextureBlockSize field) and 2022.9+ (Width/Height/IndexInGroup fields) by probing the distance between the first two entry pointers.
+    // Only works when there are at least 2 textures (which is almost always the case for real games).
+    // Layouts:
+    //   pre-2022.3: scaled+generatedMips+blobOffset = 12 bytes
+    //   2022.3+: ... + textureBlockSize = 16 bytes
+    //   2022.9+: ... + width + height + indexInGroup = 28 bytes
+    bool has2022_3 = DataWin_isVersionAtLeast(dw, 2022, 3, 0, 0);
+    bool has2022_9 = DataWin_isVersionAtLeast(dw, 2022, 9, 0, 0);
+    if (count >= 2 && hasGeneratedMips && !has2022_9) {
+        uint32_t diff = ptrs[1] - ptrs[0];
+        if (diff == 28) {
+            DataWin_bumpVersionTo(dw, 2022, 9, 0, 0);
+            has2022_3 = true;
+            has2022_9 = true;
+        } else if (diff == 16 && !has2022_3) {
+            DataWin_bumpVersionTo(dw, 2022, 3, 0, 0);
+            has2022_3 = true;
+        }
+    }
+
     t->textures = safeMalloc(count * sizeof(Texture));
     repeat(count, i) {
         BinaryReader_seek(reader, ptrs[i]);
@@ -1546,6 +1715,20 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd) {
             t->textures[i].generatedMips = BinaryReader_readUint32(reader);
         } else {
             t->textures[i].generatedMips = 0;
+        }
+        if (has2022_3) {
+            t->textures[i].textureBlockSize = BinaryReader_readUint32(reader);
+        } else {
+            t->textures[i].textureBlockSize = 0;
+        }
+        if (has2022_9) {
+            t->textures[i].textureWidth = BinaryReader_readInt32(reader);
+            t->textures[i].textureHeight = BinaryReader_readInt32(reader);
+            t->textures[i].indexInGroup = BinaryReader_readInt32(reader);
+        } else {
+            t->textures[i].textureWidth = 0;
+            t->textures[i].textureHeight = 0;
+            t->textures[i].indexInGroup = 0;
         }
         t->textures[i].blobOffset = BinaryReader_readUint32(reader);
         t->textures[i].blobData = nullptr;
@@ -1572,7 +1755,6 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd) {
     }
 #endif
 }
-
 #ifdef __3DS__
 static void parseAUDO(BinaryReader* reader, DataWin* dw) {
     Audo* a = &dw->audo;
@@ -1684,6 +1866,20 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
         if ((memcmp(chunkName, "CODE", 4) == 0) && chunkLength > 0) {
             codeExists = true;
         }
+
+        // Bump detected version based on chunk presence, so later chunks can use the right version during parsing (parseOBJT needs to know we're >= 2.3 to probe for the GMS 2022.5+ Managed field).
+        if (memcmp(chunkName, "ACRV", 4) == 0 || memcmp(chunkName, "SEQN", 4) == 0 || memcmp(chunkName, "TAGS", 4) == 0) {
+            DataWin_bumpVersionTo(dw, 2, 3, 0, 0);
+        } else if (memcmp(chunkName, "FEDS", 4) == 0) {
+            DataWin_bumpVersionTo(dw, 2, 3, 6, 0);
+        } else if (memcmp(chunkName, "FEAT", 4) == 0) {
+            DataWin_bumpVersionTo(dw, 2022, 8, 0, 0);
+        } else if (memcmp(chunkName, "UILR", 4) == 0) {
+            DataWin_bumpVersionTo(dw, 2024, 13, 0, 0);
+        } else if (memcmp(chunkName, "PSEM", 4) == 0 || memcmp(chunkName, "PSYS", 4) == 0) {
+            DataWin_bumpVersionTo(dw, 2023, 2, 0, 0);
+        }
+
         BinaryReader_seek(&reader, chunkDataStart + chunkLength);
         totalChunks++;
     }

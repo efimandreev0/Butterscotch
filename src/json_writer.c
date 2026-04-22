@@ -7,118 +7,70 @@
 
 // ===[ Internal Helpers ]===
 
-static void ensureCapacity(JsonWriter* writer, size_t additional) {
-    size_t required = writer->length + additional;
-    if (required <= writer->capacity) return;
-
-    size_t newCapacity = writer->capacity;
-    while (newCapacity < required) {
-        newCapacity *= 2;
-    }
-
-    writer->buffer = safeRealloc(writer->buffer, newCapacity);
-    if (writer->buffer == nullptr) {
-        fprintf(stderr, "JsonWriter: realloc failed\n");
-        abort();
-    }
-    writer->capacity = newCapacity;
-}
-
-static void appendRaw(JsonWriter* writer, const char* data, size_t len) {
-    ensureCapacity(writer, len + 1);
-    memcpy(writer->buffer + writer->length, data, len);
-    writer->length += len;
-    writer->buffer[writer->length] = '\0';
-}
-
-static void appendStr(JsonWriter* writer, const char* str) {
-    appendRaw(writer, str, strlen(str));
-}
-
-static void appendChar(JsonWriter* writer, char c) {
-    ensureCapacity(writer, 2);
-    writer->buffer[writer->length++] = c;
-    writer->buffer[writer->length] = '\0';
-}
-
 static void writeCommaIfNeeded(JsonWriter* writer) {
     if (writer->needsComma) {
-        appendChar(writer, ',');
+        StringBuilder_appendChar(&writer->out, ',');
     }
 }
 
 static void writeEscapedString(JsonWriter* writer, const char* str) {
-    appendChar(writer, '"');
+    StringBuilder_appendChar(&writer->out, '"');
     for (const char* p = str; *p != '\0'; p++) {
         unsigned char c = (unsigned char) *p;
         switch (c) {
-            case '"':  appendStr(writer, "\\\""); break;
-            case '\\': appendStr(writer, "\\\\"); break;
-            case '\b': appendStr(writer, "\\b");  break;
-            case '\f': appendStr(writer, "\\f");  break;
-            case '\n': appendStr(writer, "\\n");  break;
-            case '\r': appendStr(writer, "\\r");  break;
-            case '\t': appendStr(writer, "\\t");  break;
+            case '"':  StringBuilder_append(&writer->out, "\\\""); break;
+            case '\\': StringBuilder_append(&writer->out, "\\\\"); break;
+            case '\b': StringBuilder_append(&writer->out, "\\b");  break;
+            case '\f': StringBuilder_append(&writer->out, "\\f");  break;
+            case '\n': StringBuilder_append(&writer->out, "\\n");  break;
+            case '\r': StringBuilder_append(&writer->out, "\\r");  break;
+            case '\t': StringBuilder_append(&writer->out, "\\t");  break;
             default:
                 if (32 > c) {
-                    char escape[7];
-                    snprintf(escape, sizeof(escape), "\\u%04x", c);
-                    appendStr(writer, escape);
+                    StringBuilder_appendFormat(&writer->out, "\\u%04x", c);
                 } else {
-                    appendChar(writer, (char) c);
+                    StringBuilder_appendChar(&writer->out, (char) c);
                 }
                 break;
         }
     }
-    appendChar(writer, '"');
+    StringBuilder_appendChar(&writer->out, '"');
 }
 
 // ===[ Lifecycle ]===
 
 JsonWriter JsonWriter_create(void) {
-    size_t initialCapacity = 256;
-    char* buffer = safeMalloc(initialCapacity);
-    if (buffer == nullptr) {
-        fprintf(stderr, "JsonWriter: malloc failed\n");
-        abort();
-    }
-    buffer[0] = '\0';
     return (JsonWriter) {
-        .buffer = buffer,
-        .length = 0,
-        .capacity = initialCapacity,
+        .out = StringBuilder_create(256),
         .needsComma = false,
     };
 }
 
 void JsonWriter_free(JsonWriter* writer) {
-    free(writer->buffer);
-    writer->buffer = nullptr;
-    writer->length = 0;
-    writer->capacity = 0;
+    StringBuilder_free(&writer->out);
 }
 
 // ===[ Structure ]===
 
 void JsonWriter_beginObject(JsonWriter* writer) {
     writeCommaIfNeeded(writer);
-    appendChar(writer, '{');
+    StringBuilder_appendChar(&writer->out, '{');
     writer->needsComma = false;
 }
 
 void JsonWriter_endObject(JsonWriter* writer) {
-    appendChar(writer, '}');
+    StringBuilder_appendChar(&writer->out, '}');
     writer->needsComma = true;
 }
 
 void JsonWriter_beginArray(JsonWriter* writer) {
     writeCommaIfNeeded(writer);
-    appendChar(writer, '[');
+    StringBuilder_appendChar(&writer->out, '[');
     writer->needsComma = false;
 }
 
 void JsonWriter_endArray(JsonWriter* writer) {
-    appendChar(writer, ']');
+    StringBuilder_appendChar(&writer->out, ']');
     writer->needsComma = true;
 }
 
@@ -127,7 +79,7 @@ void JsonWriter_endArray(JsonWriter* writer) {
 void JsonWriter_key(JsonWriter* writer, const char* key) {
     writeCommaIfNeeded(writer);
     writeEscapedString(writer, key);
-    appendChar(writer, ':');
+    StringBuilder_appendChar(&writer->out, ':');
     writer->needsComma = false;
 }
 
@@ -136,7 +88,7 @@ void JsonWriter_key(JsonWriter* writer, const char* key) {
 void JsonWriter_string(JsonWriter* writer, const char* value) {
     writeCommaIfNeeded(writer);
     if (value == nullptr) {
-        appendStr(writer, "null");
+        StringBuilder_append(&writer->out, "null");
     } else {
         writeEscapedString(writer, value);
     }
@@ -145,29 +97,25 @@ void JsonWriter_string(JsonWriter* writer, const char* value) {
 
 void JsonWriter_int(JsonWriter* writer, int64_t value) {
     writeCommaIfNeeded(writer);
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%lld", (long long) value);
-    appendStr(writer, buf);
+    StringBuilder_appendFormat(&writer->out, "%lld", (long long) value);
     writer->needsComma = true;
 }
 
 void JsonWriter_double(JsonWriter* writer, double value) {
     writeCommaIfNeeded(writer);
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%.17g", value);
-    appendStr(writer, buf);
+    StringBuilder_appendFormat(&writer->out, "%.17g", value);
     writer->needsComma = true;
 }
 
 void JsonWriter_bool(JsonWriter* writer, bool value) {
     writeCommaIfNeeded(writer);
-    appendStr(writer, value ? "true" : "false");
+    StringBuilder_append(&writer->out, value ? "true" : "false");
     writer->needsComma = true;
 }
 
 void JsonWriter_null(JsonWriter* writer) {
     writeCommaIfNeeded(writer);
-    appendStr(writer, "null");
+    StringBuilder_append(&writer->out, "null");
     writer->needsComma = true;
 }
 
@@ -201,13 +149,13 @@ void JsonWriter_propertyNull(JsonWriter* writer, const char* key) {
 // ===[ Output ]===
 
 const char* JsonWriter_getOutput(const JsonWriter* writer) {
-    return writer->buffer;
+    return StringBuilder_data(&writer->out);
 }
 
 char* JsonWriter_copyOutput(const JsonWriter* writer) {
-    return safeStrdup(writer->buffer);
+    return safeStrdup(StringBuilder_data(&writer->out));
 }
 
 size_t JsonWriter_getLength(const JsonWriter* writer) {
-    return writer->length;
+    return StringBuilder_length(&writer->out);
 }

@@ -112,3 +112,4 @@ void GMLArray_growTo(GMLArray* arr, int32_t minLength) {
     if (row + 1 > arr->rowCount) arr->rowCount = row + 1;
     growRow(&arr->rows[row], col + 1);
 }
+

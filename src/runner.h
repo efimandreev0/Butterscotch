@@ -47,6 +47,8 @@
 #define OTHER_END_OF_PATH   8
 #define OTHER_USER0         10
 
+#define MAX_VIEWS 8
+
 // ===[ Operating System Types ]===
 // See GameMaker-HTML5's Globals.js
 typedef enum {
@@ -82,6 +84,24 @@ typedef enum {
     OS_LLVM_LINUX,
     OS_LLVM_WINPHONE
 } YoYoOperatingSystem;
+
+typedef struct {
+    bool enabled;
+    int32_t viewX;
+    int32_t viewY;
+    int32_t viewWidth;
+    int32_t viewHeight;
+    int32_t portX;
+    int32_t portY;
+    int32_t portWidth;
+    int32_t portHeight;
+    uint32_t borderX;
+    uint32_t borderY;
+    int32_t speedX;
+    int32_t speedY;
+    int32_t objectId;
+    float viewAngle;
+} RuntimeView;
 
 typedef struct {
     bool visible;
@@ -213,24 +233,18 @@ typedef struct {
     bool isValid;        // false after buffer_delete (tombstone)
 } GmlBuffer;
 
+// Motion planning grid used by mp_grid_* builtins. Cell value 1 = blocked.
 typedef struct {
-    bool enabled;
-    int32_t viewX;
-    int32_t viewY;
-    int32_t viewWidth;
-    int32_t viewHeight;
-    int32_t portX;
-    int32_t portY;
-    int32_t portWidth;
-    int32_t portHeight;
-    uint32_t borderX;
-    uint32_t borderY;
-    int32_t speedX;
-    int32_t speedY;
-    int32_t objectId;
-    float viewAngle;
-} RuntimeView;
-#define MAX_VIEWS 8
+    bool inUse;
+    GMLReal left;
+    GMLReal top;
+    int32_t hcells;
+    int32_t vcells;
+    GMLReal cellWidth;
+    GMLReal cellHeight;
+    uint8_t* cells;
+} MpGrid;
+
 // Open text file handle for GML file_text_* functions
 #define MAX_OPEN_TEXT_FILES 32
 typedef struct {
@@ -284,7 +298,6 @@ typedef struct Runner {
     RuntimeLayer* runtimeLayers; // stb_ds array, index-parallel to currentRoom->layers for parsed entries; dynamic entries appended
     uint32_t nextLayerId;        // counter for IDs of layers/elements created at runtime
     SavedRoomState* savedRoomStates; // array of size dataWin->room.count, for persistent room support
-    float viewAngles[8]; // runtime-only view_angle per view (not stored in data.win)
     int32_t viewCurrent; // index of the view currently being drawn (for view_current)
     struct { char* key; int value; }* disabledObjects; // stb_ds string hashmap, nullptr = no filtering
     struct { int key; Instance* value; }* instancesToId;
@@ -294,6 +307,8 @@ typedef struct Runner {
     // The real runner uses a persistent YYObjectBase for this, the YYObjectBase is a "parent" of Instance
     // For now, we'll use a dummy Instance with objectIndex = -1 as a hack
     Instance* globalScopeInstance;
+    // Struct instances created by @@NewGMLObject@@. Reuses Instance with objectIndex=-1.
+    // Tracked separately so event/step/draw iteration over runner->instances stays clean.
     Instance** structInstances;
     int32_t forcedDepth;
 
@@ -301,6 +316,7 @@ typedef struct Runner {
     DsMapEntry** dsMapPool; // stb_ds array of stb_ds hashmaps
     DsList* dsListPool; // stb_ds array of DsList
     GmlBuffer* gmlBufferPool; // stb_ds array of GmlBuffer
+    MpGrid* mpGridPool; // stb_ds array of motion-planning grids
 
     // Motion planning potential field settings
     GMLReal mpPotMaxrot;
@@ -345,6 +361,7 @@ void Runner_drawGUI(Runner* runner);
 void Runner_drawBackgrounds(Runner* runner, bool foreground);
 void Runner_scrollBackgrounds(Runner* runner);
 Instance* Runner_createInstance(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex);
+Instance* Runner_createInstanceWithDepth(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex, int32_t depth);
 Instance* Runner_copyInstance(Runner* runner, Instance* source, bool performEvent);
 void Runner_destroyInstance(Runner* runner, Instance* inst);
 void Runner_cleanupDestroyedInstances(Runner* runner);

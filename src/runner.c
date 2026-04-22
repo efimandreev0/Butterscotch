@@ -221,7 +221,7 @@ void Runner_executeEventFromObject(Runner* runner, Instance* instance, int32_t s
     vm->currentEventSubtype = eventSubtype;
     vm->currentEventObjectIndex = ownerObjectIndex;
 
-#ifndef DISABLE_VM_TRACING
+#ifdef ENABLE_VM_TRACING
     if (codeId >= 0 && shlen(vm->eventsToBeTraced) != -1) {
         const char* eventName = Runner_getEventName(eventType, eventSubtype);
         const char* objectName = runner->dataWin->objt.objects[instance->objectIndex].name;
@@ -292,8 +292,8 @@ static void executeEventPerObject(Runner* runner, int32_t eventType, int32_t eve
 }
 
 void Runner_executeEventForAll(Runner* runner, int32_t eventType, int32_t eventSubtype) {
-    // On BC17+ (GMS 2.x), the native runner dispatches events in the eventUsesPerObjectDispatch set per-object. Route those through executeEventPerObject to match.
-    if (IS_BC17_OR_HIGHER(runner->vmContext) && eventUsesBC17PerObjectDispatch(eventType)) {
+    // On GMS 2.x, the native runner dispatches events in the eventUsesPerObjectDispatch set per-object. Route those through executeEventPerObject to match.
+    if (DataWin_isVersionAtLeast(runner->dataWin, 2, 0, 0, 0) && eventUsesBC17PerObjectDispatch(eventType)) {
         executeEventPerObject(runner, eventType, eventSubtype);
         return;
     }
@@ -541,7 +541,7 @@ void Runner_draw(Runner* runner) {
                     offsetY = runner->tileLayerMap[layerIdx].value.offsetY;
                 }
 
-#ifndef DISABLE_VM_TRACING
+#ifdef ENABLE_VM_TRACING
                 // Trace tile drawing if requested
                 if (shlen(runner->vmContext->tilesToBeTraced) > 0) {
                     DataWin* dataWin = runner->dataWin;
@@ -632,7 +632,7 @@ void Runner_draw(Runner* runner) {
                             offsetY = runner->tileLayerMap[layerIdx].value.offsetY;
                         }
 
-#ifndef DISABLE_VM_TRACING
+#ifdef ENABLE_VM_TRACING
                         // Trace tile drawing if requested
                         if (shlen(runner->vmContext->tilesToBeTraced) > 0) {
                             DataWin* dataWin = runner->dataWin;
@@ -769,7 +769,7 @@ static Instance* createAndInitInstance(Runner* runner, int32_t instanceId, int32
     hmput(runner->instancesToId, instanceId, inst);
     arrput(runner->instances, inst);
 
-#ifndef DISABLE_VM_TRACING
+#ifdef ENABLE_VM_TRACING
     if (shgeti(runner->vmContext->instanceLifecyclesToBeTraced, "*") != -1 || shgeti(runner->vmContext->instanceLifecyclesToBeTraced, objDef->name) != -1) {
         fprintf(stderr, "VM: Instance %s (%d) created at (%f, %f)\n", objDef->name, instanceId, x, y);
     }
@@ -1114,6 +1114,13 @@ static void cleanupState(Runner* runner) {
     arrfree(runner->dsListPool);
     runner->dsListPool = nullptr;
 
+    // Free mp_grid pool
+    repeat((int32_t) arrlen(runner->mpGridPool), i) {
+        free(runner->mpGridPool[i].cells);
+    }
+    arrfree(runner->mpGridPool);
+    runner->mpGridPool = nullptr;
+
     // Free INI state
     if (runner->currentIni != nullptr) {
         Ini_free(runner->currentIni);
@@ -1198,12 +1205,25 @@ Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileS
     return runner;
 }
 
-Instance* Runner_createInstance(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex) {
-    if (isObjectDisabled(runner, objectIndex)) return nullptr;
-    Instance* inst = createAndInitInstance(runner, runner->nextInstanceId++, objectIndex, x, y);
+static inline void dispatchInstanceCreationEvents(Runner* runner, Instance* inst) {
     inst->createEventFired = true;
     Runner_executeEvent(runner, inst, EVENT_PRECREATE, 0);
     Runner_executeEvent(runner, inst, EVENT_CREATE, 0);
+}
+
+Instance* Runner_createInstance(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex) {
+    if (isObjectDisabled(runner, objectIndex)) return nullptr;
+    Instance* inst = createAndInitInstance(runner, runner->nextInstanceId++, objectIndex, x, y);
+    dispatchInstanceCreationEvents(runner, inst);
+    return inst;
+}
+
+// Same as Runner_createInstance, but sets depth BEFORE firing Create events so scripts like scr_depth can override.
+Instance* Runner_createInstanceWithDepth(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex, int32_t depth) {
+    if (isObjectDisabled(runner, objectIndex)) return nullptr;
+    Instance* inst = createAndInitInstance(runner, runner->nextInstanceId++, objectIndex, x, y);
+    inst->depth = depth;
+    dispatchInstanceCreationEvents(runner, inst);
     return inst;
 }
 
@@ -1229,7 +1249,7 @@ void Runner_destroyInstance(MAYBE_UNUSED Runner* runner, Instance* inst) {
     inst->active = false;
     inst->destroyed = true;
 
-#ifndef DISABLE_VM_TRACING
+#ifdef ENABLE_VM_TRACING
     if (shgeti(runner->vmContext->instanceLifecyclesToBeTraced, "*") != -1 || shgeti(runner->vmContext->instanceLifecyclesToBeTraced, gameObject->name) != -1) {
         fprintf(stderr, "VM: Instance %s (%d) destroyed\n", gameObject->name, inst->instanceId);
     }
@@ -1341,7 +1361,7 @@ static void executeCollisionEvent(Runner* runner, Instance* self, Instance* othe
 
     vm->currentEventObjectIndex = ownerObjectIndex;
 
-#ifndef DISABLE_VM_TRACING
+#ifdef ENABLE_VM_TRACING
     if (codeId >= 0 && shlen(vm->eventsToBeTraced) != -1) {
         const char* selfName = runner->dataWin->objt.objects[self->objectIndex].name;
         const char* targetName = runner->dataWin->objt.objects[targetObjectIndex].name;
@@ -1751,7 +1771,7 @@ void Runner_step(Runner* runner) {
 
         repeat(GML_ALARM_COUNT, alarmIdx) {
             if (inst->alarm[alarmIdx] > 0) {
-#ifndef DISABLE_VM_TRACING
+#ifdef ENABLE_VM_TRACING
                 if (shgeti(runner->vmContext->alarmsToBeTraced, "*") != -1 || shgeti(runner->vmContext->alarmsToBeTraced, object->name) != -1) {
                     fprintf(stderr, "VM: [%s] Ticking down Alarm[%d] (instanceId=%d), current tick is %d\n", object->name, alarmIdx, inst->instanceId, inst->alarm[alarmIdx]);
                 }
@@ -1761,7 +1781,7 @@ void Runner_step(Runner* runner) {
                 if (inst->alarm[alarmIdx] == 0) {
                     inst->alarm[alarmIdx] = -1;
 
-#ifndef DISABLE_VM_TRACING
+#ifdef ENABLE_VM_TRACING
                     if (shgeti(runner->vmContext->alarmsToBeTraced, "*") != -1 || shgeti(runner->vmContext->alarmsToBeTraced, object->name) != -1) {
                         fprintf(stderr, "VM: [%s] Firing Alarm[%d] (instanceId=%d)\n", object->name, alarmIdx, inst->instanceId);
                     }

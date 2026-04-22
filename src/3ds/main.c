@@ -240,7 +240,7 @@ int main(int argc, char* argv[]) {
                     int32_t portY = activeRoom->views[vi].portY;
                     int32_t portW = activeRoom->views[vi].portWidth;
                     int32_t portH = activeRoom->views[vi].portHeight;
-                    float viewAngle = runner->viewAngles[vi];
+                    float viewAngle = 0.0f;
 
                     runner->viewCurrent = vi;
 
