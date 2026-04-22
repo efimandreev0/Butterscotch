@@ -28,6 +28,17 @@ typedef struct {
     uint32_t lastExtractedFrame;
 } CtrDecodedPage;
 
+typedef struct {
+    GLuint tex;              // ID текстуры OpenGL
+    int potWidth;            // Ширина текстуры в VRAM (обычно 1024 или 512)
+    int potHeight;           // Высота текстуры в VRAM
+    float downscaleFactor;   // Насколько мы её ужали (например 0.5)
+
+    bool isLoaded;
+    bool keepResident;
+    uint32_t lastUsedFrame;
+} CtrPageData;
+
 // ===[ CtrRenderer Struct ]===
 typedef struct {
     Renderer base;

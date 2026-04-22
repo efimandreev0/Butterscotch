@@ -1526,6 +1526,7 @@ static void parseSTRG(BinaryReader* reader, DataWin* dw) {
     free(ptrs);
 }
 
+
 static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd) {
     Txtr* t = &dw->txtr;
 
@@ -1564,12 +1565,14 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd) {
         }
     }
 
-    // Load blob data into owned buffers
+#ifndef __3DS__
     repeat(count, i) {
         if (t->textures[i].blobOffset == 0 || t->textures[i].blobSize == 0) continue;
         t->textures[i].blobData = BinaryReader_readBytesAt(reader, t->textures[i].blobOffset, t->textures[i].blobSize);
     }
+#endif
 }
+
 #ifdef __3DS__
 static void parseAUDO(BinaryReader* reader, DataWin* dw) {
     Audo* a = &dw->audo;

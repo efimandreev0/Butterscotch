@@ -13,9 +13,13 @@
 #include "stb_ds.h"
 #include "utils.h"
 
-#define CTR_QUAD_BATCH_CAPACITY 4096
-#define LRU_SWEEP_INTERVAL 180
-#define LRU_IDLE_THRESHOLD 3600
+#define CTR_QUAD_BATCH_CAPACITY 1024
+
+// 🔥 УВЕЛИЧИЛИ ВРЕМЯ ЖИЗНИ КЭША ДО 10 СЕКУНД!
+// Это полностью уберет микро-статтеры при ходьбе туда-сюда по комнате,
+// так как текстуры перестанут агрессивно удаляться и грузиться с SD-карты.
+#define LRU_SWEEP_INTERVAL 60    // Проверять каждую 1 секунду
+#define LRU_IDLE_THRESHOLD 600   // Выгружать из VRAM, только если не рисовалось 10 секунд
 
 static int next_pot(int x) {
     x--;
@@ -41,7 +45,15 @@ static void ctrFlushBatch(CtrRenderer* gl) {
     gl->quadBatchTexture = 0;
 }
 
-static void ctrPushQuad(CtrRenderer* gl, GLuint textureId, float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3, float u0, float v0, float u1, float v1, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+// Новый универсальный метод добавления квадов, поддерживающий градиенты (разные цвета на вершинах)
+static void ctrPushQuadGradient(CtrRenderer* gl, GLuint textureId,
+    float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3,
+    float u0, float v0, float u1, float v1,
+    uint8_t r0, uint8_t g0, uint8_t b0, uint8_t a0,
+    uint8_t r1, uint8_t g1, uint8_t b1, uint8_t a1,
+    uint8_t r2, uint8_t g2, uint8_t b2, uint8_t a2,
+    uint8_t r3, uint8_t g3, uint8_t b3, uint8_t a3)
+{
     if (gl->quadBatchVertices == nullptr || textureId == 0) return;
 
     if (gl->quadBatchCount > 0 && gl->quadBatchTexture != textureId) {
@@ -56,16 +68,21 @@ static void ctrPushQuad(CtrRenderer* gl, GLuint textureId, float x0, float y0, f
     CtrPackedVertex* verts = (CtrPackedVertex*) gl->quadBatchVertices;
     CtrPackedVertex* tri = verts + gl->quadBatchCount * 6;
 
-    tri[0] = (CtrPackedVertex) { .x = x0, .y = y0, .z = 0.0f, .u = u0, .v = v0, .r = r, .g = g, .b = b, .a = a };
-    tri[1] = (CtrPackedVertex) { .x = x1, .y = y1, .z = 0.0f, .u = u1, .v = v0, .r = r, .g = g, .b = b, .a = a };
-    tri[2] = (CtrPackedVertex) { .x = x2, .y = y2, .z = 0.0f, .u = u1, .v = v1, .r = r, .g = g, .b = b, .a = a };
+    tri[0] = (CtrPackedVertex) { .x = x0, .y = y0, .z = 0.0f, .u = u0, .v = v0, .r = r0, .g = g0, .b = b0, .a = a0 };
+    tri[1] = (CtrPackedVertex) { .x = x1, .y = y1, .z = 0.0f, .u = u1, .v = v0, .r = r1, .g = g1, .b = b1, .a = a1 };
+    tri[2] = (CtrPackedVertex) { .x = x2, .y = y2, .z = 0.0f, .u = u1, .v = v1, .r = r2, .g = g2, .b = b2, .a = a2 };
 
-    tri[3] = (CtrPackedVertex) { .x = x0, .y = y0, .z = 0.0f, .u = u0, .v = v0, .r = r, .g = g, .b = b, .a = a };
-    tri[4] = (CtrPackedVertex) { .x = x2, .y = y2, .z = 0.0f, .u = u1, .v = v1, .r = r, .g = g, .b = b, .a = a };
-    tri[5] = (CtrPackedVertex) { .x = x3, .y = y3, .z = 0.0f, .u = u0, .v = v1, .r = r, .g = g, .b = b, .a = a };
+    tri[3] = (CtrPackedVertex) { .x = x0, .y = y0, .z = 0.0f, .u = u0, .v = v0, .r = r0, .g = g0, .b = b0, .a = a0 };
+    tri[4] = (CtrPackedVertex) { .x = x2, .y = y2, .z = 0.0f, .u = u1, .v = v1, .r = r2, .g = g2, .b = b2, .a = a2 };
+    tri[5] = (CtrPackedVertex) { .x = x3, .y = y3, .z = 0.0f, .u = u0, .v = v1, .r = r3, .g = g3, .b = b3, .a = a3 };
 
     gl->quadBatchCount++;
 }
+
+static void ctrPushQuad(CtrRenderer* gl, GLuint textureId, float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3, float u0, float v0, float u1, float v1, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    ctrPushQuadGradient(gl, textureId, x0, y0, x1, y1, x2, y2, x3, y3, u0, v0, u1, v1, r, g, b, a, r, g, b, a, r, g, b, a, r, g, b, a);
+}
+
 static uint32_t g_frameCounter = 0;
 
 static void ctrDrawTpagRegion(CtrRenderer* gl, uint32_t tpagIndex, float srcOffX, float srcOffY, float srcW, float srcH,
@@ -75,8 +92,7 @@ static void ctrDrawTpagRegion(CtrRenderer* gl, uint32_t tpagIndex, float srcOffX
     CtrTpagData* tpagData = &gl->tpags[tpagIndex];
     tpagData->lastUsedFrame = g_frameCounter;
 
-    const float insetEps = 0.01f;
-    
+    // 🔥 ИСПРАВЛЕНИЕ: Убрали insetEps (0.01f), чтобы тайлы сшивались идеально пиксель-в-пиксель без щелей!
     float drawSrcX = srcOffX * tpagData->downscaleFactor;
     float drawSrcY = srcOffY * tpagData->downscaleFactor;
     float drawSrcW = srcW * tpagData->downscaleFactor;
@@ -84,10 +100,10 @@ static void ctrDrawTpagRegion(CtrRenderer* gl, uint32_t tpagIndex, float srcOffX
 
     if (drawSrcW <= 0.001f || drawSrcH <= 0.001f) return;
 
-    float u0 = (drawSrcX + insetEps) * tpagData->uvScaleX;
-    float v0 = (drawSrcY + insetEps) * tpagData->uvScaleY;
-    float u1 = (drawSrcX + drawSrcW - insetEps) * tpagData->uvScaleX;
-    float v1 = (drawSrcY + drawSrcH - insetEps) * tpagData->uvScaleY;
+    float u0 = drawSrcX * tpagData->uvScaleX;
+    float v0 = drawSrcY * tpagData->uvScaleY;
+    float u1 = (drawSrcX + drawSrcW) * tpagData->uvScaleX;
+    float v1 = (drawSrcY + drawSrcH) * tpagData->uvScaleY;
 
     ctrPushQuad(gl, tpagData->tex, x0, y0, x1, y1, x2, y2, x3, y3, u0, v0, u1, v1, r, g, b, a);
 }
@@ -102,103 +118,173 @@ static void unloadTpagTexture(CtrRenderer* gl, uint32_t tpagIndex) {
     tpag->isLoaded = false;
 }
 
+static inline uint16_t pack_rgba4444(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    return ((r >> 4) << 12) | ((g >> 4) << 8) | ((b >> 4) << 4) | (a >> 4);
+}
+
+static inline uint16_t pack_rgb565(uint8_t r, uint8_t g, uint8_t b) {
+    return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+}
+
+static uint32_t compute_tpag_hash(Texture* txtr, uint32_t pId, uint32_t tId) {
+    uint32_t hash = 2166136261u ^ 0x7777;
+    hash ^= (pId * 31337);
+    hash ^= (tId * 1000003);
+    hash ^= (txtr->blobSize * 199999);
+    return hash;
+}
+
 static void prefetchRoomTextures(CtrRenderer* gl) {
     DataWin* dw = gl->base.dataWin;
     u64 totalStartTime = osGetTime();
-    int pagesLoaded = 0;
+    int pagesProcessed = 0;
 
     for (uint32_t pId = 0; pId < gl->texturePageCount; pId++) {
+        Texture* txtr = &dw->txtr.textures[pId];
+
         bool pageNeedsLoading = false;
+        bool all_in_cache = true;
 
         for (uint32_t tId = 0; tId < gl->tpagCount; tId++) {
             TexturePageItem* item = &dw->tpag.items[tId];
             if (item->texturePageId == pId && gl->tpags[tId].keepResident && !gl->tpags[tId].isLoaded) {
                 pageNeedsLoading = true;
-                break;
+                uint32_t hash = compute_tpag_hash(txtr, pId, tId);
+                if (!nova_texture_cache_has(hash)) {
+                    all_in_cache = false;
+                }
             }
         }
 
         if (!pageNeedsLoading) continue;
-        pagesLoaded++;
+        pagesProcessed++;
 
-        u64 stbiStartTime = osGetTime();
-        Texture* txtr = &dw->txtr.textures[pId];
-        int origW, origH, channels;
-        uint8_t* pixels = stbi_load_from_memory(txtr->blobData, (int) txtr->blobSize, &origW, &origH, &channels, 4);
-        u64 stbiEndTime = osGetTime();
+        uint8_t* pixels = nullptr;
+        int origW = 0, origH = 0, channels = 0;
 
-        if (pixels == nullptr) {
-            fprintf(stderr, "[CTR] ERROR: Failed to decode texture page %u\n", pId);
-            continue;
-        }
+        if (!all_in_cache) {
+            uint8_t* tempPngBuffer = nullptr;
 
-        float dsFactor = 1.0f;
-        uint8_t* curPixels = pixels;
-        int curW = origW;
-        int curH = origH;
-        bool pixelsOwned = false;
-
-        while (curW > 2048 || curH > 2048) {
-            int nextW = curW / 2;
-            int nextH = curH / 2;
-            uint8_t* nextPixels = malloc(nextW * nextH * 4);
-            if (nextPixels) {
-                for (int y = 0; y < nextH; y++) {
-                    for (int x = 0; x < nextW; x++) {
-                        int dst = (y * nextW + x) * 4;
-                        int src = (y * 2 * curW + x * 2) * 4;
-                        for (int c=0; c<4; c++) nextPixels[dst + c] = curPixels[src + c];
-                    }
+#ifdef __3DS__
+            if (txtr->blobOffset > 0 && txtr->blobSize > 0 && dw->lazyLoadFile != nullptr) {
+                tempPngBuffer = malloc(txtr->blobSize);
+                if (tempPngBuffer) {
+                    fseek(dw->lazyLoadFile, txtr->blobOffset, SEEK_SET);
+                    fread(tempPngBuffer, 1, txtr->blobSize, dw->lazyLoadFile);
                 }
-                if (pixelsOwned) free(curPixels);
-                curPixels = nextPixels;
-                pixelsOwned = true;
-                curW = nextW; curH = nextH;
-                dsFactor *= 0.5f;
-            } else break;
+            }
+#else
+            tempPngBuffer = txtr->blobData;
+#endif
+
+            if (tempPngBuffer != nullptr) {
+                u64 stbiStartTime = osGetTime();
+                pixels = stbi_load_from_memory(tempPngBuffer, (int) txtr->blobSize, &origW, &origH, &channels, 4);
+                u64 stbiEndTime = osGetTime();
+
+#ifdef __3DS__
+                free(tempPngBuffer);
+#endif
+
+                if (pixels != nullptr) {
+                    fprintf(stderr, "[CTR] stbi_load (Page %u) took %llu ms\n", pId, stbiEndTime - stbiStartTime);
+                }
+            }
         }
 
         for (uint32_t tId = 0; tId < gl->tpagCount; tId++) {
             TexturePageItem* item = &dw->tpag.items[tId];
-            if (item->texturePageId == pId && gl->tpags[tId].keepResident && !gl->tpags[tId].isLoaded) {
+            if (item->texturePageId == pId && !gl->tpags[tId].isLoaded && gl->tpags[tId].keepResident) {
 
-                int extractX = (int)(item->sourceX * dsFactor);
-                int extractY = (int)(item->sourceY * dsFactor);
-                int extractW = (int)(item->sourceWidth * dsFactor);
-                int extractH = (int)(item->sourceHeight * dsFactor);
+                uint32_t hash = compute_tpag_hash(txtr, pId, tId);
+                GLuint tex;
+                glGenTextures(1, &tex);
+                glBindTexture(GL_TEXTURE_2D, tex);
 
-                if (extractW <= 0) extractW = 1;
-                if (extractH <= 0) extractH = 1;
+                int cacheW, cacheH;
+                if (nova_texture_cache_load(hash, &cacheW, &cacheH)) {
+                    gl->tpags[tId].tex = tex;
+                    gl->tpags[tId].uvScaleX = 1.0f / (float)cacheW;
+                    gl->tpags[tId].uvScaleY = 1.0f / (float)cacheH;
+                    gl->tpags[tId].downscaleFactor = 1.0f;
+                    gl->tpags[tId].isLoaded = true;
+                    gl->tpags[tId].lastUsedFrame = g_frameCounter;
+                    continue;
+                }
 
-                int potW = next_pot(extractW);
-                int potH = next_pot(extractH);
+                if (pixels == nullptr) {
+                    glDeleteTextures(1, &tex);
+                    continue;
+                }
 
-                uint8_t* potPixels = calloc(potW * potH, 4);
-                if (potPixels) {
-                    for (int y = 0; y < extractH; y++) {
+                int extractX = item->sourceX;
+                int extractY = item->sourceY;
+                int extW = item->sourceWidth;
+                int extH = item->sourceHeight;
+
+                if (extW <= 0) extW = 1;
+                if (extH <= 0) extH = 1;
+
+                int potW = next_pot(extW);
+                int potH = next_pot(extH);
+
+                if (potW > 1024) potW = 1024;
+                if (potH > 1024) potH = 1024;
+
+                bool has_alpha = false;
+                for (int y = 0; y < extH; y++) {
+                    for (int x = 0; x < extW; x++) {
                         int srcY = extractY + y;
-                        if (srcY >= curH) srcY = curH - 1;
-                        int srcOffset = (srcY * curW + extractX) * 4;
-                        int dstOffset = (y * potW) * 4;
+                        int srcX = extractX + x;
+                        if (srcY < origH && srcX < origW) {
+                            if (pixels[(srcY * origW + srcX) * 4 + 3] < 255) {
+                                has_alpha = true;
+                                goto alpha_found;
+                            }
+                        }
+                    }
+                }
+                alpha_found:;
 
-                        int copyBytes = extractW * 4;
-                        if (extractX + extractW > curW) copyBytes = (curW - extractX) * 4;
+                uint16_t* pixels16 = malloc(potW * potH * sizeof(uint16_t));
+                if (pixels16) {
+                    memset(pixels16, 0, potW * potH * sizeof(uint16_t));
 
-                        if (copyBytes > 0) memcpy(&potPixels[dstOffset], &curPixels[srcOffset], copyBytes);
+                    for (int y = 0; y < extH; y++) {
+                        for (int x = 0; x < extW; x++) {
+                            int srcY = extractY + y;
+                            int srcX = extractX + x;
+
+                            if (srcY >= origH || srcX >= origW) continue;
+
+                            int srcOffset = (srcY * origW + srcX) * 4;
+                            uint8_t r = pixels[srcOffset + 0];
+                            uint8_t g = pixels[srcOffset + 1];
+                            uint8_t b = pixels[srcOffset + 2];
+                            uint8_t a = pixels[srcOffset + 3];
+
+                            int dstOffset = y * potW + x;
+
+                            if (has_alpha) {
+                                pixels16[dstOffset] = pack_rgba4444(r, g, b, a);
+                            } else {
+                                pixels16[dstOffset] = pack_rgb565(r, g, b);
+                            }
+                        }
                     }
 
-                    GLuint tex;
-                    glGenTextures(1, &tex);
-                    glBindTexture(GL_TEXTURE_2D, tex);
+                    GLenum format = has_alpha ? GL_RGBA : GL_RGB;
+                    GLenum type   = has_alpha ? GL_UNSIGNED_SHORT_4_4_4_4 : GL_UNSIGNED_SHORT_5_6_5;
 
                     while (glGetError() != GL_NO_ERROR);
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, potW, potH, 0, GL_RGBA, GL_UNSIGNED_BYTE, potPixels);
+
+                    glTexImage2D(GL_TEXTURE_2D, 0, format, potW, potH, 0, format, type, pixels16);
 
                     if (glGetError() == GL_NO_ERROR) {
                         gl->tpags[tId].tex = tex;
                         gl->tpags[tId].uvScaleX = 1.0f / (float)potW;
                         gl->tpags[tId].uvScaleY = 1.0f / (float)potH;
-                        gl->tpags[tId].downscaleFactor = dsFactor;
+                        gl->tpags[tId].downscaleFactor = 1.0f;
                         gl->tpags[tId].isLoaded = true;
                         gl->tpags[tId].lastUsedFrame = g_frameCounter;
 
@@ -206,26 +292,21 @@ static void prefetchRoomTextures(CtrRenderer* gl) {
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+                        nova_texture_cache_save(hash);
                     } else {
                         glDeleteTextures(1, &tex);
                     }
-                    free(potPixels);
+                    free(pixels16);
                 }
             }
         }
-
-        if (pixelsOwned) free(curPixels);
-        stbi_image_free(pixels);
-
-        u64 pageEndTime = osGetTime();
-        fprintf(stderr, "[CTR] Decoded TexturePage %u | stbi_load: %llu ms | Total: %llu ms\n",
-                pId, stbiEndTime - stbiStartTime, pageEndTime - stbiStartTime);
+        if (pixels != nullptr) stbi_image_free(pixels);
     }
 
-    if (pagesLoaded > 0) {
+    if (pagesProcessed > 0) {
         u64 totalEndTime = osGetTime();
-        fprintf(stderr, "[CTR] prefetchRoomTextures finished. Pages loaded: %d | Total time: %llu ms\n",
-                pagesLoaded, totalEndTime - totalStartTime);
+        fprintf(stderr, "[CTR] Prefetch complete. Total time: %llu ms\n", totalEndTime - totalStartTime);
     }
 }
 
@@ -241,8 +322,7 @@ static void ctrInit(Renderer* renderer, DataWin* dataWin) {
     gl->tpagCount = dataWin->tpag.count;
     gl->texturePageCount = dataWin->txtr.count;
     gl->tpags = safeCalloc(gl->tpagCount, sizeof(CtrTpagData));
-    
-    // ОБНОВЛЕНИЕ: Заполняем обратный словарь TPAG -> SpriteID
+
     gl->tpagToSprite = safeMalloc(gl->tpagCount * sizeof(int32_t));
     for (uint32_t i = 0; i < gl->tpagCount; i++) gl->tpagToSprite[i] = -1;
 
@@ -282,7 +362,7 @@ static void ctrInit(Renderer* renderer, DataWin* dataWin) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    fprintf(stderr, "CTR: Renderer initialized (Smart Extraction Mode, %u tpags)\n", gl->tpagCount);
+    fprintf(stderr, "CTR: Renderer initialized (Eager Extraction Mode, %u tpags)\n", gl->tpagCount);
 }
 
 static void ctrDestroy(Renderer* renderer) {
@@ -307,13 +387,13 @@ static void ctrBeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int3
 
     if (gl->pendingResidencyUpdate && g_frameCounter >= gl->pendingResidencyReadyFrame) {
         gl->pendingResidencyUpdate = false;
-        
+
         for (uint32_t i = 0; i < gl->tpagCount; i++) {
             if (!gl->tpags[i].keepResident && gl->tpags[i].isLoaded) {
                 unloadTpagTexture(gl, i);
             }
         }
-        
+
         prefetchRoomTextures(gl);
     }
 
@@ -413,18 +493,14 @@ static void markSpriteResident(CtrRenderer* gl, DataWin* dw, int32_t spriteIndex
 static void markSpriteNeighborhoodResident(CtrRenderer* gl, DataWin* dw, int32_t baseSpriteIndex, int range) {
     if (baseSpriteIndex < 0) return;
 
-    for (int i = -range; i <= range; i++) {
+    for (int i = 0; i <= 1; i++) {
         int32_t sprIdx = baseSpriteIndex + i;
         if (sprIdx >= 0 && (uint32_t)sprIdx < dw->sprt.count) {
-            Sprite* s = &dw->sprt.sprites[sprIdx];
-            if (s->width <= 256 && s->height <= 256) {
-                markSpriteResident(gl, dw, sprIdx);
-            } else if (i == 0) {
-                markSpriteResident(gl, dw, sprIdx);
-            }
+            markSpriteResident(gl, dw, sprIdx);
         }
     }
 }
+
 static void markBackgroundResident(CtrRenderer* gl, DataWin* dw, int32_t bgndIndex) {
     if (bgndIndex >= 0 && (uint32_t) bgndIndex < dw->bgnd.count) {
         markTpagOffsetResident(gl, dw, dw->bgnd.backgrounds[bgndIndex].textureOffset);
@@ -447,7 +523,6 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
 
     for (uint32_t i = 0; i < gl->tpagCount; i++) gl->tpags[i].keepResident = false;
 
-    // ОБНОВЛЕНИЕ: Предзагружаем ВСЕ шрифты (и обычные, и Sprite Font). Это убивает фризы диалогов!
     for (uint32_t i = 0; i < dw->font.count; i++) {
         Font* f = &dw->font.fonts[i];
         if (f->isSpriteFont && f->spriteIndex >= 0) {
@@ -471,13 +546,12 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
     for (uint32_t i = 0; i < room->gameObjectCount; i++) {
         int32_t objIdx = room->gameObjects[i].objectDefinition;
         if (objIdx >= 0 && (uint32_t) objIdx < dw->objt.count) {
-            // Грузим спрайт объекта и его анимации (от -10 до +10 по ID)
-            markSpriteNeighborhoodResident(gl, dw, dw->objt.objects[objIdx].spriteId, 50);
+            markSpriteNeighborhoodResident(gl, dw, dw->objt.objects[objIdx].spriteId, 1);
 
             int32_t parent = dw->objt.objects[objIdx].parentId;
             int guard = 8;
             while (parent >= 0 && (uint32_t) parent < dw->objt.count && guard-- > 0) {
-                markSpriteNeighborhoodResident(gl, dw, dw->objt.objects[parent].spriteId, 50);
+                markSpriteNeighborhoodResident(gl, dw, dw->objt.objects[parent].spriteId, 1);
                 parent = dw->objt.objects[parent].parentId;
             }
         }
@@ -508,15 +582,12 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
     DataWin* dw = renderer->dataWin;
 
     if (tpagIndex < 0 || (uint32_t)tpagIndex >= gl->tpagCount) return;
-    
+
     if (!gl->tpags[tpagIndex].isLoaded) {
         int32_t sprIdx = gl->tpagToSprite[tpagIndex];
-        // ЛОГГИРОВАНИЕ СТАТТЕРА
-        fprintf(stderr, "\n[!!!] STUTTER WARNING: On-the-fly load in ctrDrawSprite!\n");
-        fprintf(stderr, "[!!!] TPAG: %d | SpriteID: %d. Forcing prefetch...\n", tpagIndex, sprIdx);
 
         if (sprIdx >= 0) {
-            markSpriteResident(gl, dw, sprIdx);
+            markSpriteNeighborhoodResident(gl, dw, sprIdx, 1);
         } else {
             gl->tpags[tpagIndex].keepResident = true;
         }
@@ -552,15 +623,15 @@ static void ctrDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t src
     DataWin* dw = renderer->dataWin;
 
     if (tpagIndex < 0 || (uint32_t)tpagIndex >= gl->tpagCount) return;
-    
+
     if (!gl->tpags[tpagIndex].isLoaded) {
         int32_t sprIdx = gl->tpagToSprite[tpagIndex];
-        // ЛОГГИРОВАНИЕ СТАТТЕРА
-        fprintf(stderr, "\n[!!!] STUTTER WARNING: On-the-fly load in ctrDrawSpritePart!\n");
-        fprintf(stderr, "[!!!] TPAG: %d | SpriteID: %d. Forcing prefetch...\n", tpagIndex, sprIdx);
 
-        if (sprIdx >= 0) markSpriteResident(gl, dw, sprIdx);
-        else gl->tpags[tpagIndex].keepResident = true;
+        if (sprIdx >= 0) {
+            markSpriteNeighborhoodResident(gl, dw, sprIdx, 1);
+        } else {
+            gl->tpags[tpagIndex].keepResident = true;
+        }
         prefetchRoomTextures(gl);
         if (!gl->tpags[tpagIndex].isLoaded) return;
     }
@@ -594,51 +665,74 @@ static void ctrDrawRectangle(Renderer* renderer, float x1, float y1, float x2, f
     }
 }
 
+// 🔥 ИСПРАВЛЕНИЕ ЛИНИЙ: Переписано на использование Batch-рендерера, никаких glBegin/glEnd.
 static void ctrDrawLine(Renderer* renderer, float x1, float y1, float x2, float y2, float width, uint32_t color, float alpha) {
-    CtrRenderer* gl = (CtrRenderer*) renderer; ctrFlushBatch(gl);
-    float r = (float) BGR_R(color) / 255.0f; float g = (float) BGR_G(color) / 255.0f; float b = (float) BGR_B(color) / 255.0f;
-    float dx = x2 - x1; float dy = y2 - y1;
-    float len = sqrtf(dx * dx + dy * dy); if (0.0001f > len) return;
-    float halfW = width * 0.5f; float px = (-dy / len) * halfW; float py = (dx / len) * halfW;
-    glBindTexture(GL_TEXTURE_2D, gl->whiteTexture);
-    glBegin(GL_TRIANGLE_STRIP);
-        glColor4f(r, g, b, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x1 + px, y1 + py);
-        glColor4f(r, g, b, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x1 - px, y1 - py);
-        glColor4f(r, g, b, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x2 + px, y2 + py);
-        glColor4f(r, g, b, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x2 - px, y2 - py);
-    glEnd();
+    CtrRenderer* gl = (CtrRenderer*) renderer;
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (0.0001f > len) return;
+
+    float halfW = width * 0.5f;
+    float px = (-dy / len) * halfW;
+    float py = (dx / len) * halfW;
+
+    uint8_t cr = BGR_R(color);
+    uint8_t cg = BGR_G(color);
+    uint8_t cb = BGR_B(color);
+    uint8_t ca = (uint8_t)(alpha * 255.0f);
+
+    ctrPushQuad(gl, gl->whiteTexture,
+        x1 + px, y1 + py,
+        x1 - px, y1 - py,
+        x2 - px, y2 - py,
+        x2 + px, y2 + py,
+        0.5f, 0.5f, 0.5f, 0.5f,
+        cr, cg, cb, ca);
 }
 
+// 🔥 ИСПРАВЛЕНИЕ ЛИНИЙ С ЦВЕТОМ: Задействовали градиентный батчинг.
 static void ctrDrawLineColor(Renderer* renderer, float x1, float y1, float x2, float y2, float width, uint32_t color1, uint32_t color2, float alpha) {
-    CtrRenderer* gl = (CtrRenderer*) renderer; ctrFlushBatch(gl);
-    float r1 = (float) BGR_R(color1)/255.0f; float g1 = (float) BGR_G(color1)/255.0f; float b1 = (float) BGR_B(color1)/255.0f;
-    float r2 = (float) BGR_R(color2)/255.0f; float g2 = (float) BGR_G(color2)/255.0f; float b2 = (float) BGR_B(color2)/255.0f;
-    float dx = x2 - x1; float dy = y2 - y1;
-    float len = sqrtf(dx * dx + dy * dy); if (0.0001f > len) return;
-    float halfW = width * 0.5f; float px = (-dy / len) * halfW; float py = (dx / len) * halfW;
-    glBindTexture(GL_TEXTURE_2D, gl->whiteTexture);
-    glBegin(GL_TRIANGLE_STRIP);
-        glColor4f(r1, g1, b1, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x1 + px, y1 + py);
-        glColor4f(r1, g1, b1, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x1 - px, y1 - py);
-        glColor4f(r2, g2, b2, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x2 + px, y2 + py);
-        glColor4f(r2, g2, b2, alpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x2 - px, y2 - py);
-    glEnd();
+    CtrRenderer* gl = (CtrRenderer*) renderer;
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (0.0001f > len) return;
+
+    float halfW = width * 0.5f;
+    float px = (-dy / len) * halfW;
+    float py = (dx / len) * halfW;
+
+    uint8_t c1r = BGR_R(color1); uint8_t c1g = BGR_G(color1); uint8_t c1b = BGR_B(color1);
+    uint8_t c2r = BGR_R(color2); uint8_t c2g = BGR_G(color2); uint8_t c2b = BGR_B(color2);
+    uint8_t ca = (uint8_t)(alpha * 255.0f);
+
+    ctrPushQuadGradient(gl, gl->whiteTexture,
+        x1 + px, y1 + py,
+        x1 - px, y1 - py,
+        x2 - px, y2 - py,
+        x2 + px, y2 + py,
+        0.5f, 0.5f, 0.5f, 0.5f,
+        c1r, c1g, c1b, ca,   // v0 (P1)
+        c1r, c1g, c1b, ca,   // v1 (P1)
+        c2r, c2g, c2b, ca,   // v2 (P2)
+        c2r, c2g, c2b, ca);  // v3 (P2)
 }
 
 static void ctrDrawTriangle(Renderer* renderer, float x1, float y1, float x2, float y2, float x3, float y3, bool outline) {
-    CtrRenderer* gl = (CtrRenderer*) renderer; ctrFlushBatch(gl);
+    CtrRenderer* gl = (CtrRenderer*) renderer;
     if (outline) {
         ctrDrawLine(renderer, x1, y1, x2, y2, 1, renderer->drawColor, 1.0f);
         ctrDrawLine(renderer, x2, y2, x3, y3, 1, renderer->drawColor, 1.0f);
         ctrDrawLine(renderer, x3, y3, x1, y1, 1, renderer->drawColor, 1.0f);
     } else {
-        float r = (float) BGR_R(renderer->drawColor)/255.0f; float g = (float) BGR_G(renderer->drawColor)/255.0f; float b = (float) BGR_B(renderer->drawColor)/255.0f;
-        glBindTexture(GL_TEXTURE_2D, gl->whiteTexture);
-        glBegin(GL_TRIANGLES);
-            glColor4f(r, g, b, renderer->drawAlpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x1, y1);
-            glColor4f(r, g, b, renderer->drawAlpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x2, y2);
-            glColor4f(r, g, b, renderer->drawAlpha); glTexCoord2f(0.5f, 0.5f); glVertex2f(x3, y3);
-        glEnd();
+        uint8_t r = BGR_R(renderer->drawColor);
+        uint8_t g = BGR_G(renderer->drawColor);
+        uint8_t b = BGR_B(renderer->drawColor);
+        uint8_t a = (uint8_t)(renderer->drawAlpha * 255.0f);
+
+        // Превращаем треугольник в вырожденный квад для Батчера (дублируем последнюю вершину)
+        ctrPushQuad(gl, gl->whiteTexture, x1, y1, x2, y2, x3, y3, x3, y3, 0.5f, 0.5f, 0.5f, 0.5f, r, g, b, a);
     }
 }
 
@@ -658,7 +752,7 @@ static bool ctrResolveFontState(CtrRenderer* gl, DataWin* dw, Font* font, CtrFon
     if (!font->isSpriteFont) {
         int32_t fontTpagIndex = DataWin_resolveTPAG(dw, font->textureOffset);
         if (fontTpagIndex < 0 || fontTpagIndex >= gl->tpagCount) return false;
-        
+
         if (!gl->tpags[fontTpagIndex].isLoaded) {
             gl->tpags[fontTpagIndex].keepResident = true;
             prefetchRoomTextures(gl);
@@ -692,7 +786,7 @@ static bool ctrResolveGlyph(CtrRenderer* gl, DataWin* dw, CtrFontState* state, F
 
         TexturePageItem* glyphTpag = &dw->tpag.items[tpagIdx];
         *outTpagIndex = tpagIdx;
-        *outSrcX = 0; 
+        *outSrcX = 0;
         *outSrcY = 0;
         *outSrcW = (float) glyphTpag->sourceWidth;
         *outSrcH = (float) glyphTpag->sourceHeight;
@@ -788,9 +882,9 @@ static void ctrDrawText(Renderer* renderer, const char* text, float x, float y, 
     }
 }
 
-static void ctrDrawTextColor(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, float angleDeg, int32_t _c1, int32_t _c2, int32_t _c3, int32_t _c4, float alpha) {
+static void ctrDrawTextColor(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, float angleDeg, int32_t _c1, int32_t _c2, int32_t _c3, int32_t _c4, float floatAlpha) {
     float savedAlpha = renderer->drawAlpha;
-    renderer->drawAlpha = alpha;
+    renderer->drawAlpha = floatAlpha;
     ctrDrawText(renderer, text, x, y, xscale, yscale, angleDeg);
     renderer->drawAlpha = savedAlpha;
 }

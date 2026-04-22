@@ -3,6 +3,7 @@
 // data.win is loaded from sdmc:/3ds/butterscotch/data.win.
 
 #include <3ds.h>
+#include <malloc.h>
 #include <NovaGL.h>
 #include <SDL/SDL.h>
 
@@ -20,9 +21,9 @@
 #include "sdl12_audio_system.h"
 #include "utils.h"
 
-//u32 __ctru_heap_size = 0;
-//u32 __ctru_linear_heap_size = 45 * 1024 * 1024;
-//u32 __stacksize__ = 64 * 1024;
+u32 __ctru_heap_size = 0;
+u32 __ctru_linear_heap_size = 25 * 1024 * 1024;
+u32 __stacksize__ = 64 * 1024;
 
 #define DATA_WIN_PATH "sdmc:/3ds/butterscotch/data.win"
 #define BUTTERSCOTCH_NOVA_CMD_BUF_SIZE      (1024 * 1024)
@@ -49,7 +50,17 @@ void initLogging() {
     printf("Logging initialized!\n");
     fprintf(stderr, "This goes to stderr!\n");
 }
+void printMemoryStats() {
+    struct mallinfo mi = mallinfo();
 
+    u32 linearFree = linearSpaceFree();
+
+    float heapUsedMB = (float)mi.uordblks / 1024.0f / 1024.0f;
+    float linearFreeMB = (float)linearFree / 1024.0f / 1024.0f;
+
+    fprintf(stderr, "[MEMORY] Heap Used: %.2f MB | LINEAR RAM FREE: %.2f MB\n",
+           heapUsedMB, linearFreeMB);
+}
 int main(int argc, char* argv[]) {
     (void) argc; (void) argv;
     initLogging();
@@ -117,6 +128,8 @@ int main(int argc, char* argv[]) {
 
     nova_init();
 
+    nova_texture_cache_set_directory("sdmc:/3ds/butterscotch/cache");
+
     VMContext* vm = VM_create(dataWin);
 
     N3dsFileSystem* fs = N3dsFileSystem_create(DATA_WIN_PATH);
@@ -133,6 +146,8 @@ int main(int argc, char* argv[]) {
     Runner_initFirstRoom(runner);
 
     double targetFrameSec = 1.0 / 30.0;
+
+    int frameCounter = 0;
 
     while (aptMainLoop() && !runner->shouldExit) {
         u64 frameStart = osGetTime();
@@ -273,6 +288,10 @@ int main(int argc, char* argv[]) {
 
         novaSwapBuffers();
 
+        if (frameCounter % 60 == 0) {
+            printMemoryStats();
+        }
+        frameCounter++;
         // 30 FPS Limiter
         while (osGetTime() - frameStart < 33) {
             gspWaitForVBlank();
