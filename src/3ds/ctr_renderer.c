@@ -13,43 +13,13 @@
 #include "stb_ds.h"
 #include "utils.h"
 
-#define CTR_QUAD_BATCH_CAPACITY 4096
+#define CTR_QUAD_BATCH_CAPACITY 1024
 
-#define LRU_SWEEP_INTERVAL 60
-#define LRU_IDLE_THRESHOLD 600
-
-// ===[ FAST MATH & LUT (РАСХОД RAM: ~28 КБ) ]===
-#define LUT_PRECISION 10.0f // Точность 0.1 градуса (3600 элементов)
-#define LUT_SIZE 3600
-static float g_cos_lut[LUT_SIZE];
-static float g_sin_lut[LUT_SIZE];
-static bool g_lut_initialized = false;
-
-static void init_math_lut(void) {
-    if (g_lut_initialized) return;
-    for (int i = 0; i < LUT_SIZE; i++) {
-        float angle = (float)i / LUT_PRECISION;
-        float rad = angle * ((float)M_PI / 180.0f);
-        g_cos_lut[i] = cosf(rad);
-        g_sin_lut[i] = sinf(rad);
-    }
-    g_lut_initialized = true;
-}
-
-// Легендарный быстрый обратный корень из Quake 3 (в 3-4 раза быстрее обычного sqrtf на ARM)
-static inline float fast_inv_sqrt(float number) {
-    long i;
-    float x2, y;
-    const float threehalfs = 1.5F;
-    x2 = number * 0.5F;
-    y  = number;
-    i  = * ( long * ) &y;
-    i  = 0x5f3759df - ( i >> 1 );
-    y  = * ( float * ) &i;
-    y  = y * ( threehalfs - ( x2 * y * y ) );
-    // Одной итерации Ньютона для 2D графики за глаза
-    return y;
-}
+// 🔥 ОПТИМИЗАЦИЯ СТАТТЕРОВ:
+// Увеличиваем жизнь кэша до 30 секунд (1800 кадров при 60 FPS).
+// Теперь снаряды Азгора, Санса и Андайн не будут выгружаться прямо посреди битвы!
+#define LRU_SWEEP_INTERVAL 120
+#define LRU_IDLE_THRESHOLD 1800
 
 static int next_pot(int x) {
     x--;
@@ -128,7 +98,6 @@ static void ctrDrawTpagRegion(CtrRenderer* gl, uint32_t tpagIndex, float srcOffX
 
     if (drawSrcW <= 0.001f || drawSrcH <= 0.001f) return;
 
-    // Half-Texel Inset: сшивает графику без зазоров
     float halfU = 0.5f * tpagData->uvScaleX;
     float halfV = 0.5f * tpagData->uvScaleY;
 
@@ -327,9 +296,6 @@ static void prefetchRoomTextures(CtrRenderer* gl) {
     }
 }
 
-// 🔥 ИСПРАВЛЕНИЕ УТЕЧКИ: Функция динамической загрузки спрайтов.
-// Она временно помечает текстуры для префетча, а потом снимает метку,
-// чтобы LRU кэш смог удалить их через 10 секунд, если битва закончилась.
 static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
     if (tpagIndex < 0 || (uint32_t)tpagIndex >= gl->tpagCount || gl->tpags[tpagIndex].isLoaded) return;
 
@@ -362,7 +328,6 @@ static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
 
     prefetchRoomTextures(gl);
 
-    // Снимаем метку вечной резиденции! Теперь мусорщик LRU удалит их при ненадобности.
     for (int i = 0; i < tempCount; i++) {
         gl->tpags[tempTpags[i]].keepResident = false;
         gl->tpags[tempTpags[i]].lastUsedFrame = g_frameCounter;
@@ -370,8 +335,6 @@ static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
 }
 
 static void ctrInit(Renderer* renderer, DataWin* dataWin) {
-    init_math_lut();
-
     CtrRenderer* gl = (CtrRenderer*) renderer;
     renderer->dataWin = dataWin;
 
@@ -445,18 +408,6 @@ static void ctrBeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int3
 
     ctrFlushBatch(gl);
     glBindTexture(GL_TEXTURE_2D, 0);
-
-    if (gl->pendingResidencyUpdate && g_frameCounter >= gl->pendingResidencyReadyFrame) {
-        gl->pendingResidencyUpdate = false;
-
-        for (uint32_t i = 0; i < gl->tpagCount; i++) {
-            if (!gl->tpags[i].keepResident && gl->tpags[i].isLoaded) {
-                unloadTpagTexture(gl, i);
-            }
-        }
-
-        prefetchRoomTextures(gl);
-    }
 
     gl->windowW = windowW;
     gl->windowH = windowH;
@@ -590,9 +541,6 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
 
     for (uint32_t i = 0; i < gl->tpagCount; i++) gl->tpags[i].keepResident = false;
 
-    // 🔥 ИСПРАВЛЕНИЕ УТЕЧКИ: Вырезан цикл, который жестко грузил все 81 шрифт игры
-    // Теперь шрифты подгружаются и выгружаются динамически, спасая ~5 МБ VRAM!
-
     if (!room->payloadLoaded) goto unload_stale;
 
     if (room->backgrounds) {
@@ -632,8 +580,18 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
     }
 
 unload_stale:
-    gl->pendingResidencyUpdate = true;
-    gl->pendingResidencyReadyFrame = g_frameCounter;
+    // 🔥 ФИКС КРАША (OOM): Синхронная очистка мусора ПЕРЕД загрузкой новой комнаты!
+    // Ранее это делалось с задержкой в кадр, что вызывало дублирование памяти
+    // при резких скачках из мелкой комнаты в гигантскую (room_tundra1).
+    for (uint32_t i = 0; i < gl->tpagCount; i++) {
+        if (!gl->tpags[i].keepResident && gl->tpags[i].isLoaded) {
+            unloadTpagTexture(gl, i);
+        }
+    }
+
+    // Загружаем текстуры для новой комнаты, теперь у нас куча свободной Linear RAM
+    prefetchRoomTextures(gl);
+    gl->pendingResidencyUpdate = false;
 }
 
 // ===[ ОТРИСОВКА ]===
@@ -645,7 +603,6 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
     if (tpagIndex < 0 || (uint32_t)tpagIndex >= gl->tpagCount) return;
 
     if (!gl->tpags[tpagIndex].isLoaded) {
-        // Динамическая подгрузка с последующим сбросом резидентности
         loadDynamicSprite(gl, dw, tpagIndex);
         if (!gl->tpags[tpagIndex].isLoaded) return;
     }
@@ -671,14 +628,9 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
         ctrDrawTpagRegion(gl, tpagIndex, 0.0f, 0.0f, (float)tpag->sourceWidth, (float)tpag->sourceHeight,
                           x0, y0, x1, y0, x1, y1, x0, y1, r, g, b, a);
     } else {
-        // ОПТИМИЗАЦИЯ: Достаем синус и косинус из LUT за О(1)
-        float a = fmodf(angleDeg, 360.0f);
-        if (a < 0.0f) a += 360.0f;
-        int lut_idx = (int)(a * LUT_PRECISION) % LUT_SIZE;
-
-        float c = g_cos_lut[lut_idx];
-        // GameMaker использует отрицательный угол, поэтому синус инвертируем ( sin(-x) = -sin(x) )
-        float s = -g_sin_lut[lut_idx];
+        float angleRad = -angleDeg * ((float) M_PI / 180.0f);
+        float c = cosf(angleRad);
+        float s = sinf(angleRad);
 
         float x0 = lx0 * c - ly0 * s + x; float y0 = lx0 * s + ly0 * c + y;
         float x1 = lx1 * c - ly0 * s + x; float y1 = lx1 * s + ly0 * c + y;
@@ -732,121 +684,94 @@ static void ctrDrawRectangle(Renderer* renderer, float x1, float y1, float x2, f
     }
 }
 
-// 🔥 ИДЕАЛЬНЫЕ ПРЯМЫЕ ЛИНИИ (Оружие, рамки, UI боев)
+// 🔥 ИДЕАЛЬНЫЕ ПРЯМЫЕ ЛИНИИ (Исправлен баг зеленых квадратов и полос HP!)
 static void ctrDrawLine(Renderer* renderer, float x1, float y1, float x2, float y2, float width, uint32_t color, float alpha) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
     uint8_t cr = BGR_R(color); uint8_t cg = BGR_G(color); uint8_t cb = BGR_B(color);
     uint8_t ca = (uint8_t)(alpha * 255.0f);
 
-    // Специальный фикс для ровных горизонтальных/вертикальных линий UI.
-    // +1.0f гарантирует, что GameMaker закрасит последнюю координату
-    if (width <= 1.0f && (fabsf(x1 - x2) < 0.01f || fabsf(y1 - y2) < 0.01f)) {
-        float rx1 = roundf(fminf(x1, x2));
-        float ry1 = roundf(fminf(y1, y2));
-        float rx2 = roundf(fmaxf(x1, x2)) + 1.0f;
-        float ry2 = roundf(fmaxf(y1, y2)) + 1.0f;
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+    float len = sqrtf(dx * dx + dy * dy);
 
-        ctrPushQuad(gl, gl->whiteTexture,
-            rx1, ry1, rx2, ry1, rx2, ry2, rx1, ry2,
-            0.5f, 0.5f, 0.5f, 0.5f, cr, cg, cb, ca);
+    // Точечная отрисовка
+    if (len < 0.0001f) {
+        ctrPushQuad(gl, gl->whiteTexture, x1, y1, x1+1, y1, x1+1, y1+1, x1, y1+1, 0.5f, 0.5f, 0.5f, 0.5f, cr, cg, cb, ca);
         return;
     }
 
-    float dx = x2 - x1;
-    float dy = y2 - y1;
-    float sq_dist = dx * dx + dy * dy;
-    if (sq_dist < 0.00001f) return;
+    // Ровные горизонтальные и вертикальные линии интерфейса (Пиксель-в-пиксель по логике GameMaker)
+    if (fabsf(dx) < 0.01f || fabsf(dy) < 0.01f) {
+        float rx1 = fminf(x1, x2);
+        float ry1 = fminf(y1, y2);
+        float rx2 = fmaxf(x1, x2) + 1.0f; // GM включает последний пиксель
+        float ry2 = fmaxf(y1, y2) + 1.0f;
 
-    // ОПТИМИЗАЦИЯ: Быстрый обратный корень (1.0f / length)
-    float inv_len = fast_inv_sqrt(sq_dist);
-    
-    // Нормализованные вектора (dx/len)
-    float norm_x = dx * inv_len;
-    float norm_y = dy * inv_len;
+        if (fabsf(dx) < 0.01f) { // Строго вертикальная
+            rx1 -= floorf(width * 0.5f);
+            rx2 = rx1 + fmaxf(1.0f, width);
+        } else {                 // Строго горизонтальная
+            ry1 -= floorf(width * 0.5f);
+            ry2 = ry1 + fmaxf(1.0f, width);
+        }
 
-    x2 += norm_x;
-    y2 += norm_y;
-    dx = x2 - x1; dy = y2 - y1; 
+        ctrPushQuad(gl, gl->whiteTexture, rx1, ry1, rx2, ry1, rx2, ry2, rx1, ry2, 0.5f, 0.5f, 0.5f, 0.5f, cr, cg, cb, ca);
+        return;
+    }
 
-    // Пересчитываем обратный корень после удлинения
-    inv_len = fast_inv_sqrt(dx * dx + dy * dy);
+    // Для диагональных линий
+    x2 += (dx / len);
+    y2 += (dy / len);
+    dx = x2 - x1; dy = y2 - y1; len += 1.0f;
 
     float halfW = width * 0.5f;
-    float px = (-dy * inv_len) * halfW;
-    float py = (dx * inv_len) * halfW;
+    float px = (-dy / len) * halfW;
+    float py = (dx / len) * halfW;
 
     ctrPushQuad(gl, gl->whiteTexture,
-        x1 + px, y1 + py,
-        x1 - px, y1 - py,
-        x2 - px, y2 - py,
-        x2 + px, y2 + py,
-        0.5f, 0.5f, 0.5f, 0.5f,
-        cr, cg, cb, ca);
+        x1 + px, y1 + py, x1 - px, y1 - py, x2 - px, y2 - py, x2 + px, y2 + py,
+        0.5f, 0.5f, 0.5f, 0.5f, cr, cg, cb, ca);
 }
 
-// 🔥 ИДЕАЛЬНЫЕ ПРЯМЫЕ ЛИНИИ (с градиентом)
+// 🔥 ИДЕАЛЬНЫЕ ПРЯМЫЕ ЛИНИИ (с правильным натяжением градиента)
 static void ctrDrawLineColor(Renderer* renderer, float x1, float y1, float x2, float y2, float width, uint32_t color1, uint32_t color2, float alpha) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
     uint8_t c1r = BGR_R(color1); uint8_t c1g = BGR_G(color1); uint8_t c1b = BGR_B(color1);
     uint8_t c2r = BGR_R(color2); uint8_t c2g = BGR_G(color2); uint8_t c2b = BGR_B(color2);
     uint8_t ca = (uint8_t)(alpha * 255.0f);
 
-    if (width <= 1.0f && (fabsf(x1 - x2) < 0.01f || fabsf(y1 - y2) < 0.01f)) {
-        float rx1 = roundf(fminf(x1, x2));
-        float ry1 = roundf(fminf(y1, y2));
-        float rx2 = roundf(fmaxf(x1, x2)) + 1.0f;
-        float ry2 = roundf(fmaxf(y1, y2)) + 1.0f;
+    float dx = x2 - x1; float dy = y2 - y1; float len = sqrtf(dx * dx + dy * dy);
+
+    if (fabsf(dx) < 0.01f || fabsf(dy) < 0.01f) {
+        float rx1 = fminf(x1, x2);
+        float ry1 = fminf(y1, y2);
+        float rx2 = fmaxf(x1, x2) + 1.0f;
+        float ry2 = fmaxf(y1, y2) + 1.0f;
+
+        if (fabsf(dx) < 0.01f) { rx1 -= floorf(width * 0.5f); rx2 = rx1 + fmaxf(1.0f, width); }
+        else { ry1 -= floorf(width * 0.5f); ry2 = ry1 + fmaxf(1.0f, width); }
 
         uint8_t r0, g0, b0, r1, g1, b1;
         if (x1 <= x2 && y1 <= y2) { r0=c1r; g0=c1g; b0=c1b; r1=c2r; g1=c2g; b1=c2b; }
         else { r0=c2r; g0=c2g; b0=c2b; r1=c1r; g1=c1g; b1=c1b; }
 
-        if (fabsf(y1 - y2) < 0.01f) {
-            ctrPushQuadGradient(gl, gl->whiteTexture,
-                rx1, ry1, rx2, ry1, rx2, ry2, rx1, ry2,
-                0.5f, 0.5f, 0.5f, 0.5f,
+        if (fabsf(dy) < 0.01f) { // Горизонтально - градиент слева направо
+            ctrPushQuadGradient(gl, gl->whiteTexture, rx1, ry1, rx2, ry1, rx2, ry2, rx1, ry2, 0.5f, 0.5f, 0.5f, 0.5f,
                 r0, g0, b0, ca, r1, g1, b1, ca, r1, g1, b1, ca, r0, g0, b0, ca);
-        } else {
-            ctrPushQuadGradient(gl, gl->whiteTexture,
-                rx1, ry1, rx2, ry1, rx2, ry2, rx1, ry2,
-                0.5f, 0.5f, 0.5f, 0.5f,
+        } else {                 // Вертикально - градиент сверху вниз
+            ctrPushQuadGradient(gl, gl->whiteTexture, rx1, ry1, rx2, ry1, rx2, ry2, rx1, ry2, 0.5f, 0.5f, 0.5f, 0.5f,
                 r0, g0, b0, ca, r0, g0, b0, ca, r1, g1, b1, ca, r1, g1, b1, ca);
         }
         return;
     }
 
-    float dx = x2 - x1;
-    float dy = y2 - y1;
-    float sq_dist = dx * dx + dy * dy;
-    if (sq_dist < 0.00001f) return;
-
-    // ОПТИМИЗАЦИЯ: Быстрый обратный корень (1.0f / length)
-    float inv_len = fast_inv_sqrt(sq_dist);
-
-    // Нормализованные вектора (dx/len)
-    float norm_x = dx * inv_len;
-    float norm_y = dy * inv_len;
-
-    x2 += norm_x;
-    y2 += norm_y;
-    dx = x2 - x1; dy = y2 - y1;
-
-    inv_len = fast_inv_sqrt(dx * dx + dy * dy);
-
-    float halfW = width * 0.5f;
-    float px = (-dy * inv_len) * halfW;
-    float py = (dx * inv_len) * halfW;
+    x2 += (dx / len); y2 += (dy / len); dx = x2 - x1; dy = y2 - y1; len += 1.0f;
+    float halfW = width * 0.5f; float px = (-dy / len) * halfW; float py = (dx / len) * halfW;
 
     ctrPushQuadGradient(gl, gl->whiteTexture,
-        x1 + px, y1 + py,
-        x1 - px, y1 - py,
-        x2 - px, y2 - py,
-        x2 + px, y2 + py,
+        x1 + px, y1 + py, x1 - px, y1 - py, x2 - px, y2 - py, x2 + px, y2 + py,
         0.5f, 0.5f, 0.5f, 0.5f,
-        c1r, c1g, c1b, ca,
-        c1r, c1g, c1b, ca,
-        c2r, c2g, c2b, ca,
-        c2r, c2g, c2b, ca);
+        c1r, c1g, c1b, ca, c1r, c1g, c1b, ca, c2r, c2g, c2b, ca, c2r, c2g, c2b, ca);
 }
 
 static void ctrDrawTriangle(Renderer* renderer, float x1, float y1, float x2, float y2, float x3, float y3, bool outline) {
@@ -949,19 +874,9 @@ static void ctrDrawText(Renderer* renderer, const char* text, float x, float y, 
     if (renderer->drawValign == 1) valignOffset = -totalHeight / 2.0f;
     else if (renderer->drawValign == 2) valignOffset = -totalHeight;
 
-    // ОПТИМИЗАЦИЯ: Вместо тяжелой Matrix4f используем прямую 2D аффинную трансформацию + LUT
-    float c = 1.0f;
-    float s = 0.0f;
-    if (angleDeg != 0.0f) {
-        float angle = fmodf(angleDeg, 360.0f);
-        if (angle < 0.0f) angle += 360.0f;
-        int lut_idx = (int)(angle * LUT_PRECISION) % LUT_SIZE;
-        c = g_cos_lut[lut_idx];
-        s = -g_sin_lut[lut_idx];
-    }
-
-    float realScaleX = xscale * font->scaleX;
-    float realScaleY = yscale * font->scaleY;
+    float angleRad = -angleDeg * ((float) M_PI / 180.0f);
+    Matrix4f transform;
+    Matrix4f_setTransform2D(&transform, x, y, xscale * font->scaleX, yscale * font->scaleY, angleRad);
 
     float cursorY = valignOffset - (float) font->ascenderOffset;
     int32_t lineStart = 0;
@@ -996,16 +911,11 @@ static void ctrDrawText(Renderer* renderer, const char* text, float x, float y, 
 
             float localX1 = localX0 + (float) glyph->sourceWidth;
             float localY1 = localY0 + (float) glyph->sourceHeight;
-
-            // Скеллим локально
-            float sx0 = localX0 * realScaleX; float sy0 = localY0 * realScaleY;
-            float sx1 = localX1 * realScaleX; float sy1 = localY1 * realScaleY;
-
-            // Поворачиваем и смещаем на позицию X, Y вручную (в 10 раз быстрее Matrix4f)
-            float px0 = sx0 * c - sy0 * s + x; float py0 = sx0 * s + sy0 * c + y;
-            float px1 = sx1 * c - sy0 * s + x; float py1 = sx1 * s + sy0 * c + y;
-            float px2 = sx1 * c - sy1 * s + x; float py2 = sx1 * s + sy1 * c + y;
-            float px3 = sx0 * c - sy1 * s + x; float py3 = sx0 * s + sy1 * c + y;
+            float px0, py0, px1, py1, px2, py2, px3, py3;
+            Matrix4f_transformPoint(&transform, localX0, localY0, &px0, &py0);
+            Matrix4f_transformPoint(&transform, localX1, localY0, &px1, &py1);
+            Matrix4f_transformPoint(&transform, localX1, localY1, &px2, &py2);
+            Matrix4f_transformPoint(&transform, localX0, localY1, &px3, &py3);
 
             ctrDrawTpagRegion(gl, tpagIndex, srcX, srcY, srcW, srcH, px0, py0, px1, py1, px2, py2, px3, py3, r, g, b, a);
 
