@@ -5032,18 +5032,37 @@ static RValue builtinPlaceMeeting(VMContext* ctx, RValue* args, int32_t argCount
     bool found = false;
 
     if (callerBBox.valid) {
-        int32_t instanceCount = (int32_t) arrlen(runner->instances);
-        repeat(instanceCount, i) {
-            Instance* other = runner->instances[i];
-            if (!other->active || other == caller) continue;
-            if (!Collision_matchesTarget(runner->dataWin, other, target)) continue;
+        // ОПТИМИЗАЦИЯ 1: Если ищем конкретный инстанс по ID (> 100000)
+        if (target >= 100000) {
+            Instance* other = hmget(runner->instancesToId, target);
+            if (other && other->active && other != caller) {
+                InstanceBBox otherBBox = Collision_computeBBox(runner->dataWin, other);
+                if (otherBBox.valid && Collision_instancesOverlapPrecise(runner->dataWin, caller, other, callerBBox, otherBBox)) {
+                    found = true;
+                }
+            }
+        } else {
+            int32_t instanceCount = (int32_t) arrlen(runner->instances);
+            repeat(instanceCount, i) {
+                Instance* other = runner->instances[i];
+                if (!other->active || other == caller) continue;
 
-            InstanceBBox otherBBox = Collision_computeBBox(runner->dataWin, other);
-            if (!otherBBox.valid) continue;
+                // ОПТИМИЗАЦИЯ 2: Быстрый сброс по дистанции.
+                // Избавляет от вычисления матриц и BBox для объектов на другом конце комнаты.
+                float dx = caller->x - other->x;
+                float dy = caller->y - other->y;
+                if (dx < -512.0f || dx > 512.0f || dy < -512.0f || dy > 512.0f) continue;
 
-            if (Collision_instancesOverlapPrecise(runner->dataWin, caller, other, callerBBox, otherBBox)) {
-                found = true;
-                break;
+                // ОПТИМИЗАЦИЯ 3: Быстрая проверка без вызова функции
+                if (other->objectIndex != target && !Collision_matchesTarget(runner->dataWin, other, target)) continue;
+
+                InstanceBBox otherBBox = Collision_computeBBox(runner->dataWin, other);
+                if (!otherBBox.valid) continue;
+
+                if (Collision_instancesOverlapPrecise(runner->dataWin, caller, other, callerBBox, otherBBox)) {
+                    found = true;
+                    break;
+                }
             }
         }
     }
@@ -5364,18 +5383,33 @@ static RValue builtinInstancePlace(VMContext* ctx, RValue* args, int32_t argCoun
     int32_t resultId = INSTANCE_NOONE;
 
     if (callerBBox.valid) {
-        int32_t instanceCount = (int32_t) arrlen(runner->instances);
-        repeat(instanceCount, i) {
-            Instance* other = runner->instances[i];
-            if (!other->active || other == caller) continue;
-            if (!Collision_matchesTarget(runner->dataWin, other, targetObjIndex)) continue;
+        if (targetObjIndex >= 100000) {
+            Instance* other = hmget(runner->instancesToId, targetObjIndex);
+            if (other && other->active && other != caller) {
+                InstanceBBox otherBBox = Collision_computeBBox(runner->dataWin, other);
+                if (otherBBox.valid && Collision_instancesOverlapPrecise(runner->dataWin, caller, other, callerBBox, otherBBox)) {
+                    resultId = other->instanceId;
+                }
+            }
+        } else {
+            int32_t instanceCount = (int32_t) arrlen(runner->instances);
+            repeat(instanceCount, i) {
+                Instance* other = runner->instances[i];
+                if (!other->active || other == caller) continue;
 
-            InstanceBBox otherBBox = Collision_computeBBox(runner->dataWin, other);
-            if (!otherBBox.valid) continue;
+                float dx = caller->x - other->x;
+                float dy = caller->y - other->y;
+                if (dx < -512.0f || dx > 512.0f || dy < -512.0f || dy > 512.0f) continue;
 
-            if (Collision_instancesOverlapPrecise(runner->dataWin, caller, other, callerBBox, otherBBox)) {
-                resultId = other->instanceId;
-                break;
+                if (other->objectIndex != targetObjIndex && !Collision_matchesTarget(runner->dataWin, other, targetObjIndex)) continue;
+
+                InstanceBBox otherBBox = Collision_computeBBox(runner->dataWin, other);
+                if (!otherBBox.valid) continue;
+
+                if (Collision_instancesOverlapPrecise(runner->dataWin, caller, other, callerBBox, otherBBox)) {
+                    resultId = other->instanceId;
+                    break;
+                }
             }
         }
     }
@@ -6835,7 +6869,116 @@ static RValue builtinAssetGetIndex(VMContext* ctx, RValue* args, int32_t argCoun
     free(name);
     return RValue_makeReal((double) -1);
 }
+// draw_circle(x, y, r, outline)
+static RValue builtin_draw_circle(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    if (4 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer == nullptr) return RValue_makeUndefined();
 
+    float cx = (float) RValue_toReal(args[0]);
+    float cy = (float) RValue_toReal(args[1]);
+    float r  = (float) RValue_toReal(args[2]);
+    bool outline = RValue_toBool(args[3]);
+
+    if (r < 0.0f) r = -r; // Исключаем артефакты от отрицательного радиуса
+
+    int32_t segments = 24; // Базовое значение точности (circle precision) в GameMaker
+    float step = (2.0f * (float) M_PI) / (float) segments;
+
+    float prevX = cx + r;
+    float prevY = cy;
+
+    for (int32_t i = 1; i <= segments; i++) {
+        float angle = (float) i * step;
+        float nextX = cx + cosf(angle) * r;
+        float nextY = cy + sinf(angle) * r;
+
+        if (outline) {
+            runner->renderer->vtable->drawLine(runner->renderer, prevX, prevY, nextX, nextY, 1.0f, runner->renderer->drawColor, runner->renderer->drawAlpha);
+        } else {
+            runner->renderer->vtable->drawTriangle(runner->renderer, cx, cy, prevX, prevY, nextX, nextY, false);
+        }
+
+        prevX = nextX;
+        prevY = nextY;
+    }
+
+    return RValue_makeUndefined();
+}
+
+// collision_circle(x, y, rad, obj, prec, notme)
+static RValue builtinCollisionCircle(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (6 > argCount) return RValue_makeReal((GMLReal) INSTANCE_NOONE);
+
+    Runner* runner = (Runner*) ctx->runner;
+    GMLReal cx = RValue_toReal(args[0]);
+    GMLReal cy = RValue_toReal(args[1]);
+    GMLReal rad = RValue_toReal(args[2]);
+    int32_t targetObjIndex = RValue_toInt32(args[3]);
+    int32_t prec = RValue_toInt32(args[4]);
+    int32_t notme = RValue_toInt32(args[5]);
+
+    if (rad < 0.0) rad = -rad;
+    GMLReal radSq = rad * rad;
+
+    Instance* self = (Instance*) ctx->currentInstance;
+    int32_t count = (int32_t) arrlen(runner->instances);
+
+    repeat(count, i) {
+        Instance* inst = runner->instances[i];
+        if (!inst->active) continue;
+        if (notme && inst == self) continue;
+
+        if (!Collision_matchesTarget(ctx->dataWin, inst, targetObjIndex)) continue;
+
+        InstanceBBox bbox = Collision_computeBBox(ctx->dataWin, inst);
+        if (!bbox.valid) continue;
+
+        // Быстрая проверка пересечения окружности с AABB
+        GMLReal nearX = GMLReal_fmax(bbox.left, GMLReal_fmin(cx, bbox.right));
+        GMLReal nearY = GMLReal_fmax(bbox.top, GMLReal_fmin(cy, bbox.bottom));
+        GMLReal dx = cx - nearX;
+        GMLReal dy = cy - nearY;
+
+        if ((dx * dx + dy * dy) > radSq) continue;
+
+        // Точная попиксельная проверка (Precise collision)
+        if (prec != 0) {
+            Sprite* spr = Collision_getSprite(ctx->dataWin, inst);
+            if (Collision_hasFrameMasks(spr)) {
+                GMLReal iLeft   = GMLReal_fmax(cx - rad, bbox.left);
+                GMLReal iRight  = GMLReal_fmin(cx + rad, bbox.right);
+                GMLReal iTop    = GMLReal_fmax(cy - rad, bbox.top);
+                GMLReal iBottom = GMLReal_fmin(cy + rad, bbox.bottom);
+
+                bool found = false;
+                int32_t startX = (int32_t) GMLReal_floor(iLeft);
+                int32_t endX   = (int32_t) GMLReal_ceil(iRight);
+                int32_t startY = (int32_t) GMLReal_floor(iTop);
+                int32_t endY   = (int32_t) GMLReal_ceil(iBottom);
+
+                for (int32_t py = startY; endY > py && !found; py++) {
+                    for (int32_t px = startX; endX > px && !found; px++) {
+                        GMLReal testX = (GMLReal) px + 0.5;
+                        GMLReal testY = (GMLReal) py + 0.5;
+                        GMLReal pdx = testX - cx;
+                        GMLReal pdy = testY - cy;
+                        if ((pdx * pdx + pdy * pdy) <= radSq) {
+                            if (Collision_pointInInstance(spr, inst, testX, testY)) {
+                                found = true;
+                            }
+                        }
+                    }
+                }
+                if (!found) continue;
+            }
+        }
+
+        return RValue_makeReal((GMLReal) inst->instanceId);
+    }
+
+    return RValue_makeReal((GMLReal) INSTANCE_NOONE);
+}
 // ===[ REGISTRATION ]===
 
 void VMBuiltins_registerAll(VMContext* ctx) {
@@ -7129,6 +7272,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "psn_get_leaderboard_score", builtin_psn_get_leaderboard_score);
 
     // Draw
+    VM_registerBuiltin(ctx, "draw_circle", builtin_draw_circle);
     VM_registerBuiltin(ctx, "draw_sprite", builtin_drawSprite);
     VM_registerBuiltin(ctx, "draw_sprite_ext", builtin_drawSpriteExt);
     VM_registerBuiltin(ctx, "draw_sprite_tiled", builtin_drawSpriteTiled);
@@ -7227,6 +7371,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "display_set_gui_maximize", builtinDisplaySetGuiMaximise);
 
     // Collision
+    VM_registerBuiltin(ctx, "collision_circle", builtinCollisionCircle);
     VM_registerBuiltin(ctx, "place_meeting", builtinPlaceMeeting);
     VM_registerBuiltin(ctx, "collision_rectangle", builtinCollisionRectangle);
     VM_registerBuiltin(ctx, "rectangle_in_rectangle", builtinRectangleInRectangle);
