@@ -15,11 +15,9 @@
 
 #define CTR_QUAD_BATCH_CAPACITY 1024
 
-// 🔥 УВЕЛИЧИЛИ ВРЕМЯ ЖИЗНИ КЭША ДО 10 СЕКУНД!
-// Это полностью уберет микро-статтеры при ходьбе туда-сюда по комнате,
-// так как текстуры перестанут агрессивно удаляться и грузиться с SD-карты.
-#define LRU_SWEEP_INTERVAL 60    // Проверять каждую 1 секунду
-#define LRU_IDLE_THRESHOLD 600   // Выгружать из VRAM, только если не рисовалось 10 секунд
+// 🔥 Увеличенный тайм-аут (10-20 секунд) устраняет микро-статтеры при ходьбе по комнате
+#define LRU_SWEEP_INTERVAL 60
+#define LRU_IDLE_THRESHOLD 600
 
 static int next_pot(int x) {
     x--;
@@ -45,7 +43,7 @@ static void ctrFlushBatch(CtrRenderer* gl) {
     gl->quadBatchTexture = 0;
 }
 
-// Новый универсальный метод добавления квадов, поддерживающий градиенты (разные цвета на вершинах)
+// Поддержка градиентного батчинга (для цветных линий)
 static void ctrPushQuadGradient(CtrRenderer* gl, GLuint textureId,
     float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3,
     float u0, float v0, float u1, float v1,
@@ -92,7 +90,6 @@ static void ctrDrawTpagRegion(CtrRenderer* gl, uint32_t tpagIndex, float srcOffX
     CtrTpagData* tpagData = &gl->tpags[tpagIndex];
     tpagData->lastUsedFrame = g_frameCounter;
 
-    // 🔥 ИСПРАВЛЕНИЕ: Убрали insetEps (0.01f), чтобы тайлы сшивались идеально пиксель-в-пиксель без щелей!
     float drawSrcX = srcOffX * tpagData->downscaleFactor;
     float drawSrcY = srcOffY * tpagData->downscaleFactor;
     float drawSrcW = srcW * tpagData->downscaleFactor;
@@ -100,10 +97,16 @@ static void ctrDrawTpagRegion(CtrRenderer* gl, uint32_t tpagIndex, float srcOffX
 
     if (drawSrcW <= 0.001f || drawSrcH <= 0.001f) return;
 
-    float u0 = drawSrcX * tpagData->uvScaleX;
-    float v0 = drawSrcY * tpagData->uvScaleY;
-    float u1 = (drawSrcX + drawSrcW) * tpagData->uvScaleX;
-    float v1 = (drawSrcY + drawSrcH) * tpagData->uvScaleY;
+    // 🔥 ИДЕАЛЬНЫЙ СТЫК ТАЙЛОВ: Half-Texel Inset.
+    // Сдвиг UV на пол-пикселя текстуры заставляет видеокарту брать строго центр нужного пикселя,
+    // игнорируя соседние чёрные/прозрачные пиксели на атласе. Больше никаких щелей!
+    float halfU = 0.5f * tpagData->uvScaleX;
+    float halfV = 0.5f * tpagData->uvScaleY;
+
+    float u0 = drawSrcX * tpagData->uvScaleX + halfU;
+    float v0 = drawSrcY * tpagData->uvScaleY + halfV;
+    float u1 = (drawSrcX + drawSrcW) * tpagData->uvScaleX - halfU;
+    float v1 = (drawSrcY + drawSrcH) * tpagData->uvScaleY - halfV;
 
     ctrPushQuad(gl, tpagData->tex, x0, y0, x1, y1, x2, y2, x3, y3, u0, v0, u1, v1, r, g, b, a);
 }
@@ -183,7 +186,7 @@ static void prefetchRoomTextures(CtrRenderer* gl) {
                 u64 stbiEndTime = osGetTime();
 
 #ifdef __3DS__
-                free(tempPngBuffer);
+                free(tempPngBuffer); // Экономим ОГРОМНУЮ кучу Heap памяти
 #endif
 
                 if (pixels != nullptr) {
@@ -421,7 +424,16 @@ static void ctrBeginView(Renderer* renderer, int32_t viewX, int32_t viewY, int32
 
     Matrix4f projection;
     Matrix4f_identity(&projection);
-    Matrix4f_ortho(&projection, (float) viewX, (float) (viewX + viewW), (float) (viewY + viewH), (float) viewY, -1.0f, 1.0f);
+
+    // 🔥 ФИКС КООРДИНАТНОЙ СЕТКИ: Смещение ровно на пол-пикселя (-0.5f).
+    // Это стандартный фикс для OpenGL 1.1 / Citro3D, который устраняет
+    // дрожание картинки (shimmering) при ходьбе и сшивает графику намертво.
+    Matrix4f_ortho(&projection,
+        (float)viewX - 0.5f,
+        (float)(viewX + viewW) - 0.5f,
+        (float)(viewY + viewH) - 0.5f,
+        (float)viewY - 0.5f,
+        -1.0f, 1.0f);
 
     if (viewAngle != 0.0f) {
         float cx = (float) viewX + (float) viewW / 2.0f;
@@ -453,7 +465,9 @@ static void ctrBeginGUI(Renderer* renderer, int32_t guiW, int32_t guiH, int32_t 
 
     Matrix4f projection;
     Matrix4f_identity(&projection);
-    Matrix4f_ortho(&projection, 0.0f, (float) guiW, (float) guiH, 0.0f, -1.0f, 1.0f);
+
+    // Аналогичный фикс на -0.5f для GUI (текста, интерфейса), чтобы шрифты были идеально чёткими
+    Matrix4f_ortho(&projection, -0.5f, (float)guiW - 0.5f, (float)guiH - 0.5f, -0.5f, -1.0f, 1.0f);
 
     glMatrixMode(GL_PROJECTION);
     glLoadMatrixf(projection.m);
@@ -585,7 +599,6 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
 
     if (!gl->tpags[tpagIndex].isLoaded) {
         int32_t sprIdx = gl->tpagToSprite[tpagIndex];
-
         if (sprIdx >= 0) {
             markSpriteNeighborhoodResident(gl, dw, sprIdx, 1);
         } else {
@@ -602,20 +615,33 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
     float lx1 = lx0 + ((float) tpag->sourceWidth) * xscale;
     float ly1 = ly0 + ((float) tpag->sourceHeight) * yscale;
 
-    float angleRad = -angleDeg * ((float) M_PI / 180.0f);
-    float c = cosf(angleRad);
-    float s = sinf(angleRad);
-
-    float x0 = lx0 * c - ly0 * s + x; float y0 = lx0 * s + ly0 * c + y;
-    float x1 = lx1 * c - ly0 * s + x; float y1 = lx1 * s + ly0 * c + y;
-    float x2 = lx1 * c - ly1 * s + x; float y2 = lx1 * s + ly1 * c + y;
-    float x3 = lx0 * c - ly1 * s + x; float y3 = lx0 * s + ly1 * c + y;
-
     uint8_t r = BGR_R(color); uint8_t g = BGR_G(color); uint8_t b = BGR_B(color);
     uint8_t a = (uint8_t)(alpha * 255.0f);
 
-    ctrDrawTpagRegion(gl, tpagIndex, 0.0f, 0.0f, (float)tpag->sourceWidth, (float)tpag->sourceHeight,
-                      x0, y0, x1, y1, x2, y2, x3, y3, r, g, b, a);
+    // 🔥 INTEGER SNAPPING: Жёсткое округление координат для объектов без вращения
+    if (angleDeg == 0.0f) {
+        float cx = roundf(x);
+        float cy = roundf(y);
+        float x0 = cx + roundf(lx0);
+        float y0 = cy + roundf(ly0);
+        float x1 = cx + roundf(lx1);
+        float y1 = cy + roundf(ly1);
+
+        ctrDrawTpagRegion(gl, tpagIndex, 0.0f, 0.0f, (float)tpag->sourceWidth, (float)tpag->sourceHeight,
+                          x0, y0, x1, y0, x1, y1, x0, y1, r, g, b, a);
+    } else {
+        float angleRad = -angleDeg * ((float) M_PI / 180.0f);
+        float c = cosf(angleRad);
+        float s = sinf(angleRad);
+
+        float x0 = lx0 * c - ly0 * s + x; float y0 = lx0 * s + ly0 * c + y;
+        float x1 = lx1 * c - ly0 * s + x; float y1 = lx1 * s + ly0 * c + y;
+        float x2 = lx1 * c - ly1 * s + x; float y2 = lx1 * s + ly1 * c + y;
+        float x3 = lx0 * c - ly1 * s + x; float y3 = lx0 * s + ly1 * c + y;
+
+        ctrDrawTpagRegion(gl, tpagIndex, 0.0f, 0.0f, (float)tpag->sourceWidth, (float)tpag->sourceHeight,
+                          x0, y0, x1, y1, x2, y2, x3, y3, r, g, b, a);
+    }
 }
 
 static void ctrDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t srcOffX, int32_t srcOffY, int32_t srcW, int32_t srcH, float x, float y, float xscale, float yscale, uint32_t color, float alpha) {
@@ -626,7 +652,6 @@ static void ctrDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t src
 
     if (!gl->tpags[tpagIndex].isLoaded) {
         int32_t sprIdx = gl->tpagToSprite[tpagIndex];
-
         if (sprIdx >= 0) {
             markSpriteNeighborhoodResident(gl, dw, sprIdx, 1);
         } else {
@@ -636,14 +661,18 @@ static void ctrDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t src
         if (!gl->tpags[tpagIndex].isLoaded) return;
     }
 
-    float x0 = x; float y0 = y;
-    float x1 = x + (float) srcW * xscale; float y1 = y + (float) srcH * yscale;
-
     uint8_t r = BGR_R(color); uint8_t g = BGR_G(color); uint8_t b = BGR_B(color);
     uint8_t a = (uint8_t)(alpha * 255.0f);
 
+    // 🔥 INTEGER SNAPPING: Чтобы не было щелей между тайлами стен/пола,
+    // ширина геометрии округляется единообразно для всех тайлов.
+    float cx = roundf(x);
+    float cy = roundf(y);
+    float x1 = cx + roundf((float)srcW * xscale);
+    float y1 = cy + roundf((float)srcH * yscale);
+
     ctrDrawTpagRegion(gl, tpagIndex, (float)srcOffX, (float)srcOffY, (float)srcW, (float)srcH,
-                      x0, y0, x1, y0, x1, y1, x0, y1, r, g, b, a);
+                      cx, cy, x1, cy, x1, y1, cx, y1, r, g, b, a);
 }
 
 static void emitColoredQuad(CtrRenderer* gl, float x0, float y0, float x1, float y1, float r, float g, float b, float a) {
@@ -665,7 +694,7 @@ static void ctrDrawRectangle(Renderer* renderer, float x1, float y1, float x2, f
     }
 }
 
-// 🔥 ИСПРАВЛЕНИЕ ЛИНИЙ: Переписано на использование Batch-рендерера, никаких glBegin/glEnd.
+// 🔥 ИСПРАВЛЕННЫЕ ЛИНИИ через геометрию батчинга (убираем glBegin/glEnd)
 static void ctrDrawLine(Renderer* renderer, float x1, float y1, float x2, float y2, float width, uint32_t color, float alpha) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
     float dx = x2 - x1;
@@ -677,9 +706,7 @@ static void ctrDrawLine(Renderer* renderer, float x1, float y1, float x2, float 
     float px = (-dy / len) * halfW;
     float py = (dx / len) * halfW;
 
-    uint8_t cr = BGR_R(color);
-    uint8_t cg = BGR_G(color);
-    uint8_t cb = BGR_B(color);
+    uint8_t cr = BGR_R(color); uint8_t cg = BGR_G(color); uint8_t cb = BGR_B(color);
     uint8_t ca = (uint8_t)(alpha * 255.0f);
 
     ctrPushQuad(gl, gl->whiteTexture,
@@ -691,7 +718,6 @@ static void ctrDrawLine(Renderer* renderer, float x1, float y1, float x2, float 
         cr, cg, cb, ca);
 }
 
-// 🔥 ИСПРАВЛЕНИЕ ЛИНИЙ С ЦВЕТОМ: Задействовали градиентный батчинг.
 static void ctrDrawLineColor(Renderer* renderer, float x1, float y1, float x2, float y2, float width, uint32_t color1, uint32_t color2, float alpha) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
     float dx = x2 - x1;
@@ -713,10 +739,10 @@ static void ctrDrawLineColor(Renderer* renderer, float x1, float y1, float x2, f
         x2 - px, y2 - py,
         x2 + px, y2 + py,
         0.5f, 0.5f, 0.5f, 0.5f,
-        c1r, c1g, c1b, ca,   // v0 (P1)
-        c1r, c1g, c1b, ca,   // v1 (P1)
-        c2r, c2g, c2b, ca,   // v2 (P2)
-        c2r, c2g, c2b, ca);  // v3 (P2)
+        c1r, c1g, c1b, ca,
+        c1r, c1g, c1b, ca,
+        c2r, c2g, c2b, ca,
+        c2r, c2g, c2b, ca);
 }
 
 static void ctrDrawTriangle(Renderer* renderer, float x1, float y1, float x2, float y2, float x3, float y3, bool outline) {
@@ -731,7 +757,7 @@ static void ctrDrawTriangle(Renderer* renderer, float x1, float y1, float x2, fl
         uint8_t b = BGR_B(renderer->drawColor);
         uint8_t a = (uint8_t)(renderer->drawAlpha * 255.0f);
 
-        // Превращаем треугольник в вырожденный квад для Батчера (дублируем последнюю вершину)
+        // Треугольник превращается в вырожденный квад, так как движок рендерит только квады
         ctrPushQuad(gl, gl->whiteTexture, x1, y1, x2, y2, x3, y3, x3, y3, 0.5f, 0.5f, 0.5f, 0.5f, r, g, b, a);
     }
 }
