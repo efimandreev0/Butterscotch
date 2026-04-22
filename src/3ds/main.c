@@ -231,16 +231,19 @@ int main(int argc, char* argv[]) {
             bool anyViewRendered = false;
             if (viewsEnabled) {
                 for (int vi = 0; vi < 8; vi++) {
-                    if (!activeRoom->views[vi].enabled) continue;
-                    int32_t viewX = activeRoom->views[vi].viewX;
-                    int32_t viewY = activeRoom->views[vi].viewY;
-                    int32_t viewW = activeRoom->views[vi].viewWidth;
-                    int32_t viewH = activeRoom->views[vi].viewHeight;
-                    int32_t portX = activeRoom->views[vi].portX;
-                    int32_t portY = activeRoom->views[vi].portY;
-                    int32_t portW = activeRoom->views[vi].portWidth;
-                    int32_t portH = activeRoom->views[vi].portHeight;
-                    float viewAngle = 0.0f;
+                    RuntimeView* view = &runner->views[vi];
+
+                    if (!view->enabled) continue;
+
+                    int32_t viewX = view->viewX;
+                    int32_t viewY = view->viewY;
+                    int32_t viewW = view->viewWidth;
+                    int32_t viewH = view->viewHeight;
+                    int32_t portX = view->portX;
+                    int32_t portY = view->portY;
+                    int32_t portW = view->portWidth;
+                    int32_t portH = view->portHeight;
+                    float viewAngle = view->viewAngle;
 
                     runner->viewCurrent = vi;
 
