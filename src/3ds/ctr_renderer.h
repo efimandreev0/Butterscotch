@@ -1,25 +1,49 @@
+// --- START OF FILE ctr_renderer.h ---
+
 #pragma once
 
 #include "renderer.h"
 #include <NovaGL.h>
 
-// ===[ CtrRenderer Struct ]===
-// 3DS renderer built on NovaGL (OpenGL ES 1.1 -> Citro3D translation layer).
+// Данные конкретного вырезанного куска из атласа (TPAG)
 typedef struct {
-    Renderer base; // Must be first field for struct embedding
+    bool isLoaded;
+    bool keepResident;
+    uint32_t lastUsedFrame;
 
-    GLuint* glTextures;       // one GL texture per TXTR page
-    float* uvScaleX;          // X Scaler
-    float* uvScaleY;          // Y Scaler
-    bool* textureLoaded;      // lazy loading: true once PNG decoded and uploaded
-    uint32_t* lastUsedFrame;  // last frame index that touched the page through a draw path
-    bool* keepResident;       // true if the page is required by the current room (don't auto-unload)
-    bool pendingResidencyUpdate; // onRoomChanged sets this; the next beginFrame performs the actual glDeleteTextures when GPU state is idle
-    uint32_t pendingResidencyMarkFrame;  // frame counter snapshot taken when residency was rebuilt
-    uint32_t pendingResidencyReadyFrame; // earliest frame when stale pages may actually be deleted
-    uint32_t textureCount;
+    GLuint tex;
+    float uvScaleX;
+    float uvScaleY;
 
-    GLuint whiteTexture; // 1x1 white pixel for primitives
+    float downscaleFactor;
+} CtrTpagData;
+
+// Кэш распакованной страницы атласа в ОЗУ (чтобы не статтерить при частом спавне)
+typedef struct {
+    uint8_t* pixels;
+    uint8_t* originalStbiPixels;
+    int width;
+    int height;
+    float dsFactor;
+    uint32_t lastExtractedFrame;
+} CtrDecodedPage;
+
+// ===[ CtrRenderer Struct ]===
+typedef struct {
+    Renderer base;
+
+    CtrTpagData* tpags;
+    uint32_t tpagCount;
+
+    int32_t* tpagToSprite;
+
+    CtrDecodedPage* decodedPages; // Массив кэшей атласов
+    uint32_t texturePageCount;
+
+    bool pendingResidencyUpdate;
+    uint32_t pendingResidencyReadyFrame;
+
+    GLuint whiteTexture;
 
     uint8_t* textBatchVertices;
     uint32_t textBatchQuadCapacity;
@@ -36,13 +60,9 @@ typedef struct {
     int32_t gameW;
     int32_t gameH;
 
-    uint32_t originalTexturePageCount;
-    uint32_t originalTpagCount;
-    uint32_t originalSpriteCount;
-
-    bool* textureFailed;
     uint32_t vramUsed;
 } CtrRenderer;
 
 Renderer* CtrRenderer_create(void);
 void CtrRenderer_prefetchSprite(Renderer* renderer, int32_t spriteIndex);
+// --- END OF FILE ctr_renderer.h ---

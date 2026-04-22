@@ -20,9 +20,9 @@
 #include "sdl12_audio_system.h"
 #include "utils.h"
 
-u32 __ctru_heap_size = 0;
-u32 __ctru_linear_heap_size = 45 * 1024 * 1024;
-u32 __stacksize__ = 64 * 1024;
+//u32 __ctru_heap_size = 0;
+//u32 __ctru_linear_heap_size = 45 * 1024 * 1024;
+//u32 __stacksize__ = 64 * 1024;
 
 #define DATA_WIN_PATH "sdmc:/3ds/butterscotch/data.win"
 #define BUTTERSCOTCH_NOVA_CMD_BUF_SIZE      (1024 * 1024)
