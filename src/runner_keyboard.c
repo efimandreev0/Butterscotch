@@ -11,8 +11,6 @@ static bool isValidKey(int32_t key) {
 RunnerKeyboardState* RunnerKeyboard_create(void) {
     RunnerKeyboardState* kb = safeCalloc(1, sizeof(RunnerKeyboardState));
     kb->lastKey = VK_NOKEY;
-    kb->lastChar[0] = 0;
-    kb->lastChar[1] = 0;
     return kb;
 }
 
@@ -36,10 +34,6 @@ void RunnerKeyboard_onKeyUp(RunnerKeyboardState* kb, int32_t gmlKeyCode) {
     if (!isValidKey(gmlKeyCode)) return;
     kb->keyDown[gmlKeyCode] = false;
     kb->keyReleased[gmlKeyCode] = true;
-}
-
-void RunnerKeyboard_onCharacter(RunnerKeyboardState* kb, unsigned int character) {
-    kb->lastChar[0] = (character >= ' ' && character <= '~') ? (char) character : 0;
 }
 
 bool RunnerKeyboard_check(RunnerKeyboardState* kb, int32_t gmlKeyCode) {

@@ -51,15 +51,15 @@ void initLogging() {
     fprintf(stderr, "This goes to stderr!\n");
 }
 void printMemoryStats() {
-    //struct mallinfo mi = mallinfo();
+    struct mallinfo mi = mallinfo();
 
-    //u32 linearFree = linearSpaceFree();
+    u32 linearFree = linearSpaceFree();
 
-    //float heapUsedMB = (float)mi.uordblks / 1024.0f / 1024.0f;
-    //float linearFreeMB = (float)linearFree / 1024.0f / 1024.0f;
+    float heapUsedMB = (float)mi.uordblks / 1024.0f / 1024.0f;
+    float linearFreeMB = (float)linearFree / 1024.0f / 1024.0f;
 
-    //fprintf(stderr, "[MEMORY] Heap Used: %.2f MB | LINEAR RAM FREE: %.2f MB\n",
-    //       heapUsedMB, linearFreeMB);
+    fprintf(stderr, "[MEMORY] Heap Used: %.2f MB | LINEAR RAM FREE: %.2f MB\n",
+           heapUsedMB, linearFreeMB);
 }
 int main(int argc, char* argv[]) {
     (void) argc; (void) argv;
@@ -101,7 +101,7 @@ int main(int argc, char* argv[]) {
             .parseAudo = true,
             .skipLoadingPreciseMasksForNonPreciseSprites = true,
             .lazyLoadRooms = true,
-            .eagerlyLoadedRooms = nullptr
+            //.eagerlyLoadedRooms = nullptr
         }
     );
 
@@ -139,10 +139,24 @@ int main(int argc, char* argv[]) {
     if (audio)
         audio->dataWin = dataWin;
 
-    Runner* runner = Runner_create(dataWin, vm, renderer, (FileSystem*) fs, audio);
-    runner->osType = OS_3DS;
-    runner->nativeWindow = nullptr;
-    runner->setWindowTitle = nullptr;
+    Runner* runner = Runner_create(dataWin, vm, (FileSystem*) fs);
+    if (!runner) {
+        if (audio) audio->dataWin = nullptr;
+        renderer->vtable->destroy(renderer);
+        if (audio) audio->vtable->destroy(audio);
+        N3dsFileSystem_destroy(fs);
+        VM_free(vm);
+        DataWin_free(dataWin);
+        cfguExit();
+        nova_fini();
+        gfxExit();
+        return 1;
+    }
+
+    runner->renderer = renderer;
+    runner->audioSystem = audio;
+
+    renderer->vtable->init(renderer, dataWin);
 
     Runner_initFirstRoom(runner);
 
@@ -184,7 +198,8 @@ int main(int argc, char* argv[]) {
 
         bool viewsEnabled = (activeRoom->flags & 1) != 0;
         if (viewsEnabled) {
-            int32_t maxRight = 0, maxBottom = 0;
+            int32_t maxRight = 0;
+            int32_t maxBottom = 0;
             for (int vi = 0; vi < 8; vi++) {
                 if (!activeRoom->views[vi].enabled) continue;
                 int32_t right = activeRoom->views[vi].portX + activeRoom->views[vi].portWidth;
@@ -231,52 +246,37 @@ int main(int argc, char* argv[]) {
             bool anyViewRendered = false;
             if (viewsEnabled) {
                 for (int vi = 0; vi < 8; vi++) {
-                    RuntimeView* view = &runner->views[vi];
+                    if (!activeRoom->views[vi].enabled) continue;
 
-                    if (!view->enabled) continue;
+                    int32_t viewX = activeRoom->views[vi].viewX;
+                    int32_t viewY = activeRoom->views[vi].viewY;
+                    int32_t viewW = activeRoom->views[vi].viewWidth;
+                    int32_t viewH = activeRoom->views[vi].viewHeight;
+                    int32_t portX = activeRoom->views[vi].portX;
+                    int32_t portY = activeRoom->views[vi].portY;
+                    int32_t portW = activeRoom->views[vi].portWidth;
+                    int32_t portH = activeRoom->views[vi].portHeight;
+                    float viewAngle = runner->viewAngles[vi];
 
-                    int32_t viewX = view->viewX;
-                    int32_t viewY = view->viewY;
-                    int32_t viewW = view->viewWidth;
-                    int32_t viewH = view->viewHeight;
-                    int32_t portX = view->portX;
-                    int32_t portY = view->portY;
-                    int32_t portW = view->portWidth;
-                    int32_t portH = view->portHeight;
-                    float viewAngle = view->viewAngle;
+                    if (viewW <= 0 || viewH <= 0 || portW <= 0 || portH <= 0) continue;
+                    if (!isfinite(viewAngle)) viewAngle = 0.0f;
 
                     runner->viewCurrent = vi;
-
-                    novaSet3DDepth(0.05f);
-                    renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH, portX, portY, portW, portH, viewAngle);
+                    renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH,
+                                                 portX, portY, portW, portH, viewAngle);
                     Runner_draw(runner);
                     renderer->vtable->endView(renderer);
-
-                    novaSet3DDepth(0.0f);
-                    int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : portW;
-                    int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : portH;
-                    renderer->vtable->beginGUI(renderer, guiW, guiH, portX, portY, portW, portH);
-                    Runner_drawGUI(runner);
-                    renderer->vtable->endGUI(renderer);
-
                     anyViewRendered = true;
                 }
             }
 
             if (!anyViewRendered) {
                 runner->viewCurrent = 0;
-
-                novaSet3DDepth(0.05f);
-                renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, 0, 0, gameW, gameH, 0.0f);
+                int32_t fw = (gameW > 0) ? gameW : 400;
+                int32_t fh = (gameH > 0) ? gameH : 240;
+                renderer->vtable->beginView(renderer, 0, 0, fw, fh, 0, 0, fw, fh, 0.0f);
                 Runner_draw(runner);
                 renderer->vtable->endView(renderer);
-
-                novaSet3DDepth(0.0f);
-                int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : gameW;
-                int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : gameH;
-                renderer->vtable->beginGUI(renderer, guiW, guiH, 0, 0, gameW, gameH);
-                Runner_drawGUI(runner);
-                renderer->vtable->endGUI(renderer);
             }
 
             runner->viewCurrent = 0;

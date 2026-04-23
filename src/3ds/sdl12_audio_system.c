@@ -514,6 +514,14 @@ static void sdlmSetChannelCount(AudioSystem* audio, int32_t count) {
 
 static void sdlmGroupLoad(AudioSystem* audio, int32_t groupIndex) { (void)audio; (void)groupIndex; }
 static bool sdlmGroupIsLoaded(AudioSystem* audio, int32_t groupIndex) { (void)audio; (void)groupIndex; return true; }
+static int32_t sdlmCreateStream(MAYBE_UNUSED AudioSystem* audio, const char* filename) {
+    fprintf(stderr, "Audio: audio_create_stream('%s') is not implemented on 3DS yet\n",
+            filename ? filename : "(null)");
+    return -1;
+}
+static bool sdlmDestroyStream(MAYBE_UNUSED AudioSystem* audio, MAYBE_UNUSED int32_t streamIndex) {
+    return false;
+}
 
 static AudioSystemVtable sdlmAudioSystemVtable = {
     .init = sdlmInit, .destroy = sdlmDestroy, .update = sdlmUpdate,
@@ -524,6 +532,7 @@ static AudioSystemVtable sdlmAudioSystemVtable = {
     .getTrackPosition = sdlmGetTrackPosition, .setTrackPosition = sdlmSetTrackPosition,
     .setMasterGain = sdlmSetMasterGain, .setChannelCount = sdlmSetChannelCount,
     .groupLoad = sdlmGroupLoad, .groupIsLoaded = sdlmGroupIsLoaded,
+    .createStream = sdlmCreateStream, .destroyStream = sdlmDestroyStream,
 };
 
 AudioSystem* SdlMixerAudioSystem_create(void) {

@@ -18,9 +18,6 @@ typedef struct {
     void (*endFrame)(Renderer* renderer);
     void (*beginView)(Renderer* renderer, int32_t viewX, int32_t viewY, int32_t viewW, int32_t viewH, int32_t portX, int32_t portY, int32_t portW, int32_t portH, float viewAngle);
     void (*endView)(Renderer* renderer);
-    // GUI pass: coordinates are (0,0)..(guiW,guiH) mapped to the current view's port rect. Called after endView.
-    void (*beginGUI)(Renderer* renderer, int32_t guiW, int32_t guiH, int32_t portX, int32_t portY, int32_t portW, int32_t portH);
-    void (*endGUI)(Renderer* renderer);
     void (*drawSprite)(Renderer* renderer, int32_t tpagIndex, float x, float y, float originX, float originY, float xscale, float yscale, float angleDeg, uint32_t color, float alpha);
     void (*drawSpritePart)(Renderer* renderer, int32_t tpagIndex, int32_t srcOffX, int32_t srcOffY, int32_t srcW, int32_t srcH, float x, float y, float xscale, float yscale, uint32_t color, float alpha);
     void (*drawRectangle)(Renderer* renderer, float x1, float y1, float x2, float y2, uint32_t color, float alpha, bool outline);
@@ -34,7 +31,6 @@ typedef struct {
     void (*deleteSprite)(Renderer* renderer, int32_t spriteIndex);
     // Optional: platform-specific tile rendering (nullptr = use default drawSpritePart path)
     void (*drawTile)(Renderer* renderer, RoomTile* tile, float offsetX, float offsetY);
-#ifdef __3DS__
     // Circle: filled (outline=false, triangle fan) or outlined (line strip) at (x,y) with
     // `radius` pixels, subdivided into `precision` segments. Uses passed `color` + `alpha`.
     void (*drawCircle)(Renderer* renderer, float x, float y, float radius, uint32_t color, float alpha, bool outline, int32_t precision);
@@ -47,6 +43,7 @@ typedef struct {
     // Ellipse: centered at (cx, cy) with radii (rx, ry), subdivided into `precision` segments.
     // Filled = triangle fan (center + N+1 perimeter), outlined = line strip.
     void (*drawEllipse)(Renderer* renderer, float cx, float cy, float rx, float ry, uint32_t color, float alpha, bool outline, int32_t precision);
+#ifdef __3DS__
     // Optional: the runner fires this after a room load completes. On 3DS this
     // rebuilds per-room texture residency and frees atlases that aren't needed
     // by the new room. nullptr on other platforms.
@@ -80,19 +77,14 @@ static int32_t Renderer_resolveTPAGIndex(DataWin* dataWin, int32_t spriteIndex, 
     int32_t frameIndex = subimg % (int32_t) sprite->textureCount;
     if (0 > frameIndex) frameIndex += (int32_t) sprite->textureCount;
 
+    // Use pre-resolved TPAG index array (populated at data.win load) — flat
+    // array read instead of hashmap lookup on every sprite draw.
+    if (sprite->textureIndices != NULL) {
+        return sprite->textureIndices[frameIndex];
+    }
+    // Fallback (shouldn't normally happen — load populates the cache)
     uint32_t tpagOffset = sprite->textureOffsets[frameIndex];
     return DataWin_resolveTPAG(dataWin, tpagOffset);
-}
-
-// Stretched: draw_sprite_stretched(sprite, subimg, x, y, w, h)
-// GM-compatible circle draw helper (uses renderer's current drawColor / drawAlpha / circlePrecision).
-// outline=false → filled, outline=true → 1-px outline.  Maps to `draw_circle(x,y,r,outline)` GML semantics.
-static void Renderer_drawCircle(Renderer* renderer, float x, float y, float radius, bool outline) {
-    if (renderer->vtable->drawCircle != nullptr) {
-        renderer->vtable->drawCircle(renderer, x, y, radius,
-                                     renderer->drawColor, renderer->drawAlpha,
-                                     outline, renderer->circlePrecision);
-    }
 }
 
 // Convenience: draw_sprite(sprite, subimg, x, y)
@@ -106,6 +98,42 @@ static void Renderer_drawSprite(Renderer* renderer, int32_t spriteIndex, int32_t
 }
 
 // Stretched: draw_sprite_stretched(sprite, subimg, x, y, w, h)
+// GM-compatible circle draw helper (uses renderer's current drawColor / drawAlpha / circlePrecision).
+// outline=false → filled, outline=true → 1-px outline.  Maps to `draw_circle(x,y,r,outline)` GML semantics.
+static void Renderer_drawCircle(Renderer* renderer, float x, float y, float radius, bool outline) {
+    if (renderer->vtable->drawCircle != nullptr) {
+        renderer->vtable->drawCircle(renderer, x, y, radius,
+                                     renderer->drawColor, renderer->drawAlpha,
+                                     outline, renderer->circlePrecision);
+    }
+}
+
+// GM-compatible rounded-rectangle helper.  GML `draw_roundrect(x1,y1,x2,y2,outline)` uses
+// default corner radius = 10×10.  For custom radii use `draw_roundrect_ext` (bypass this).
+static void Renderer_drawRoundrect(Renderer* renderer, float x1, float y1, float x2, float y2, bool outline) {
+    if (renderer->vtable->drawRoundrect != nullptr) {
+        renderer->vtable->drawRoundrect(renderer, x1, y1, x2, y2, 10.0f, 10.0f,
+                                        renderer->drawColor, renderer->drawAlpha,
+                                        outline, renderer->circlePrecision);
+    }
+}
+
+// GM-compatible ellipse helper.  GML `draw_ellipse(x1,y1,x2,y2,outline)` takes bounding
+// box — convert to center+radii for the vtable call.
+static void Renderer_drawEllipse(Renderer* renderer, float x1, float y1, float x2, float y2, bool outline) {
+    if (renderer->vtable->drawEllipse != nullptr) {
+        if (x1 > x2) { float t = x1; x1 = x2; x2 = t; }
+        if (y1 > y2) { float t = y1; y1 = y2; y2 = t; }
+        float cx = (x1 + x2) * 0.5f;
+        float cy = (y1 + y2) * 0.5f;
+        float rx = (x2 - x1) * 0.5f;
+        float ry = (y2 - y1) * 0.5f;
+        renderer->vtable->drawEllipse(renderer, cx, cy, rx, ry,
+                                      renderer->drawColor, renderer->drawAlpha,
+                                      outline, renderer->circlePrecision);
+    }
+}
+
 static void Renderer_drawSpriteStretched(Renderer* renderer, int32_t spriteIndex, int32_t subimg, float x, float y, float w, float h, uint32_t color, float alpha) {
     DataWin* dw = renderer->dataWin;
     int32_t tpagIndex = Renderer_resolveTPAGIndex(dw, spriteIndex, subimg);
@@ -255,37 +283,6 @@ static void Renderer_drawBackgroundTiled(Renderer* renderer, int32_t tpagIndex, 
             if (!tileX) break;
         }
         if (!tileY) break;
-    }
-}
-
-// Draws a tiled sprite across the room
-static void Renderer_drawSpriteTiled(Renderer* renderer, int32_t spriteIndex, int32_t subimg, float x, float y, float xscale, float yscale, float roomW, float roomH, uint32_t color, float alpha) {
-    DataWin* dw = renderer->dataWin;
-    int32_t tpagIndex = Renderer_resolveTPAGIndex(dw, spriteIndex, subimg);
-    if (0 > tpagIndex) return;
-
-    Sprite* sprite = &dw->sprt.sprites[spriteIndex];
-    TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
-
-    float originX = (float) sprite->originX;
-    float originY = (float) sprite->originY;
-
-    // The tile size is the original sprite dimensions scaled
-    float tileW = (float) tpag->boundingWidth * fabsf(xscale);
-    float tileH = (float) tpag->boundingHeight * fabsf(yscale);
-    if (0 >= tileW || 0 >= tileH) return;
-
-    // Compute the start position so tiles cover the entire room
-    // The origin-adjusted position wraps into the tile grid
-    float startX = fmodf(x - originX * fabsf(xscale), tileW);
-    if (startX > 0) startX -= tileW;
-    float startY = fmodf(y - originY * fabsf(yscale), tileH);
-    if (startY > 0) startY -= tileH;
-
-    for (float dy = startY; roomH > dy; dy += tileH) {
-        for (float dx = startX; roomW > dx; dx += tileW) {
-            renderer->vtable->drawSprite(renderer, tpagIndex, dx + originX * fabsf(xscale), dy + originY * fabsf(yscale), originX, originY, xscale, yscale, 0.0f, color, alpha);
-        }
     }
 }
 

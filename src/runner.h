@@ -1,12 +1,10 @@
 #pragma once
 
-#include <collision.h>
-
 #include "common.h"
 #include "audio_system.h"
+#include "collision.h"
 #include "data_win.h"
 #include "file_system.h"
-#include "ini.h"
 #include "instance.h"
 #include "renderer.h"
 #include "runner_keyboard.h"
@@ -23,7 +21,6 @@
 #define EVENT_DRAW       8
 #define EVENT_KEYPRESS   9
 #define EVENT_KEYRELEASE 10
-#define EVENT_PRECREATE  14
 
 // ===[ Step Sub-event Constants ]===
 #define STEP_NORMAL 0
@@ -49,62 +46,6 @@
 #define OTHER_END_OF_PATH   8
 #define OTHER_USER0         10
 
-#define MAX_VIEWS 8
-
-// ===[ Operating System Types ]===
-// See GameMaker-HTML5's Globals.js
-typedef enum {
-    OS_UNKNOWN = -1,
-    OS_WINDOWS,
-    OS_MACOSX,
-    OS_PSP,
-    OS_IOS,
-    OS_ANDROID,
-    OS_SYMBIAN,
-    OS_LINUX,
-    OS_WINPHONE,
-    OS_TIZEN,
-    OS_WIN8NATIVE,
-    OS_WIIU,
-    OS_3DS,
-    OS_PSVITA,
-    OS_BB10,
-    OS_PS4,
-    OS_XBOXONE,
-    OS_PS3,
-    OS_XBOX360,
-    OS_UWP,
-    OS_AMAZON,
-    OS_SWITCH,
-
-    OS_LLVM_WIN32 = 65536,
-    OS_LLVM_MACOSX,
-    OS_LLVM_PSP,
-    OS_LLVM_IOS,
-    OS_LLVM_ANDROID,
-    OS_LLVM_SYMBIAN,
-    OS_LLVM_LINUX,
-    OS_LLVM_WINPHONE
-} YoYoOperatingSystem;
-
-typedef struct {
-    bool enabled;
-    int32_t viewX;
-    int32_t viewY;
-    int32_t viewWidth;
-    int32_t viewHeight;
-    int32_t portX;
-    int32_t portY;
-    int32_t portWidth;
-    int32_t portHeight;
-    uint32_t borderX;
-    uint32_t borderY;
-    int32_t speedX;
-    int32_t speedY;
-    int32_t objectId;
-    float viewAngle;
-} RuntimeView;
-
 typedef struct {
     bool visible;
     bool foreground;
@@ -122,142 +63,11 @@ typedef struct {
     float offsetY;
 } TileLayerState;
 
-// Mutable background element on a dynamically-created layer (layer_background_create).
-// For parsed room layers, RoomLayerBackgroundData is used directly and this struct is unused.
-typedef struct {
-    int32_t spriteIndex; // SPRT index (-1 = none)
-    bool visible;
-    bool htiled;
-    bool vtiled;
-    bool stretch;
-    float xScale;
-    float yScale;
-    uint32_t blend; // BGR
-    float alpha;
-    float xOffset; // element-local offset (in addition to layer offset)
-    float yOffset;
-} RuntimeBackgroundElement;
-
-// Mutable sprite element on an Assets layer. Populated from RoomLayerAssetsData.sprites at room init, can be removed at runtime via layer_sprite_destroy (used by language variant selection).
-typedef struct {
-    int32_t spriteIndex; // SPRT index (-1 = none/destroyed)
-    int32_t x;
-    int32_t y;
-    float scaleX;
-    float scaleY;
-    uint32_t color; // BGR + alpha
-    float animationSpeed;
-    uint32_t animationSpeedType;
-    float frameIndex;
-    float rotation;
-} RuntimeSpriteElement;
-
-// Values match GML layerelementtype_* enum so layer_get_element_type can return them as-is.
-typedef enum {
-    RuntimeLayerElementType_Background = 1,
-    RuntimeLayerElementType_Sprite = 4,
-} RuntimeLayerElementType;
-
-typedef struct {
-    uint32_t id;
-    RuntimeLayerElementType type;
-    RuntimeBackgroundElement* backgroundElement; // owned; nullptr if type != Background
-    RuntimeSpriteElement* spriteElement; // owned; nullptr if type != Sprite
-} RuntimeLayerElement;
-
-// Runtime-mutable state for a GMS2 room layer. Parsed layers are populated at room load from RoomLayer and share IDs with the parsed data.
-// Dynamic layers are created via layer_create and carry their own name + element list; they don't correspond to any RoomLayer.
-typedef struct {
-    uint32_t id;
-    int32_t depth;
-    bool visible;
-    float xOffset;
-    float yOffset;
-    float hSpeed;
-    float vSpeed;
-    bool dynamic; // true = created at runtime via layer_create
-    char* dynamicName; // owned; only populated for dynamic layers
-    RuntimeLayerElement* elements; // stb_ds array; only populated for dynamic layers
-} RuntimeLayer;
-
 // stb_ds hashmap entry: depth -> tile layer state
 typedef struct {
     int32_t key;
     TileLayerState value;
 } TileLayerMapEntry;
-
-// stb_ds hashmap entry for ds_map: string key -> RValue
-typedef struct {
-    char* key;
-    RValue value;
-} DsMapEntry;
-
-// ds_list: dynamic array of RValues
-typedef struct {
-    RValue* items; // stb_ds dynamic array of RValues
-} DsList;
-
-// ===[ GML Buffer System ]===
-
-// Buffer type constants (matching GML)
-#define GML_BUFFER_FIXED 0
-#define GML_BUFFER_GROW  1
-#define GML_BUFFER_WRAP  2
-#define GML_BUFFER_FAST  3
-
-// Buffer data type constants (matching GML)
-#define GML_BUFTYPE_U8      1
-#define GML_BUFTYPE_S8      2
-#define GML_BUFTYPE_U16     3
-#define GML_BUFTYPE_S16     4
-#define GML_BUFTYPE_U32     5
-#define GML_BUFTYPE_S32     6
-#define GML_BUFTYPE_F16     7
-#define GML_BUFTYPE_F32     8
-#define GML_BUFTYPE_F64     9
-#define GML_BUFTYPE_BOOL   10
-#define GML_BUFTYPE_STRING 11
-#define GML_BUFTYPE_U64    12
-#define GML_BUFTYPE_TEXT   13
-
-// Buffer seek mode constants (matching GML)
-#define GML_BUFFER_SEEK_START    0
-#define GML_BUFFER_SEEK_RELATIVE 1
-#define GML_BUFFER_SEEK_END      2
-
-typedef struct {
-    uint8_t* data;       // raw byte storage
-    int32_t size;        // allocated size in bytes
-    int32_t position;    // current read/write cursor
-    int32_t usedSize;    // high-water mark for grow buffers
-    int32_t alignment;   // byte alignment for read/write operations
-    int32_t type;        // GML_BUFFER_FIXED, _GROW, _WRAP, _FAST
-    bool isValid;        // false after buffer_delete (tombstone)
-} GmlBuffer;
-
-// Motion planning grid used by mp_grid_* builtins. Cell value 1 = blocked.
-typedef struct {
-    bool inUse;
-    GMLReal left;
-    GMLReal top;
-    int32_t hcells;
-    int32_t vcells;
-    GMLReal cellWidth;
-    GMLReal cellHeight;
-    uint8_t* cells;
-} MpGrid;
-
-// Open text file handle for GML file_text_* functions
-#define MAX_OPEN_TEXT_FILES 32
-typedef struct {
-    char* content; // full file content (for read mode)
-    char* writeBuffer; // accumulated text (for write mode)
-    char* filePath; // relative path (for write mode, to flush on close)
-    int32_t readPos; // current byte position in content (read mode)
-    int32_t contentLen; // length of content string
-    bool isWriteMode;
-    bool isOpen;
-} OpenTextFile;
 
 // Saved state for persistent rooms. When leaving a persistent room, instance state
 // and visual properties are saved here. When returning, they are restored instead
@@ -269,8 +79,6 @@ typedef struct {
     uint32_t backgroundColor;
     bool drawBackgroundColor;
     TileLayerMapEntry* tileLayerMap; // stb_ds hashmap: depth -> tile layer state
-    RuntimeLayer* runtimeLayers; // stb_ds array, index-parallel to currentRoom->layers
-    RuntimeView views[MAX_VIEWS];
 } SavedRoomState;
 
 typedef struct Runner {
@@ -288,66 +96,68 @@ typedef struct Runner {
     int frameCount;
     uint32_t nextInstanceId;
     RunnerKeyboardState* keyboard;
-    RuntimeView views[MAX_VIEWS];
     RuntimeBackground backgrounds[8];
     uint32_t backgroundColor;      // runtime-mutable (BGR format)
     bool drawBackgroundColor;
     bool shouldExit;
     bool debugMode;
-    void* nativeWindow;
-    void (*setWindowTitle)(void* window, const char* title);
     TileLayerMapEntry* tileLayerMap; // stb_ds hashmap: depth -> tile layer state
-    RuntimeLayer* runtimeLayers; // stb_ds array, index-parallel to currentRoom->layers for parsed entries; dynamic entries appended
-    uint32_t nextLayerId;        // counter for IDs of layers/elements created at runtime
     SavedRoomState* savedRoomStates; // array of size dataWin->room.count, for persistent room support
+    float viewAngles[8]; // runtime-only view_angle per view (not stored in data.win)
     int32_t viewCurrent; // index of the view currently being drawn (for view_current)
     struct { char* key; int value; }* disabledObjects; // stb_ds string hashmap, nullptr = no filtering
     struct { int key; Instance* value; }* instancesToId;
-    bool forceDrawDepth;
-    // Dummy instance to serve as "self" during GLOB script execution
-    // In bytecode version 17+, global init scripts store method values on "self" via Pop.v.v
-    // The real runner uses a persistent YYObjectBase for this, the YYObjectBase is a "parent" of Instance
-    // For now, we'll use a dummy Instance with objectIndex = -1 as a hack
-    Instance* globalScopeInstance;
-    // Struct instances created by @@NewGMLObject@@. Reuses Instance with objectIndex=-1.
-    // Tracked separately so event/step/draw iteration over runner->instances stays clean.
-    Instance** structInstances;
-    int32_t forcedDepth;
+    bool isGMS2;
 
-    // ===[ Builtin function state ]===
-    DsMapEntry** dsMapPool; // stb_ds array of stb_ds hashmaps
-    DsList* dsListPool; // stb_ds array of DsList
-    GmlBuffer* gmlBufferPool; // stb_ds array of GmlBuffer
-    MpGrid* mpGridPool; // stb_ds array of motion-planning grids
+    // ===[ Per-frame bbox cache — computed once, used by collision builtins + dispatchCollisionEvents ]===
+    InstanceBBox* bboxCache;     // array parallel to instances[], recomputed each frame
+    int32_t bboxCacheCount;      // current size (matches arrlen(instances))
+    int32_t bboxCacheFrame;      // frameCount when last computed (-1 = invalid)
 
-    // Motion planning potential field settings
-    GMLReal mpPotMaxrot;
-    GMLReal mpPotStep;
-    GMLReal mpPotAhead;
-    bool mpPotOnSpot;
+    // VM opcode trace (for PSP crash diagnostics — only when VM_PSP_TRACE defined).
+    // traceEnabled gates the actual logging — toggle via SELECT button on PSP.
+    // tracePath is kept so we can close+reopen the file for each opcode write:
+    // PSP libc only syncs on fclose, so we have to close/reopen to survive crashes.
+    FILE* traceFile;
+    char* tracePath;
+    bool traceEnabled;
 
-    // Legacy audio_play_music / audio_stop_music tracking
-    int32_t lastMusicInstance;
+    // ===[ Call profiler — enabled by --profile-calls <file> ]===
+    FILE* profileFile;                              // output file (NULL = disabled)
+    struct { char* key; int value; }* profileCalls; // stb_ds: codeName -> call count per frame
+    struct { char* key; int value; }* profileTimes; // stb_ds: codeName -> total microseconds per frame
 
-    // INI file state
-    IniFile* currentIni;
-    char* currentIniPath;
-    bool currentIniDirty;
-    // Some games (like Undertale) open and close the same INI file EVERY SINGLE FRAME!
-    // While on modern devices this isn't a huge deal, this WILL cause issues on devices that have less than stellar file systems (like the PlayStation 2)
-    // To avoid unnecessary disk reads, we cache the last-closed INI and reuse it on reopen
-    IniFile* cachedIni; // Cache of last-closed INI (for fast reopen)
-    char* cachedIniPath;
+    // Per-frame step phase timings (us), reset after each profile flush
+    uint32_t phaseUsAnim, phaseUsBeginStep, phaseUsKeyboard, phaseUsAlarms;
+    uint32_t phaseUsNormalStep, phaseUsMotion, phaseUsCollision, phaseUsEndStep;
+    uint32_t phaseUsOutsideRoom;
 
-    // Text file handles for file_text_* functions
-    OpenTextFile openTextFiles[MAX_OPEN_TEXT_FILES];
+    // Per-frame draw phase timings (us)
+    uint32_t drawPhaseSortList, drawPhaseBuildList, drawPhaseNormal, drawPhaseGUI;
+    // Sub-breakdown of drawPhaseNormal: localize where the Nrm ms go.
+    uint32_t drawNrmBuildDrawables; // building drawables[] (instance + tile loops)
+    uint32_t drawNrmQsort;          // sorting drawables by depth
+    uint32_t drawNrmTiles;          // calls to Renderer_drawTile (sum over drawable loop)
+    uint32_t drawNrmInstVM;         // DRAW_INSTANCE via VM_executeCode
+    uint32_t drawNrmInstNative;     // DRAW_INSTANCE via native func
+    uint32_t drawNrmInstDrawSelf;   // DRAW_INSTANCE fallthrough to Renderer_drawSelf (no Draw_0)
+    uint32_t drawNrmCountTiles, drawNrmCountInstVM, drawNrmCountInstNative, drawNrmCountInstDrawSelf;
+    // Top-3 slowest Draw_0 scripts this frame (via VM). Name pointer into DataWin code entries.
+    const char* topVmDrawName[3];
+    uint32_t    topVmDrawTimeUs[3];
+    int32_t     topVmDrawCalls[3];
 
-    // Used by the "os_type" built-in
-    YoYoOperatingSystem osType;
+    // Per-frame Step-phase (non-Draw) script accumulator + top-3.
+    // stepCache is filled during Runner_step() across every VM/native event
+    // dispatch EXCEPT EVENT_DRAW; extracted into topVmStep* at end of step.
+    // Covers: Step_Begin/Normal/End, Keyboard, Alarm, Collision, Other_*,
+    // Animation_End, End_Of_Path, Outside_Room — everything under S timer.
+    struct RunnerStepCacheEntry { int32_t codeId; uint32_t timeUs; int32_t calls; } stepCache[256];
+    int32_t stepCacheCount;
+    const char* topVmStepName[3];
+    uint32_t    topVmStepTimeUs[3];
+    int32_t     topVmStepCalls[3];
 
-    // GUI layer size (display_set_gui_size). 0 = auto-match the current view's port size.
-    int32_t guiWidth;
-    int32_t guiHeight;
     // ===[ Instance-by-object cache ]===
     // Lazily rebuilt when arrlen(instances) != cachedInstCount.
     // Allows executeEventForAll to iterate only objectIndexes that exist in the
@@ -359,59 +169,30 @@ typedef struct Runner {
     uint8_t* oiInListBitmap;              // bitmap flag so we only add to activeOIsList once per oi
     int32_t instancesByObjMax;    // allocated size (== dataWin->objt.count at init)
     int32_t cachedInstCount;      // arrlen(instances) at last rebuild (-1 = force rebuild)
-
-    // ===[ Call profiler — enabled by --profile-calls <file> ]===
-    FILE* profileFile;                              // output file (NULL = disabled)
-    struct { char* key; int value; }* profileCalls; // stb_ds: codeName -> call count per frame
-    struct { char* key; int value; }* profileTimes; // stb_ds: codeName -> total microseconds per frame
-
-    uint32_t drawPhaseSortList, drawPhaseBuildList, drawPhaseNormal, drawPhaseGUI;
-    uint32_t drawNrmBuildDrawables; // building drawables[] (instance + tile loops)
-    uint32_t drawNrmQsort;          // sorting drawables by depth
-    uint32_t drawNrmTiles;          // calls to Renderer_drawTile (sum over drawable loop)
-    uint32_t drawNrmInstVM;         // DRAW_INSTANCE via VM_executeCode
-    uint32_t drawNrmInstNative;     // DRAW_INSTANCE via native func
-    uint32_t drawNrmInstDrawSelf;   // DRAW_INSTANCE fallthrough to Renderer_drawSelf (no Draw_0)
-    uint32_t drawNrmCountTiles, drawNrmCountInstVM, drawNrmCountInstNative, drawNrmCountInstDrawSelf;
-
-    const char* topVmDrawName[3];
-    uint32_t    topVmDrawTimeUs[3];
-    int32_t     topVmDrawCalls[3];
-
-    // ===[ Per-frame bbox cache — computed once, used by collision builtins + dispatchCollisionEvents ]===
-    InstanceBBox* bboxCache;     // array parallel to instances[], recomputed each frame
-    int32_t bboxCacheCount;      // current size (matches arrlen(instances))
-    int32_t bboxCacheFrame;      // frameCount when last computed (-1 = invalid)
-
-    struct RunnerStepCacheEntry { int32_t codeId; uint32_t timeUs; int32_t calls; } stepCache[256];
-    int32_t stepCacheCount;
-    const char* topVmStepName[3];
-    uint32_t    topVmStepTimeUs[3];
-    int32_t     topVmStepCalls[3];
 } Runner;
 
 const char* Runner_getEventName(int32_t eventType, int32_t eventSubtype);
-void Runner_reset(Runner* runner);
-Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileSystem* fileSystem, AudioSystem* audioSystem);
+Runner* Runner_create(DataWin* dataWin, VMContext* vm, FileSystem* fileSystem);
 void Runner_initFirstRoom(Runner* runner);
 void Runner_step(Runner* runner);
 void Runner_executeEvent(Runner* runner, Instance* instance, int32_t eventType, int32_t eventSubtype);
 void Runner_executeEventFromObject(Runner* runner, Instance* instance, int32_t startObjectIndex, int32_t eventType, int32_t eventSubtype);
 void Runner_executeEventForAll(Runner* runner, int32_t eventType, int32_t eventSubtype);
 void Runner_draw(Runner* runner);
-void Runner_drawGUI(Runner* runner);
 void Runner_drawBackgrounds(Runner* runner, bool foreground);
 void Runner_scrollBackgrounds(Runner* runner);
 Instance* Runner_createInstance(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex);
-Instance* Runner_createInstanceWithDepth(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex, int32_t depth);
-Instance* Runner_copyInstance(Runner* runner, Instance* source, bool performEvent);
 void Runner_destroyInstance(Runner* runner, Instance* inst);
 void Runner_cleanupDestroyedInstances(Runner* runner);
+
+// Per-frame bbox cache: computed once, used by collision builtins + dispatchCollisionEvents
+void Runner_ensureBBoxCache(Runner* runner);
+static inline InstanceBBox Runner_getCachedBBox(Runner* runner, int32_t instanceIdx) {
+    Runner_ensureBBoxCache(runner);
+    if (instanceIdx >= 0 && instanceIdx < runner->bboxCacheCount)
+        return runner->bboxCache[instanceIdx];
+    return (InstanceBBox){0, 0, 0, 0, false};
+}
 void Runner_dumpState(Runner* runner);
 char* Runner_dumpStateJson(Runner* runner);
 void Runner_free(Runner* runner);
-RuntimeLayer* Runner_findRuntimeLayerById(Runner* runner, int32_t id);
-RoomLayer* Runner_findRoomLayerById(Runner* runner, int32_t id);
-RuntimeLayerElement* Runner_findLayerElementById(Runner* runner, int32_t elementId, RuntimeLayer** outLayer);
-uint32_t Runner_getNextLayerId(Runner* runner);
-void Runner_freeRuntimeLayer(RuntimeLayer* runtimeLayer);

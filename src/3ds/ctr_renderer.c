@@ -33,6 +33,32 @@ typedef struct {
     uint8_t r, g, b, a;
 } CtrPackedVertex;
 
+static inline bool ctrIsFinite(float v) {
+    return isfinite(v);
+}
+
+static inline float ctrSafeFloat(float v, float fallback) {
+    return isfinite(v) ? v : fallback;
+}
+
+static inline float ctrSafeCoord(float v) {
+    return isfinite(v) ? v : 0.0f;
+}
+
+static inline float ctrSafeScale(float v) {
+    return isfinite(v) ? v : 1.0f;
+}
+
+static inline float ctrSafeAngle(float v) {
+    return isfinite(v) ? v : 0.0f;
+}
+
+static inline uint8_t ctrSafeAlpha(float alpha) {
+    if (!isfinite(alpha) || alpha <= 0.0f) return 0;
+    if (alpha >= 1.0f) return 255;
+    return (uint8_t)(alpha * 255.0f + 0.5f);
+}
+
 static void ctrFlushBatch(CtrRenderer* gl) {
     if (gl->quadBatchCount == 0 || gl->quadBatchTexture == 0 || gl->quadBatchVertices == nullptr) return;
 
@@ -52,6 +78,9 @@ static void ctrPushQuadGradient(CtrRenderer* gl, GLuint textureId,
     uint8_t r3, uint8_t g3, uint8_t b3, uint8_t a3)
 {
     if (gl->quadBatchVertices == nullptr || textureId == 0) return;
+    if (!ctrIsFinite(x0) || !ctrIsFinite(y0) || !ctrIsFinite(x1) || !ctrIsFinite(y1) ||
+        !ctrIsFinite(x2) || !ctrIsFinite(y2) || !ctrIsFinite(x3) || !ctrIsFinite(y3) ||
+        !ctrIsFinite(u0) || !ctrIsFinite(v0) || !ctrIsFinite(u1) || !ctrIsFinite(v1)) return;
 
     if (gl->quadBatchCount > 0 && gl->quadBatchTexture != textureId) {
         ctrFlushBatch(gl);
@@ -424,10 +453,10 @@ static void ctrBeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int3
         prefetchRoomTextures(gl);
     }
 
-    gl->windowW = windowW;
-    gl->windowH = windowH;
-    gl->gameW = gameW;
-    gl->gameH = gameH;
+    gl->windowW = (windowW > 0) ? windowW : 1;
+    gl->windowH = (windowH > 0) ? windowH : 1;
+    gl->gameW = (gameW > 0) ? gameW : 1;
+    gl->gameH = (gameH > 0) ? gameH : 1;
 
     if (g_frameCounter > 0 && g_frameCounter % LRU_SWEEP_INTERVAL == 0) {
         for (uint32_t i = 0; i < gl->tpagCount; i++) {
@@ -439,12 +468,49 @@ static void ctrBeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int3
     }
 }
 
+static void ctrApplyViewportAndScissor(CtrRenderer* gl, int32_t portX, int32_t portY, int32_t portW, int32_t portH) {
+    int32_t vpX = 0;
+    int32_t vpY = 0;
+    int32_t vpW = gl->windowW;
+    int32_t vpH = gl->windowH;
+
+    if (portW > 0 && portH > 0) {
+        vpX = portX;
+        vpY = gl->windowH - (portY + portH);
+        vpW = portW;
+        vpH = portH;
+
+        if (vpX < 0) {
+            vpW += vpX;
+            vpX = 0;
+        }
+        if (vpY < 0) {
+            vpH += vpY;
+            vpY = 0;
+        }
+        if (vpX + vpW > gl->windowW) vpW = gl->windowW - vpX;
+        if (vpY + vpH > gl->windowH) vpH = gl->windowH - vpY;
+
+        if (vpW > 0 && vpH > 0) {
+            glViewport(vpX, vpY, vpW, vpH);
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(vpX, vpY, vpW, vpH);
+            return;
+        }
+    }
+
+    glViewport(0, 0, gl->windowW, gl->windowH);
+    glDisable(GL_SCISSOR_TEST);
+}
+
 static void ctrBeginView(Renderer* renderer, int32_t viewX, int32_t viewY, int32_t viewW, int32_t viewH, int32_t portX, int32_t portY, int32_t portW, int32_t portH, float viewAngle) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
     ctrFlushBatch(gl);
     glBindTexture(GL_TEXTURE_2D, 0);
-    glViewport(0, 0, gl->windowW, gl->windowH);
-    glDisable(GL_SCISSOR_TEST);
+    ctrApplyViewportAndScissor(gl, portX, portY, portW, portH);
+
+    if (viewW <= 0) viewW = 1;
+    if (viewH <= 0) viewH = 1;
 
     Matrix4f projection;
     Matrix4f_identity(&projection);
@@ -456,7 +522,7 @@ static void ctrBeginView(Renderer* renderer, int32_t viewX, int32_t viewY, int32
         (float)viewY,
         -1.0f, 1.0f);
 
-    if (viewAngle != 0.0f) {
+    if (ctrIsFinite(viewAngle) && viewAngle != 0.0f) {
         float cx = (float) viewX + (float) viewW / 2.0f;
         float cy = (float) viewY + (float) viewH / 2.0f;
         Matrix4f rot;
@@ -481,8 +547,10 @@ static void ctrBeginGUI(Renderer* renderer, int32_t guiW, int32_t guiH, int32_t 
     CtrRenderer* gl = (CtrRenderer*) renderer;
     ctrFlushBatch(gl);
     glBindTexture(GL_TEXTURE_2D, 0);
-    glViewport(0, 0, gl->windowW, gl->windowH);
-    glDisable(GL_SCISSOR_TEST);
+    ctrApplyViewportAndScissor(gl, portX, portY, portW, portH);
+
+    if (guiW <= 0) guiW = 1;
+    if (guiH <= 0) guiH = 1;
 
     Matrix4f projection;
     Matrix4f_identity(&projection);
@@ -587,17 +655,23 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
     for (uint32_t li = 0; li < room->layerCount; li++) {
         RoomLayer* layer = &room->layers[li];
         if (layer->backgroundData) markSpriteResident(gl, dw, layer->backgroundData->spriteIndex);
-        if (layer->tilesData) markBackgroundResident(gl, dw, layer->tilesData->backgroundIndex);
+        //if (layer->tilesData) markBackgroundResident(gl, dw, layer->tilesData->backgroundIndex);
         if (layer->assetsData) {
             for (uint32_t i = 0; i < layer->assetsData->legacyTileCount; i++) {
                 if (layer->assetsData->legacyTiles[i].useSpriteDefinition) markSpriteResident(gl, dw, layer->assetsData->legacyTiles[i].backgroundDefinition);
                 else markBackgroundResident(gl, dw, layer->assetsData->legacyTiles[i].backgroundDefinition);
             }
-            for (uint32_t i = 0; i < layer->assetsData->spriteCount; i++) markSpriteResident(gl, dw, layer->assetsData->sprites[i].spriteIndex);
+            for (uint32_t i = 0; i < layer->assetsData->spriteCount; i++) markSpriteResident(gl, dw, layer->assetsData->sprites[i].spritePtr);
         }
     }
 
 unload_stale:
+    uint32_t residentCount = 0;
+    for (uint32_t i = 0; i < gl->tpagCount; i++) {
+        if (gl->tpags[i].keepResident) residentCount++;
+    }
+    fprintf(stderr, "CTR: Room residency queued for %s (%u tpags)\n",
+            room->name ? room->name : "(null)", residentCount);
     gl->pendingResidencyUpdate = true;
     gl->pendingResidencyReadyFrame = g_frameCounter;
 }
@@ -609,9 +683,13 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
     DataWin* dw = renderer->dataWin;
 
     if (tpagIndex < 0 || (uint32_t)tpagIndex >= gl->tpagCount) return;
+    if (!ctrIsFinite(x) || !ctrIsFinite(y) || !ctrIsFinite(originX) || !ctrIsFinite(originY)) return;
+    xscale = ctrSafeScale(xscale);
+    yscale = ctrSafeScale(yscale);
+    angleDeg = ctrSafeAngle(angleDeg);
+    uint8_t a = ctrSafeAlpha(alpha);
 
     if (!gl->tpags[tpagIndex].isLoaded) {
-        // Динамическая подгрузка с последующим сбросом резидентности
         loadDynamicSprite(gl, dw, tpagIndex);
         if (!gl->tpags[tpagIndex].isLoaded) return;
     }
@@ -624,7 +702,6 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
     float ly1 = ly0 + ((float) tpag->sourceHeight) * yscale;
 
     uint8_t r = BGR_R(color); uint8_t g = BGR_G(color); uint8_t b = BGR_B(color);
-    uint8_t a = (uint8_t)(alpha * 255.0f);
 
     if (angleDeg == 0.0f) {
         float cx = roundf(x);
@@ -640,6 +717,7 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
         float angleRad = -angleDeg * ((float) M_PI / 180.0f);
         float c = cosf(angleRad);
         float s = sinf(angleRad);
+        if (!ctrIsFinite(c) || !ctrIsFinite(s)) return;
 
         float x0 = lx0 * c - ly0 * s + x; float y0 = lx0 * s + ly0 * c + y;
         float x1 = lx1 * c - ly0 * s + x; float y1 = lx1 * s + ly0 * c + y;
@@ -656,6 +734,10 @@ static void ctrDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t src
     DataWin* dw = renderer->dataWin;
 
     if (tpagIndex < 0 || (uint32_t)tpagIndex >= gl->tpagCount) return;
+    if (!ctrIsFinite(x) || !ctrIsFinite(y)) return;
+    xscale = ctrSafeScale(xscale);
+    yscale = ctrSafeScale(yscale);
+    uint8_t a = ctrSafeAlpha(alpha);
 
     if (!gl->tpags[tpagIndex].isLoaded) {
         loadDynamicSprite(gl, dw, tpagIndex);
@@ -663,7 +745,6 @@ static void ctrDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t src
     }
 
     uint8_t r = BGR_R(color); uint8_t g = BGR_G(color); uint8_t b = BGR_B(color);
-    uint8_t a = (uint8_t)(alpha * 255.0f);
 
     float cx = roundf(x);
     float cy = roundf(y);
@@ -675,13 +756,23 @@ static void ctrDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t src
 }
 
 static void emitColoredQuad(CtrRenderer* gl, float x0, float y0, float x1, float y1, float r, float g, float b, float a) {
-    uint8_t cr = (uint8_t)(r * 255.0f); uint8_t cg = (uint8_t)(g * 255.0f);
-    uint8_t cb = (uint8_t)(b * 255.0f); uint8_t ca = (uint8_t)(a * 255.0f);
+    if (!ctrIsFinite(x0) || !ctrIsFinite(y0) || !ctrIsFinite(x1) || !ctrIsFinite(y1) ||
+        !ctrIsFinite(r) || !ctrIsFinite(g) || !ctrIsFinite(b) || !ctrIsFinite(a)) return;
+    if (a <= 0.0f) return;
+    if (a > 1.0f) a = 1.0f;
+    if (r < 0.0f) r = 0.0f; if (r > 1.0f) r = 1.0f;
+    if (g < 0.0f) g = 0.0f; if (g > 1.0f) g = 1.0f;
+    if (b < 0.0f) b = 0.0f; if (b > 1.0f) b = 1.0f;
+    uint8_t cr = (uint8_t)(r * 255.0f + 0.5f);
+    uint8_t cg = (uint8_t)(g * 255.0f + 0.5f);
+    uint8_t cb = (uint8_t)(b * 255.0f + 0.5f);
+    uint8_t ca = (uint8_t)(a * 255.0f + 0.5f);
     ctrPushQuad(gl, gl->whiteTexture, x0, y0, x1, y0, x1, y1, x0, y1, 0.5f, 0.5f, 0.5f, 0.5f, cr, cg, cb, ca);
 }
 
 static void ctrDrawRectangle(Renderer* renderer, float x1, float y1, float x2, float y2, uint32_t color, float alpha, bool outline) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
+    if (!ctrIsFinite(x1) || !ctrIsFinite(y1) || !ctrIsFinite(x2) || !ctrIsFinite(y2)) return;
     float r = (float) BGR_R(color) / 255.0f; float g = (float) BGR_G(color) / 255.0f; float b = (float) BGR_B(color) / 255.0f;
     if (outline) {
         emitColoredQuad(gl, x1, y1, x2 + 1.0f, y1 + 1.0f, r, g, b, alpha);
@@ -696,8 +787,9 @@ static void ctrDrawRectangle(Renderer* renderer, float x1, float y1, float x2, f
 // 🔥 ИДЕАЛЬНЫЕ ПРЯМЫЕ ЛИНИИ (Оружие, рамки, UI боев)
 static void ctrDrawLine(Renderer* renderer, float x1, float y1, float x2, float y2, float width, uint32_t color, float alpha) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
+    if (!ctrIsFinite(x1) || !ctrIsFinite(y1) || !ctrIsFinite(x2) || !ctrIsFinite(y2) || !ctrIsFinite(width)) return;
     uint8_t cr = BGR_R(color); uint8_t cg = BGR_G(color); uint8_t cb = BGR_B(color);
-    uint8_t ca = (uint8_t)(alpha * 255.0f);
+    uint8_t ca = ctrSafeAlpha(alpha);
 
     // Специальный фикс для ровных горизонтальных/вертикальных линий UI.
     // +1.0f гарантирует, что GameMaker закрасит последнюю координату
@@ -739,9 +831,10 @@ static void ctrDrawLine(Renderer* renderer, float x1, float y1, float x2, float 
 // 🔥 ИДЕАЛЬНЫЕ ПРЯМЫЕ ЛИНИИ (с градиентом)
 static void ctrDrawLineColor(Renderer* renderer, float x1, float y1, float x2, float y2, float width, uint32_t color1, uint32_t color2, float alpha) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
+    if (!ctrIsFinite(x1) || !ctrIsFinite(y1) || !ctrIsFinite(x2) || !ctrIsFinite(y2) || !ctrIsFinite(width)) return;
     uint8_t c1r = BGR_R(color1); uint8_t c1g = BGR_G(color1); uint8_t c1b = BGR_B(color1);
     uint8_t c2r = BGR_R(color2); uint8_t c2g = BGR_G(color2); uint8_t c2b = BGR_B(color2);
-    uint8_t ca = (uint8_t)(alpha * 255.0f);
+    uint8_t ca = ctrSafeAlpha(alpha);
 
     if (width <= 1.0f && (fabsf(x1 - x2) < 0.01f || fabsf(y1 - y2) < 0.01f)) {
         float rx1 = roundf(fminf(x1, x2));
@@ -794,6 +887,7 @@ static void ctrDrawLineColor(Renderer* renderer, float x1, float y1, float x2, f
 
 static void ctrDrawTriangle(Renderer* renderer, float x1, float y1, float x2, float y2, float x3, float y3, bool outline) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
+    if (!ctrIsFinite(x1) || !ctrIsFinite(y1) || !ctrIsFinite(x2) || !ctrIsFinite(y2) || !ctrIsFinite(x3) || !ctrIsFinite(y3)) return;
     if (outline) {
         ctrDrawLine(renderer, x1, y1, x2, y2, 1, renderer->drawColor, 1.0f);
         ctrDrawLine(renderer, x2, y2, x3, y3, 1, renderer->drawColor, 1.0f);
@@ -802,10 +896,181 @@ static void ctrDrawTriangle(Renderer* renderer, float x1, float y1, float x2, fl
         uint8_t r = BGR_R(renderer->drawColor);
         uint8_t g = BGR_G(renderer->drawColor);
         uint8_t b = BGR_B(renderer->drawColor);
-        uint8_t a = (uint8_t)(renderer->drawAlpha * 255.0f);
+        uint8_t a = ctrSafeAlpha(renderer->drawAlpha);
 
         ctrPushQuad(gl, gl->whiteTexture, x1, y1, x2, y2, x3, y3, x3, y3, 0.5f, 0.5f, 0.5f, 0.5f, r, g, b, a);
     }
+}
+
+static int32_t ctrClampCurvePrecision(int32_t precision) {
+    if (precision < 8) return 8;
+    if (precision > 64) return 64;
+    return precision;
+}
+
+static void ctrEmitTriangleGradient(CtrRenderer* gl,
+                                    float x1, float y1,
+                                    float x2, float y2,
+                                    float x3, float y3,
+                                    uint8_t r1, uint8_t g1, uint8_t b1, uint8_t a1,
+                                    uint8_t r2, uint8_t g2, uint8_t b2, uint8_t a2,
+                                    uint8_t r3, uint8_t g3, uint8_t b3, uint8_t a3) {
+    ctrPushQuadGradient(gl, gl->whiteTexture,
+        x1, y1,
+        x2, y2,
+        x3, y3,
+        x3, y3,
+        0.5f, 0.5f, 0.5f, 0.5f,
+        r1, g1, b1, a1,
+        r2, g2, b2, a2,
+        r3, g3, b3, a3,
+        r3, g3, b3, a3);
+}
+
+static void ctrDrawArc(Renderer* renderer,
+                       float cx, float cy, float rx, float ry,
+                       float startAngle, float endAngle,
+                       uint32_t color, float alpha,
+                       bool outline, int32_t segments) {
+    CtrRenderer* gl = (CtrRenderer*) renderer;
+    if (!ctrIsFinite(cx) || !ctrIsFinite(cy) || !ctrIsFinite(rx) || !ctrIsFinite(ry)) return;
+    if (rx <= 0.0f || ry <= 0.0f) return;
+    if (segments < 1) segments = 1;
+
+    uint8_t r = BGR_R(color);
+    uint8_t g = BGR_G(color);
+    uint8_t b = BGR_B(color);
+    uint8_t a = ctrSafeAlpha(alpha);
+
+    float prevX = cx + cosf(startAngle) * rx;
+    float prevY = cy + sinf(startAngle) * ry;
+    if (!ctrIsFinite(prevX) || !ctrIsFinite(prevY)) return;
+
+    for (int32_t i = 1; i <= segments; i++) {
+        float t = (float) i / (float) segments;
+        float angle = startAngle + (endAngle - startAngle) * t;
+        float curX = cx + cosf(angle) * rx;
+        float curY = cy + sinf(angle) * ry;
+        if (!ctrIsFinite(curX) || !ctrIsFinite(curY)) continue;
+
+        if (outline) {
+            ctrDrawLine(renderer, prevX, prevY, curX, curY, 1.0f, color, alpha);
+        } else {
+            ctrEmitTriangleGradient(gl,
+                cx, cy,
+                prevX, prevY,
+                curX, curY,
+                r, g, b, a,
+                r, g, b, a,
+                r, g, b, a);
+        }
+
+        prevX = curX;
+        prevY = curY;
+    }
+}
+
+static void ctrDrawTriangleColor(Renderer* renderer,
+                                 float x1, float y1,
+                                 float x2, float y2,
+                                 float x3, float y3,
+                                 uint32_t col1, uint32_t col2, uint32_t col3,
+                                 float alpha, bool outline) {
+    CtrRenderer* gl = (CtrRenderer*) renderer;
+    if (!ctrIsFinite(x1) || !ctrIsFinite(y1) || !ctrIsFinite(x2) || !ctrIsFinite(y2) || !ctrIsFinite(x3) || !ctrIsFinite(y3)) return;
+
+    if (outline) {
+        ctrDrawLine(renderer, x1, y1, x2, y2, 1.0f, col1, alpha);
+        ctrDrawLine(renderer, x2, y2, x3, y3, 1.0f, col1, alpha);
+        ctrDrawLine(renderer, x3, y3, x1, y1, 1.0f, col1, alpha);
+        return;
+    }
+
+    uint8_t a = ctrSafeAlpha(alpha);
+    ctrEmitTriangleGradient(gl,
+        x1, y1,
+        x2, y2,
+        x3, y3,
+        BGR_R(col1), BGR_G(col1), BGR_B(col1), a,
+        BGR_R(col2), BGR_G(col2), BGR_B(col2), a,
+        BGR_R(col3), BGR_G(col3), BGR_B(col3), a);
+}
+
+static void ctrDrawEllipse(Renderer* renderer,
+                           float cx, float cy,
+                           float rx, float ry,
+                           uint32_t color, float alpha,
+                           bool outline, int32_t precision) {
+    if (!ctrIsFinite(cx) || !ctrIsFinite(cy) || !ctrIsFinite(rx) || !ctrIsFinite(ry)) return;
+    if (rx < 0.0f) rx = -rx;
+    if (ry < 0.0f) ry = -ry;
+    if (rx <= 0.0f || ry <= 0.0f) return;
+
+    ctrDrawArc(renderer, cx, cy, rx, ry, 0.0f, 2.0f * (float) M_PI,
+               color, alpha, outline, ctrClampCurvePrecision(precision));
+}
+
+static void ctrDrawRoundrect(Renderer* renderer,
+                             float x1, float y1, float x2, float y2,
+                             float radx, float rady,
+                             uint32_t color, float alpha,
+                             bool outline, int32_t precision) {
+    CtrRenderer* gl = (CtrRenderer*) renderer;
+    if (!ctrIsFinite(x1) || !ctrIsFinite(y1) || !ctrIsFinite(x2) || !ctrIsFinite(y2) ||
+        !ctrIsFinite(radx) || !ctrIsFinite(rady)) return;
+
+    if (x1 > x2) { float t = x1; x1 = x2; x2 = t; }
+    if (y1 > y2) { float t = y1; y1 = y2; y2 = t; }
+
+    float width = x2 - x1;
+    float height = y2 - y1;
+    if (width <= 0.0f || height <= 0.0f) return;
+
+    if (radx < 0.0f) radx = -radx;
+    if (rady < 0.0f) rady = -rady;
+    if (radx > width * 0.5f) radx = width * 0.5f;
+    if (rady > height * 0.5f) rady = height * 0.5f;
+
+    if (radx <= 0.0f || rady <= 0.0f) {
+        ctrDrawRectangle(renderer, x1, y1, x2, y2, color, alpha, outline);
+        return;
+    }
+
+    int32_t arcSegments = ctrClampCurvePrecision(precision) / 4;
+    if (arcSegments < 1) arcSegments = 1;
+
+    float left = x1 + radx;
+    float right = x2 - radx;
+    float top = y1 + rady;
+    float bottom = y2 - rady;
+
+    if (outline) {
+        if (right > left) {
+            ctrDrawLine(renderer, left, y1, right, y1, 1.0f, color, alpha);
+            ctrDrawLine(renderer, left, y2, right, y2, 1.0f, color, alpha);
+        }
+        if (bottom > top) {
+            ctrDrawLine(renderer, x1, top, x1, bottom, 1.0f, color, alpha);
+            ctrDrawLine(renderer, x2, top, x2, bottom, 1.0f, color, alpha);
+        }
+    } else {
+        float r = (float) BGR_R(color) / 255.0f;
+        float g = (float) BGR_G(color) / 255.0f;
+        float b = (float) BGR_B(color) / 255.0f;
+
+        if (right > left) {
+            emitColoredQuad(gl, left, y1, right, y2, r, g, b, alpha);
+        }
+        if (bottom > top) {
+            emitColoredQuad(gl, x1, top, left, bottom, r, g, b, alpha);
+            emitColoredQuad(gl, right, top, x2, bottom, r, g, b, alpha);
+        }
+    }
+
+    ctrDrawArc(renderer, left, top, radx, rady, (float) M_PI, 1.5f * (float) M_PI, color, alpha, outline, arcSegments);
+    ctrDrawArc(renderer, right, top, radx, rady, 1.5f * (float) M_PI, 2.0f * (float) M_PI, color, alpha, outline, arcSegments);
+    ctrDrawArc(renderer, right, bottom, radx, rady, 0.0f, 0.5f * (float) M_PI, color, alpha, outline, arcSegments);
+    ctrDrawArc(renderer, left, bottom, radx, rady, 0.5f * (float) M_PI, (float) M_PI, color, alpha, outline, arcSegments);
 }
 
 // ===[ Text Drawing ]===
@@ -873,22 +1138,81 @@ static bool ctrResolveGlyph(CtrRenderer* gl, DataWin* dw, CtrFontState* state, F
 }
 
 static void ctrDrawText(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, float angleDeg) {
-    CtrRenderer* gl = (CtrRenderer*) renderer; DataWin* dw = renderer->dataWin;
+    CtrRenderer* gl = (CtrRenderer*) renderer;
+    DataWin* dw = renderer->dataWin;
     int32_t fontIndex = renderer->drawFont;
     if (0 > fontIndex || dw->font.count <= (uint32_t) fontIndex) return;
+    if (text == nullptr || !ctrIsFinite(x) || !ctrIsFinite(y)) return;
+
+    xscale = ctrSafeScale(xscale);
+    yscale = ctrSafeScale(yscale);
+    angleDeg = ctrSafeAngle(angleDeg);
 
     Font* font = &dw->font.fonts[fontIndex];
     CtrFontState fontState;
     if (!ctrResolveFontState(gl, dw, font, &fontState)) return;
 
-    uint8_t r = BGR_R(renderer->drawColor); uint8_t g = BGR_G(renderer->drawColor); uint8_t b = BGR_B(renderer->drawColor);
-    uint8_t a = (uint8_t) ((renderer->drawAlpha <= 0.0f) ? 0 : (renderer->drawAlpha >= 1.0f ? 255 : (renderer->drawAlpha * 255.0f + 0.5f)));
+    uint8_t r = BGR_R(renderer->drawColor);
+    uint8_t g = BGR_G(renderer->drawColor);
+    uint8_t b = BGR_B(renderer->drawColor);
+    uint8_t a = ctrSafeAlpha(renderer->drawAlpha);
 
-    int32_t textLen = (int32_t) strlen(text); if (textLen == 0) return;
+    int32_t textLen = (int32_t) strlen(text);
+    if (textLen == 0) return;
+
+    // PSP-like fast path: no rotation and no alignment -> direct quads.
+    if (!font->isSpriteFont && angleDeg == 0.0f && renderer->drawHalign == 0 && renderer->drawValign == 0) {
+        float curX = 0.0f;
+        float curY = 0.0f;
+        int32_t pos = 0;
+        while (pos < textLen) {
+            int32_t oldPos = pos;
+            uint16_t ch = TextUtils_decodeUtf8(text, textLen, &pos);
+            if (pos == oldPos) { pos++; continue; }
+
+            if (ch == '\n' || ch == '\r') {
+                if (pos < textLen && ((ch == '\n' && text[pos] == '\r') || (ch == '\r' && text[pos] == '\n'))) pos++;
+                curX = 0.0f;
+                curY += (float) font->emSize;
+                continue;
+            }
+
+            FontGlyph* glyph = TextUtils_findGlyph(font, ch);
+            if (!glyph || glyph->sourceWidth <= 0 || glyph->sourceHeight <= 0) continue;
+
+            float srcX, srcY, srcW, srcH, localX0, localY0;
+            uint32_t tpagIndex;
+            if (!ctrResolveGlyph(gl, dw, &fontState, glyph, curX, curY, &tpagIndex, &srcX, &srcY, &srcW, &srcH, &localX0, &localY0)) {
+                curX += glyph->shift;
+                continue;
+            }
+
+            float localX1 = localX0 + (float) glyph->sourceWidth;
+            float localY1 = localY0 + (float) glyph->sourceHeight;
+            float gx0 = x + localX0 * xscale * font->scaleX;
+            float gy0 = y + localY0 * yscale * font->scaleY;
+            float gx1 = x + localX1 * xscale * font->scaleX;
+            float gy1 = y + localY1 * yscale * font->scaleY;
+
+            ctrDrawTpagRegion(gl, tpagIndex, srcX, srcY, srcW, srcH,
+                              gx0, gy0, gx1, gy0, gx1, gy1, gx0, gy1,
+                              r, g, b, a);
+
+            curX += glyph->shift;
+            if (pos < textLen) {
+                int32_t savedPos = pos;
+                uint16_t nextCh = TextUtils_decodeUtf8(text, textLen, &pos);
+                pos = savedPos;
+                curX += TextUtils_getKerningOffset(glyph, nextCh);
+            }
+        }
+        return;
+    }
+
     int32_t lineCount = TextUtils_countLines(text, textLen);
-    float lineStride = TextUtils_lineStride(font);
+    float lineStride = 0.0f;
     float totalHeight = (float) lineCount * lineStride;
-    float valignOffset = 0;
+    float valignOffset = 0.0f;
     if (renderer->drawValign == 1) valignOffset = -totalHeight / 2.0f;
     else if (renderer->drawValign == 2) valignOffset = -totalHeight;
 
@@ -896,7 +1220,7 @@ static void ctrDrawText(Renderer* renderer, const char* text, float x, float y, 
     Matrix4f transform;
     Matrix4f_setTransform2D(&transform, x, y, xscale * font->scaleX, yscale * font->scaleY, angleRad);
 
-    float cursorY = valignOffset - (float) font->ascenderOffset;
+    float cursorY = valignOffset;
     int32_t lineStart = 0;
 
     for (int32_t lineIdx = 0; lineCount > lineIdx; lineIdx++) {
@@ -905,7 +1229,7 @@ static void ctrDrawText(Renderer* renderer, const char* text, float x, float y, 
         int32_t lineLen = lineEnd - lineStart;
 
         float lineWidth = TextUtils_measureLineWidth(font, text + lineStart, lineLen);
-        float halignOffset = 0;
+        float halignOffset = 0.0f;
         if (renderer->drawHalign == 1) halignOffset = -lineWidth / 2.0f;
         else if (renderer->drawHalign == 2) halignOffset = -lineWidth;
 
@@ -952,7 +1276,7 @@ static void ctrDrawText(Renderer* renderer, const char* text, float x, float y, 
 
 static void ctrDrawTextColor(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, float angleDeg, int32_t _c1, int32_t _c2, int32_t _c3, int32_t _c4, float floatAlpha) {
     float savedAlpha = renderer->drawAlpha;
-    renderer->drawAlpha = floatAlpha;
+    renderer->drawAlpha = ctrSafeAlpha(floatAlpha) / 255.0f;
     ctrDrawText(renderer, text, x, y, xscale, yscale, angleDeg);
     renderer->drawAlpha = savedAlpha;
 }
@@ -962,67 +1286,21 @@ static int32_t ctrCreateSpriteFromSurface(Renderer* renderer, int32_t x, int32_t
 }
 static void ctrDrawCircle(Renderer* renderer, float x, float y, float radius,
                            uint32_t color, float alpha, bool outline, int32_t precision) {
-    //if (radius <= 0.0f) return;
-//
-    //int32_t n = precision;
-    //if (n < 4) n = 4;
-    //if (n > 64) n = 64;
-//
-    //ctrFlushBatch((CtrRenderer*)renderer);
-//
-    //glDisable(GL_TEXTURE_2D);
-//
-    //float r = ((color >> 16) & 0xFF) / 255.0f;
-    //float g = ((color >> 8) & 0xFF) / 255.0f;
-    //float b = (color & 0xFF) / 255.0f;
-//
-    //glColor4f(r, g, b, alpha);
-//
-    //glEnableClientState(GL_VERTEX_ARRAY);
-    //glDisableClientState(GL_COLOR_ARRAY);
-//
-    //float angleStep = 2.0f * (float)M_PI / (float)n;
-//
-    //if (outline) {
-    //    float vertices[(64 + 1) * 2];
-//
-    //    for (int32_t i = 0; i <= n; i++) {
-    //        float a = (float)i * angleStep;
-//
-    //        vertices[i * 2] = x + cosf(a) * radius;
-    //        vertices[i * 2 + 1] = y + sinf(a) * radius;
-    //    }
-//
-    //    glVertexPointer(2, GL_FLOAT, 0, vertices);
-//
-    //    glDrawArrays(GL_LINE_STRIP, 0, n + 1);
-//
-    //} else {
-    //    float vertices[(64 + 2) * 2];
-//
-    //    vertices[0] = x;
-    //    vertices[1] = y;
-//
-    //    for (int32_t i = 0; i <= n; i++) {
-    //        float a = (float)i * angleStep;
-    //        vertices[(i + 1) * 2] = x + cosf(a) * radius;
-    //        vertices[(i + 1) * 2 + 1] = y + sinf(a) * radius;
-    //    }
-//
-    //    glVertexPointer(2, GL_FLOAT, 0, vertices);
-//
-    //    glDrawArrays(GL_TRIANGLE_FAN, 0, n + 2);
-    //}
+    if (!ctrIsFinite(x) || !ctrIsFinite(y) || !ctrIsFinite(radius)) return;
+    if (radius < 0.0f) radius = -radius;
+    if (radius <= 0.0f) return;
+    ctrDrawEllipse(renderer, x, y, radius, radius, color, alpha, outline, precision);
 }
 static void ctrDeleteSprite(Renderer* renderer, int32_t spriteIndex) {}
 
 static RendererVtable ctrVtable = {
     .init = ctrInit, .destroy = ctrDestroy, .beginFrame = ctrBeginFrame, .endFrame = ctrEndFrame,
-    .beginView = ctrBeginView, .endView = ctrEndView, .beginGUI = ctrBeginGUI, .endGUI = ctrEndGUI,
+    .beginView = ctrBeginView, .endView = ctrEndView,
     .drawSprite = ctrDrawSprite, .drawSpritePart = ctrDrawSpritePart, .drawRectangle = ctrDrawRectangle,
     .drawLine = ctrDrawLine, .drawLineColor = ctrDrawLineColor, .drawTriangle = ctrDrawTriangle,
     .drawText = ctrDrawText, .drawTextColor = ctrDrawTextColor, .flush = ctrRendererFlush,
     .createSpriteFromSurface = ctrCreateSpriteFromSurface, .deleteSprite = ctrDeleteSprite, .drawCircle = ctrDrawCircle,
+    .drawRoundrect = ctrDrawRoundrect, .drawTriangleColor = ctrDrawTriangleColor, .drawEllipse = ctrDrawEllipse,
     .drawTile = nullptr, .onRoomChanged = ctrOnRoomChanged,
 };
 
@@ -1034,6 +1312,11 @@ Renderer* CtrRenderer_create(void) {
     gl->base.drawFont = -1;
     gl->base.drawHalign = 0;
     gl->base.drawValign = 0;
+    gl->base.circlePrecision = 36;
+    gl->windowW = 1;
+    gl->windowH = 1;
+    gl->gameW = 1;
+    gl->gameH = 1;
     return (Renderer*) gl;
 }
 // --- END OF FILE ctr_renderer.c ---
