@@ -197,6 +197,12 @@ static uint32_t compute_tpag_hash(Texture* txtr, uint32_t pId, uint32_t tId) {
     return hash;
 }
 
+static inline uint8_t clamp_alpha(float alpha) {
+    if (alpha <= 0.0f) return 0;
+    if (alpha >= 1.0f) return 255;
+    return (uint8_t)(alpha * 255.0f + 0.5f);
+}
+
 static void prefetchRoomTextures(CtrRenderer* gl) {
     DataWin* dw = gl->base.dataWin;
 
@@ -415,7 +421,28 @@ static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
 
 static void ctrBuildFullTextureCache(CtrRenderer* gl) {
     DataWin* dw = gl->base.dataWin;
-    fprintf(stderr, "--- STARTING PRE-CACHE VERIFICATION ---\n");
+    const char* flagPath = "sdmc:/3ds/butterscotch/cache/cache_ready.flag";
+
+    // --- ФИКС БЫСТРОЙ ЗАГРУЗКИ ---
+    // Проверяем, существует ли файл-флаг. Если да — кэш уже был собран ранее.
+    FILE* flagFile = fopen(flagPath, "r");
+    if (flagFile) {
+        fclose(flagFile);
+        fprintf(stderr, "--- FAST BOOT: Cache flag found. Skipping verification! ---\n");
+
+        // ВАЖНО: Если мы пропускаем кэширование, нам всё равно нужно очистить ОЗУ
+        // от "сырых" PNG картинок из data.win, иначе игре не хватит памяти и она вылетит.
+        for (uint32_t pId = 0; pId < dw->txtr.count; pId++) {
+            if (dw->txtr.textures[pId].blobData) {
+                free(dw->txtr.textures[pId].blobData);
+                dw->txtr.textures[pId].blobData = NULL;
+            }
+        }
+        return; // Мгновенно выходим из функции!
+    }
+    // -----------------------------
+
+    fprintf(stderr, "--- STARTING PRE-CACHE VERIFICATION (First Boot) ---\n");
 
     int totalExtracted = 0;
 
@@ -551,10 +578,8 @@ static void ctrBuildFullTextureCache(CtrRenderer* gl) {
                         }
                     }
                 }
-                stbi_image_free(pixels); // Освобождаем сырые пиксели
+                stbi_image_free(pixels);
             }
-        } else {
-            fprintf(stderr, "Page %u is fully cached.\n", pId + 1);
         }
 
         if (txtr->blobData) {
@@ -564,6 +589,17 @@ static void ctrBuildFullTextureCache(CtrRenderer* gl) {
     }
 
     fprintf(stderr, "--- PRE-CACHE VERIFICATION COMPLETE (Extracted %d items) ---\n", totalExtracted);
+
+    // --- ФИКС БЫСТРОЙ ЗАГРУЗКИ (Создание флага) ---
+    // После успешного извлечения всего кэша создаем файл-флаг,
+    // чтобы больше никогда не выполнять этот медленный процесс.
+    FILE* outFlag = fopen(flagPath, "w");
+    if (outFlag) {
+        fputs("READY", outFlag);
+        fclose(outFlag);
+        fprintf(stderr, "--- Cache Flag saved! Next boot will be fast. ---\n");
+    }
+    // ----------------------------------------------
 }
 
 static void ctrInit(Renderer* renderer, DataWin* dataWin) {
@@ -831,15 +867,29 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
     float ly1 = ly0 + ((float) tpag->sourceHeight) * yscale;
 
     uint8_t r = BGR_R(color); uint8_t g = BGR_G(color); uint8_t b = BGR_B(color);
-    uint8_t a = (uint8_t)(alpha * 255.0f);
+
+    // ПРИМЕНЯЕМ ФИКС АЛЬФЫ
+    uint8_t a = clamp_alpha(alpha);
+    if (a == 0) return; // Оптимизация: не тратим время на отрисовку невидимого
 
     if (angleDeg == 0.0f) {
-        float cx = roundf(x);
-        float cy = roundf(y);
-        float x0 = cx + roundf(lx0);
-        float y0 = cy + roundf(ly0);
-        float x1 = cx + roundf(lx1);
-        float y1 = cy + roundf(ly1);
+        // ФИКС СЕТКИ БОЯ: Округляем финальные координаты, а не начальные!
+        float x0 = roundf(x + lx0);
+        float y0 = roundf(y + ly0);
+        float x1 = roundf(x + lx1);
+        float y1 = roundf(y + ly1);
+
+        // Анти-схлопывание: если после округления ширина стала 0, спасаем её
+        if ((lx1 - lx0) > 0.0f && x1 <= x0) x1 = x0 + 1.0f;
+        if ((ly1 - ly0) > 0.0f && y1 <= y0) y1 = y0 + 1.0f;
+
+        // Хак специально для Undertale/Deltarune:
+        // Если это спрайт 1x1 пиксель (считай, линия), то на экране 3DS
+        // мы принудительно делаем его толщиной 2 пикселя, иначе он потеряется.
+        if (tpag->sourceWidth == 1 && tpag->sourceHeight == 1) {
+            if (fabsf(xscale) > 0.0f && fabsf(xscale) <= 1.5f) x1 = x0 + 2.0f; // Вертикальная палка
+            if (fabsf(yscale) > 0.0f && fabsf(yscale) <= 1.5f) y1 = y0 + 2.0f; // Горизонтальная палка
+        }
 
         ctrDrawTpagRegion(gl, tpagIndex, 0.0f, 0.0f, (float)tpag->sourceWidth, (float)tpag->sourceHeight,
                           x0, y0, x1, y0, x1, y1, x0, y1, r, g, b, a);
@@ -870,7 +920,8 @@ static void ctrDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t src
     }
 
     uint8_t r = BGR_R(color); uint8_t g = BGR_G(color); uint8_t b = BGR_B(color);
-    uint8_t a = (uint8_t)(alpha * 255.0f);
+    uint8_t a = clamp_alpha(alpha);
+    if (a == 0) return;
 
     float cx = roundf(x);
     float cy = roundf(y);
@@ -883,20 +934,35 @@ static void ctrDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t src
 
 static void emitColoredQuad(CtrRenderer* gl, float x0, float y0, float x1, float y1, float r, float g, float b, float a) {
     uint8_t cr = (uint8_t)(r * 255.0f); uint8_t cg = (uint8_t)(g * 255.0f);
-    uint8_t cb = (uint8_t)(b * 255.0f); uint8_t ca = (uint8_t)(a * 255.0f);
+    uint8_t cb = (uint8_t)(b * 255.0f);
+    uint8_t ca = clamp_alpha(a); // ЗАМЕНИТЬ
+    if (ca == 0) return; // ДОБАВИТЬ
     ctrPushQuad(gl, gl->whiteTexture, x0, y0, x1, y0, x1, y1, x0, y1, 0.5f, 0.5f, 0.5f, 0.5f, cr, cg, cb, ca);
 }
 
 static void ctrDrawRectangle(Renderer* renderer, float x1, float y1, float x2, float y2, uint32_t color, float alpha, bool outline) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
-    float r = (float) BGR_R(color) / 255.0f; float g = (float) BGR_G(color) / 255.0f; float b = (float) BGR_B(color) / 255.0f;
+    float r = (float) BGR_R(color) / 255.0f;
+    float g = (float) BGR_G(color) / 255.0f;
+    float b = (float) BGR_B(color) / 255.0f;
+
+    float left = roundf(fminf(x1, x2));
+    float right = roundf(fmaxf(x1, x2));
+    float top = roundf(fminf(y1, y2));
+    float bottom = roundf(fmaxf(y1, y2));
+
     if (outline) {
-        emitColoredQuad(gl, x1, y1, x2 + 1.0f, y1 + 1.0f, r, g, b, alpha);
-        emitColoredQuad(gl, x1, y2, x2 + 1.0f, y2 + 1.0f, r, g, b, alpha);
-        emitColoredQuad(gl, x1, y1 + 1.0f, x1 + 1.0f, y2, r, g, b, alpha);
-        emitColoredQuad(gl, x2, y1 + 1.0f, x2 + 1.0f, y2, r, g, b, alpha);
+        // ФИКС: Увеличиваем толщину рамки для 3DS до 2.0f пикселей
+        // чтобы она не растворялась при масштабировании видов (views).
+        float thick = 2.0f;
+
+        // Рисуем 4 ровные планки
+        emitColoredQuad(gl, left, top, right + 1.0f, top + thick, r, g, b, alpha); // Верх
+        emitColoredQuad(gl, left, bottom - thick + 1.0f, right + 1.0f, bottom + 1.0f, r, g, b, alpha); // Низ
+        emitColoredQuad(gl, left, top + thick, left + thick, bottom - thick + 1.0f, r, g, b, alpha); // Лево
+        emitColoredQuad(gl, right - thick + 1.0f, top + thick, right + 1.0f, bottom - thick + 1.0f, r, g, b, alpha); // Право
     } else {
-        emitColoredQuad(gl, x1, y1, x2 + 1.0f, y2 + 1.0f, r, g, b, alpha);
+        emitColoredQuad(gl, left, top, right + 1.0f, bottom + 1.0f, r, g, b, alpha);
     }
 }
 
@@ -905,11 +971,27 @@ static void ctrDrawLine(Renderer* renderer, float x1, float y1, float x2, float 
     uint8_t cr = BGR_R(color); uint8_t cg = BGR_G(color); uint8_t cb = BGR_B(color);
     uint8_t ca = (uint8_t)(alpha * 255.0f);
 
-    if (width <= 1.0f && (fabsf(x1 - x2) < 0.01f || fabsf(y1 - y2) < 0.01f)) {
+    // ФИКС: Задаем жесткий минимум толщины 2px для 3DS
+    float actualWidth = (width < 2.0f) ? 2.0f : width;
+
+    // Быстрый путь для прямых (горизонтальных/вертикальных) линий
+    if (fabsf(x1 - x2) < 0.01f || fabsf(y1 - y2) < 0.01f) {
         float rx1 = roundf(fminf(x1, x2));
         float ry1 = roundf(fminf(y1, y2));
-        float rx2 = roundf(fmaxf(x1, x2)) + 1.0f;
-        float ry2 = roundf(fmaxf(y1, y2)) + 1.0f;
+        float rx2 = roundf(fmaxf(x1, x2));
+        float ry2 = roundf(fmaxf(y1, y2));
+
+        if (fabsf(x1 - x2) < 0.01f) {
+            // Вертикальная линия: расширяем по X
+            rx1 -= actualWidth * 0.5f;
+            rx2 += actualWidth * 0.5f;
+            ry2 += 1.0f; // Закрываем длину
+        } else {
+            // Горизонтальная линия: расширяем по Y
+            rx2 += 1.0f; // Закрываем длину
+            ry1 -= actualWidth * 0.5f;
+            ry2 += actualWidth * 0.5f;
+        }
 
         ctrPushQuad(gl, gl->whiteTexture,
             rx1, ry1, rx2, ry1, rx2, ry2, rx1, ry2,
@@ -917,16 +999,20 @@ static void ctrDrawLine(Renderer* renderer, float x1, float y1, float x2, float 
         return;
     }
 
+    // Диагональные линии
     float dx = x2 - x1;
     float dy = y2 - y1;
     float len = sqrtf(dx * dx + dy * dy);
     if (0.0001f > len) return;
 
-    x2 += (dx / len);
-    y2 += (dy / len);
-    dx = x2 - x1; dy = y2 - y1; len += 1.0f;
+    // Вытягиваем края линии на полпикселя, чтобы избежать разрывов на углах рамок
+    x2 += (dx / len) * 0.5f;
+    y2 += (dy / len) * 0.5f;
+    x1 -= (dx / len) * 0.5f;
+    y1 -= (dy / len) * 0.5f;
+    dx = x2 - x1; dy = y2 - y1; len = sqrtf(dx * dx + dy * dy);
 
-    float halfW = width * 0.5f;
+    float halfW = actualWidth * 0.5f;
     float px = (-dy / len) * halfW;
     float py = (dx / len) * halfW;
 
@@ -945,26 +1031,33 @@ static void ctrDrawLineColor(Renderer* renderer, float x1, float y1, float x2, f
     uint8_t c2r = BGR_R(color2); uint8_t c2g = BGR_G(color2); uint8_t c2b = BGR_B(color2);
     uint8_t ca = (uint8_t)(alpha * 255.0f);
 
-    if (width <= 1.0f && (fabsf(x1 - x2) < 0.01f || fabsf(y1 - y2) < 0.01f)) {
+    // ФИКС для 3DS
+    float actualWidth = (width < 2.0f) ? 2.0f : width;
+
+    if (fabsf(x1 - x2) < 0.01f || fabsf(y1 - y2) < 0.01f) {
         float rx1 = roundf(fminf(x1, x2));
         float ry1 = roundf(fminf(y1, y2));
-        float rx2 = roundf(fmaxf(x1, x2)) + 1.0f;
-        float ry2 = roundf(fmaxf(y1, y2)) + 1.0f;
+        float rx2 = roundf(fmaxf(x1, x2));
+        float ry2 = roundf(fmaxf(y1, y2));
 
         uint8_t r0, g0, b0, r1, g1, b1;
         if (x1 <= x2 && y1 <= y2) { r0=c1r; g0=c1g; b0=c1b; r1=c2r; g1=c2g; b1=c2b; }
         else { r0=c2r; g0=c2g; b0=c2b; r1=c1r; g1=c1g; b1=c1b; }
 
-        if (fabsf(y1 - y2) < 0.01f) {
-            ctrPushQuadGradient(gl, gl->whiteTexture,
-                rx1, ry1, rx2, ry1, rx2, ry2, rx1, ry2,
-                0.5f, 0.5f, 0.5f, 0.5f,
-                r0, g0, b0, ca, r1, g1, b1, ca, r1, g1, b1, ca, r0, g0, b0, ca);
-        } else {
+        if (fabsf(x1 - x2) < 0.01f) {
+            // Вертикальная: градиент сверху вниз
+            rx1 -= actualWidth * 0.5f; rx2 += actualWidth * 0.5f; ry2 += 1.0f;
             ctrPushQuadGradient(gl, gl->whiteTexture,
                 rx1, ry1, rx2, ry1, rx2, ry2, rx1, ry2,
                 0.5f, 0.5f, 0.5f, 0.5f,
                 r0, g0, b0, ca, r0, g0, b0, ca, r1, g1, b1, ca, r1, g1, b1, ca);
+        } else {
+            // Горизонтальная: градиент слева направо
+            rx2 += 1.0f; ry1 -= actualWidth * 0.5f; ry2 += actualWidth * 0.5f;
+            ctrPushQuadGradient(gl, gl->whiteTexture,
+                rx1, ry1, rx2, ry1, rx2, ry2, rx1, ry2,
+                0.5f, 0.5f, 0.5f, 0.5f,
+                r0, g0, b0, ca, r1, g1, b1, ca, r1, g1, b1, ca, r0, g0, b0, ca);
         }
         return;
     }
@@ -974,11 +1067,11 @@ static void ctrDrawLineColor(Renderer* renderer, float x1, float y1, float x2, f
     float len = sqrtf(dx * dx + dy * dy);
     if (0.0001f > len) return;
 
-    x2 += (dx / len);
-    y2 += (dy / len);
-    dx = x2 - x1; dy = y2 - y1; len += 1.0f;
+    x2 += (dx / len) * 0.5f; y2 += (dy / len) * 0.5f;
+    x1 -= (dx / len) * 0.5f; y1 -= (dy / len) * 0.5f;
+    dx = x2 - x1; dy = y2 - y1; len = sqrtf(dx * dx + dy * dy);
 
-    float halfW = width * 0.5f;
+    float halfW = actualWidth * 0.5f;
     float px = (-dy / len) * halfW;
     float py = (dx / len) * halfW;
 
@@ -1004,7 +1097,7 @@ static void ctrDrawTriangle(Renderer* renderer, float x1, float y1, float x2, fl
         uint8_t r = BGR_R(renderer->drawColor);
         uint8_t g = BGR_G(renderer->drawColor);
         uint8_t b = BGR_B(renderer->drawColor);
-        uint8_t a = (uint8_t)(renderer->drawAlpha * 255.0f);
+        uint8_t a = clamp_alpha(renderer->drawAlpha); // ЗАМЕНИТЬ
 
         ctrPushQuad(gl, gl->whiteTexture, x1, y1, x2, y2, x3, y3, x3, y3, 0.5f, 0.5f, 0.5f, 0.5f, r, g, b, a);
     }
@@ -1052,7 +1145,7 @@ static void ctrDrawText(Renderer* renderer, const char* text, float x, float y, 
     if (!ctrResolveFontState(gl, dw, font, &fontState)) return;
 
     uint8_t r = BGR_R(renderer->drawColor); uint8_t g = BGR_G(renderer->drawColor); uint8_t b = BGR_B(renderer->drawColor);
-    uint8_t a = (uint8_t) ((renderer->drawAlpha <= 0.0f) ? 0 : (renderer->drawAlpha >= 1.0f ? 255 : (renderer->drawAlpha * 255.0f + 0.5f)));
+    uint8_t a = clamp_alpha(renderer->drawAlpha); // ЗАМЕНИТЬ
 
     int32_t textLen = (int32_t) strlen(text); if (textLen == 0) return;
     int32_t lineCount = TextUtils_countLines(text, textLen);
