@@ -163,11 +163,17 @@ typedef struct {
     char* key;
     BuiltinFunc value;
 } BuiltinEntry;
-
+typedef struct {
+    int64_t key;
+    RValue value;
+} ArrayMapEntry;
 // ===[ VMContext - Holds all VM state ]===
 // Fields are ordered by access frequency so that the hottest data sits in the first bytes of the struct
 // This way data can be kept "hot" in the CPU cache or, depending on the platform, in scratchpad RAM
 typedef struct VMContext {
+    ArrayMapEntry* localArrayMap;
+    ArrayMapEntry* globalArrayMap;
+    struct { int32_t key; int32_t value; }* globalArrayVarTracker;
     // Hot: touched every instruction in the dispatch loop
     uint8_t* bytecodeBase;
     uint32_t ip;

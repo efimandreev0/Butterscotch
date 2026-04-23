@@ -43,6 +43,8 @@ Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, GMLReal x, G
     inst->pathIndex = -1;
     inst->pathScale = 1.0f;
     inst->selfVars = nullptr;
+    inst->selfArrayMap = nullptr;
+
 
     // Initialize alarms to -1 (inactive)
     repeat(GML_ALARM_COUNT, i) {
@@ -60,6 +62,12 @@ void Instance_free(Instance* instance) {
         RValue_free(&instance->selfVars[i].value);
     }
     hmfree(instance->selfVars);
+
+    // Free selfArrayMap
+    repeat(hmlen(instance->selfArrayMap), i) {
+        RValue_free(&instance->selfArrayMap[i].value);
+    }
+    hmfree(instance->selfArrayMap);
 
     free(instance);
 }

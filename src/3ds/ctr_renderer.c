@@ -960,7 +960,60 @@ static void ctrDrawTextColor(Renderer* renderer, const char* text, float x, floa
 static int32_t ctrCreateSpriteFromSurface(Renderer* renderer, int32_t x, int32_t y, int32_t w, int32_t h, bool removeback, bool smooth, int32_t xorig, int32_t yorig) {
     return -1;
 }
-
+static void ctrDrawCircle(Renderer* renderer, float x, float y, float radius,
+                           uint32_t color, float alpha, bool outline, int32_t precision) {
+    //if (radius <= 0.0f) return;
+//
+    //int32_t n = precision;
+    //if (n < 4) n = 4;
+    //if (n > 64) n = 64;
+//
+    //ctrFlushBatch((CtrRenderer*)renderer);
+//
+    //glDisable(GL_TEXTURE_2D);
+//
+    //float r = ((color >> 16) & 0xFF) / 255.0f;
+    //float g = ((color >> 8) & 0xFF) / 255.0f;
+    //float b = (color & 0xFF) / 255.0f;
+//
+    //glColor4f(r, g, b, alpha);
+//
+    //glEnableClientState(GL_VERTEX_ARRAY);
+    //glDisableClientState(GL_COLOR_ARRAY);
+//
+    //float angleStep = 2.0f * (float)M_PI / (float)n;
+//
+    //if (outline) {
+    //    float vertices[(64 + 1) * 2];
+//
+    //    for (int32_t i = 0; i <= n; i++) {
+    //        float a = (float)i * angleStep;
+//
+    //        vertices[i * 2] = x + cosf(a) * radius;
+    //        vertices[i * 2 + 1] = y + sinf(a) * radius;
+    //    }
+//
+    //    glVertexPointer(2, GL_FLOAT, 0, vertices);
+//
+    //    glDrawArrays(GL_LINE_STRIP, 0, n + 1);
+//
+    //} else {
+    //    float vertices[(64 + 2) * 2];
+//
+    //    vertices[0] = x;
+    //    vertices[1] = y;
+//
+    //    for (int32_t i = 0; i <= n; i++) {
+    //        float a = (float)i * angleStep;
+    //        vertices[(i + 1) * 2] = x + cosf(a) * radius;
+    //        vertices[(i + 1) * 2 + 1] = y + sinf(a) * radius;
+    //    }
+//
+    //    glVertexPointer(2, GL_FLOAT, 0, vertices);
+//
+    //    glDrawArrays(GL_TRIANGLE_FAN, 0, n + 2);
+    //}
+}
 static void ctrDeleteSprite(Renderer* renderer, int32_t spriteIndex) {}
 
 static RendererVtable ctrVtable = {
@@ -969,7 +1022,7 @@ static RendererVtable ctrVtable = {
     .drawSprite = ctrDrawSprite, .drawSpritePart = ctrDrawSpritePart, .drawRectangle = ctrDrawRectangle,
     .drawLine = ctrDrawLine, .drawLineColor = ctrDrawLineColor, .drawTriangle = ctrDrawTriangle,
     .drawText = ctrDrawText, .drawTextColor = ctrDrawTextColor, .flush = ctrRendererFlush,
-    .createSpriteFromSurface = ctrCreateSpriteFromSurface, .deleteSprite = ctrDeleteSprite,
+    .createSpriteFromSurface = ctrCreateSpriteFromSurface, .deleteSprite = ctrDeleteSprite, .drawCircle = ctrDrawCircle,
     .drawTile = nullptr, .onRoomChanged = ctrOnRoomChanged,
 };
 

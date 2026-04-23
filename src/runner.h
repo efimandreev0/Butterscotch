@@ -1,5 +1,7 @@
 #pragma once
 
+#include <collision.h>
+
 #include "common.h"
 #include "audio_system.h"
 #include "data_win.h"
@@ -346,6 +348,46 @@ typedef struct Runner {
     // GUI layer size (display_set_gui_size). 0 = auto-match the current view's port size.
     int32_t guiWidth;
     int32_t guiHeight;
+    // ===[ Instance-by-object cache ]===
+    // Lazily rebuilt when arrlen(instances) != cachedInstCount.
+    // Allows executeEventForAll to iterate only objectIndexes that exist in the
+    // room, rather than scanning every instance. For 252-instance rooms with
+    // ~20 unique object types, cuts dispatch overhead by ~10×.
+    Instance*** instancesByObjInclParent; // dense array: for each objectIndex, list of instances whose type is oi OR has oi as ancestor
+    Instance*** instancesByObjDirect;     // dense array: direct-match only (no parent chain)
+    int32_t* activeOIsList;               // stb_ds array of objectIndexes that ever had an instance (never shrinks; empty buckets harmless)
+    uint8_t* oiInListBitmap;              // bitmap flag so we only add to activeOIsList once per oi
+    int32_t instancesByObjMax;    // allocated size (== dataWin->objt.count at init)
+    int32_t cachedInstCount;      // arrlen(instances) at last rebuild (-1 = force rebuild)
+
+    // ===[ Call profiler — enabled by --profile-calls <file> ]===
+    FILE* profileFile;                              // output file (NULL = disabled)
+    struct { char* key; int value; }* profileCalls; // stb_ds: codeName -> call count per frame
+    struct { char* key; int value; }* profileTimes; // stb_ds: codeName -> total microseconds per frame
+
+    uint32_t drawPhaseSortList, drawPhaseBuildList, drawPhaseNormal, drawPhaseGUI;
+    uint32_t drawNrmBuildDrawables; // building drawables[] (instance + tile loops)
+    uint32_t drawNrmQsort;          // sorting drawables by depth
+    uint32_t drawNrmTiles;          // calls to Renderer_drawTile (sum over drawable loop)
+    uint32_t drawNrmInstVM;         // DRAW_INSTANCE via VM_executeCode
+    uint32_t drawNrmInstNative;     // DRAW_INSTANCE via native func
+    uint32_t drawNrmInstDrawSelf;   // DRAW_INSTANCE fallthrough to Renderer_drawSelf (no Draw_0)
+    uint32_t drawNrmCountTiles, drawNrmCountInstVM, drawNrmCountInstNative, drawNrmCountInstDrawSelf;
+
+    const char* topVmDrawName[3];
+    uint32_t    topVmDrawTimeUs[3];
+    int32_t     topVmDrawCalls[3];
+
+    // ===[ Per-frame bbox cache — computed once, used by collision builtins + dispatchCollisionEvents ]===
+    InstanceBBox* bboxCache;     // array parallel to instances[], recomputed each frame
+    int32_t bboxCacheCount;      // current size (matches arrlen(instances))
+    int32_t bboxCacheFrame;      // frameCount when last computed (-1 = invalid)
+
+    struct RunnerStepCacheEntry { int32_t codeId; uint32_t timeUs; int32_t calls; } stepCache[256];
+    int32_t stepCacheCount;
+    const char* topVmStepName[3];
+    uint32_t    topVmStepTimeUs[3];
+    int32_t     topVmStepCalls[3];
 } Runner;
 
 const char* Runner_getEventName(int32_t eventType, int32_t eventSubtype);

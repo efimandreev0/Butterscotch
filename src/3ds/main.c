@@ -51,15 +51,15 @@ void initLogging() {
     fprintf(stderr, "This goes to stderr!\n");
 }
 void printMemoryStats() {
-    struct mallinfo mi = mallinfo();
+    //struct mallinfo mi = mallinfo();
 
-    u32 linearFree = linearSpaceFree();
+    //u32 linearFree = linearSpaceFree();
 
-    float heapUsedMB = (float)mi.uordblks / 1024.0f / 1024.0f;
-    float linearFreeMB = (float)linearFree / 1024.0f / 1024.0f;
+    //float heapUsedMB = (float)mi.uordblks / 1024.0f / 1024.0f;
+    //float linearFreeMB = (float)linearFree / 1024.0f / 1024.0f;
 
-    fprintf(stderr, "[MEMORY] Heap Used: %.2f MB | LINEAR RAM FREE: %.2f MB\n",
-           heapUsedMB, linearFreeMB);
+    //fprintf(stderr, "[MEMORY] Heap Used: %.2f MB | LINEAR RAM FREE: %.2f MB\n",
+    //       heapUsedMB, linearFreeMB);
 }
 int main(int argc, char* argv[]) {
     (void) argc; (void) argv;

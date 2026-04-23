@@ -35,6 +35,18 @@ typedef struct {
     // Optional: platform-specific tile rendering (nullptr = use default drawSpritePart path)
     void (*drawTile)(Renderer* renderer, RoomTile* tile, float offsetX, float offsetY);
 #ifdef __3DS__
+    // Circle: filled (outline=false, triangle fan) or outlined (line strip) at (x,y) with
+    // `radius` pixels, subdivided into `precision` segments. Uses passed `color` + `alpha`.
+    void (*drawCircle)(Renderer* renderer, float x, float y, float radius, uint32_t color, float alpha, bool outline, int32_t precision);
+    // Rounded rectangle: (x1,y1)-(x2,y2) with corner radii (radx, rady).  Uses passed
+    // `color` + `alpha`.  Per-corner arc segments = max(1, precision / 4).
+    void (*drawRoundrect)(Renderer* renderer, float x1, float y1, float x2, float y2, float radx, float rady, uint32_t color, float alpha, bool outline, int32_t precision);
+    // Triangle with per-vertex colors (gradient via rasterizer barycentric interpolation).
+    // Outline mode uses col1 for all 3 edges.
+    void (*drawTriangleColor)(Renderer* renderer, float x1, float y1, float x2, float y2, float x3, float y3, uint32_t col1, uint32_t col2, uint32_t col3, float alpha, bool outline);
+    // Ellipse: centered at (cx, cy) with radii (rx, ry), subdivided into `precision` segments.
+    // Filled = triangle fan (center + N+1 perimeter), outlined = line strip.
+    void (*drawEllipse)(Renderer* renderer, float cx, float cy, float rx, float ry, uint32_t color, float alpha, bool outline, int32_t precision);
     // Optional: the runner fires this after a room load completes. On 3DS this
     // rebuilds per-room texture residency and frees atlases that aren't needed
     // by the new room. nullptr on other platforms.
@@ -52,6 +64,7 @@ struct Renderer {
     int32_t drawFont;    // default -1 (no font)
     int32_t drawHalign;  // 0=left, 1=center, 2=right
     int32_t drawValign;  // 0=top, 1=middle, 2=bottom
+    int32_t circlePrecision; // draw_circle segment count, default 36 (GM HTML5 default)
 };
 
 // ===[ Shared Helpers (platform-agnostic) ]===
@@ -69,6 +82,17 @@ static int32_t Renderer_resolveTPAGIndex(DataWin* dataWin, int32_t spriteIndex, 
 
     uint32_t tpagOffset = sprite->textureOffsets[frameIndex];
     return DataWin_resolveTPAG(dataWin, tpagOffset);
+}
+
+// Stretched: draw_sprite_stretched(sprite, subimg, x, y, w, h)
+// GM-compatible circle draw helper (uses renderer's current drawColor / drawAlpha / circlePrecision).
+// outline=false → filled, outline=true → 1-px outline.  Maps to `draw_circle(x,y,r,outline)` GML semantics.
+static void Renderer_drawCircle(Renderer* renderer, float x, float y, float radius, bool outline) {
+    if (renderer->vtable->drawCircle != nullptr) {
+        renderer->vtable->drawCircle(renderer, x, y, radius,
+                                     renderer->drawColor, renderer->drawAlpha,
+                                     outline, renderer->circlePrecision);
+    }
 }
 
 // Convenience: draw_sprite(sprite, subimg, x, y)

@@ -13,6 +13,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <3ds/svc.h>
+static inline uint64_t _profTickUs(void) {
+    const uint64_t TICKS_PER_SEC = 268123480ULL;
+    uint64_t ticks = svcGetSystemTick();
+    return (ticks * 1000000ULL) / TICKS_PER_SEC;
+}
+#include <sys/time.h>
 
 #include "stb_ds.h"
 
@@ -92,42 +99,146 @@ static void setVMInstanceContext(VMContext* vm, Instance* instance) {
 static void restoreVMInstanceContext(VMContext* vm, Instance* savedInstance) {
     vm->currentInstance = savedInstance;
 }
+static inline void stepCacheRecord(Runner* runner, int32_t codeId, uint32_t us) {
+    if (codeId < 0 || us == 0) return;
+    for (int32_t i = 0; i < runner->stepCacheCount; i++) {
+        if (runner->stepCache[i].codeId == codeId) {
+            runner->stepCache[i].timeUs += us;
+            runner->stepCache[i].calls++;
+            return;
+        }
+    }
+    if (runner->stepCacheCount < 256) {
+        runner->stepCache[runner->stepCacheCount].codeId = codeId;
+        runner->stepCache[runner->stepCacheCount].timeUs = us;
+        runner->stepCache[runner->stepCacheCount].calls = 1;
+        runner->stepCacheCount++;
+    }
 
-static void executeCode(Runner* runner, Instance* instance, int32_t codeId) {
-    // GameMaker does use codeIds less than 0, we'll just pretend we didn't hear them...
+
+}
+
+static void executeCodeFast(Runner* runner, Instance* instance, int32_t codeId,
+                            int32_t ownerObjectIndex, int32_t eventType, int32_t eventSubtype,
+                            NativeCodeFunc nativeFunc) {
     if (0 > codeId) return;
 
     VMContext* vm = runner->vmContext;
-
-    // Save instance context
     Instance* savedInstance = (Instance*) vm->currentInstance;
 
-    // Save full VM execution state, because VM_executeCode overwrites all of these.
-    // This is necessary for nested execution (e.g., instance_create triggering a Create
-    // event while another event's executeLoop is still on the call stack).
+
     uint8_t* savedBytecodeBase = vm->bytecodeBase;
     uint32_t savedIP = vm->ip;
     uint32_t savedCodeEnd = vm->codeEnd;
     const char* savedCodeName = vm->currentCodeName;
     RValue* savedLocalVars = vm->localVars;
     uint32_t savedLocalVarCount = vm->localVarCount;
-    LocalSlotEntry* savedCodeLocalsSlotMap = vm->currentCodeLocalsSlotMap;
-    int32_t savedCodeIndex = vm->currentCodeIndex;
+    ArrayMapEntry* savedLocalArrayMap = vm->localArrayMap;
+
+    int32_t savedEventType = vm->currentEventType;
+    int32_t savedEventSubtype = vm->currentEventSubtype;
+    int32_t savedEventObjectIndex = vm->currentEventObjectIndex;
+
+    vm->currentEventType = eventType;
+    vm->currentEventSubtype = eventSubtype;
+    vm->currentEventObjectIndex = ownerObjectIndex;
+
+    setVMInstanceContext(vm, instance);
+
+
+    const char* codeName = NULL;
+    clock_t _profStart = 0;
+    if (runner->profileFile != NULL) {
+        codeName = runner->dataWin->code.entries[codeId].name;
+        ptrdiff_t pi = shgeti(runner->profileCalls, codeName);
+        if (pi >= 0) runner->profileCalls[pi].value++;
+        else shput(runner->profileCalls, (char*)codeName, 1);
+        _profStart = clock();
+    }
+
+    uint64_t _stepT0 = _profTickUs();
+
+    if (nativeFunc != nullptr) {
+        nativeFunc(vm, runner, instance);
+    } else {
+        RValue result = VM_executeCode(vm, codeId);
+        RValue_free(&result);
+    }
+
+    if (eventType != EVENT_DRAW) {
+        uint32_t _stepDt = (uint32_t)(_profTickUs() - _stepT0);
+        stepCacheRecord(runner, codeId, _stepDt);
+    }
+
+    if (runner->profileFile != NULL && _profStart != 0) {
+        clock_t _profEnd = clock();
+        int32_t usec = (int32_t)((_profEnd - _profStart) * 1000000 / CLOCKS_PER_SEC);
+        if (codeName == NULL) codeName = runner->dataWin->code.entries[codeId].name;
+        ptrdiff_t ti = shgeti(runner->profileTimes, codeName);
+        if (ti >= 0) runner->profileTimes[ti].value += usec;
+        else shput(runner->profileTimes, (char*)codeName, usec);
+    }
+
+    restoreVMInstanceContext(vm, savedInstance);
+    vm->bytecodeBase = savedBytecodeBase;
+    vm->ip = savedIP;
+    vm->codeEnd = savedCodeEnd;
+    vm->currentCodeName = savedCodeName;
+    vm->localVars = savedLocalVars;
+    vm->localVarCount = savedLocalVarCount;
+    vm->localArrayMap = savedLocalArrayMap;
+    vm->currentEventType = savedEventType;
+    vm->currentEventSubtype = savedEventSubtype;
+    vm->currentEventObjectIndex = savedEventObjectIndex;
+}
+
+static void executeCode(Runner* runner, Instance* instance, int32_t codeId) {
+
+    if (0 > codeId) return;
+
+    VMContext* vm = runner->vmContext;
+
+
+    Instance* savedInstance = (Instance*) vm->currentInstance;
+
+
+
+
+    uint8_t* savedBytecodeBase = vm->bytecodeBase;
+    uint32_t savedIP = vm->ip;
+    uint32_t savedCodeEnd = vm->codeEnd;
+    const char* savedCodeName = vm->currentCodeName;
+    RValue* savedLocalVars = vm->localVars;
+    uint32_t savedLocalVarCount = vm->localVarCount;
+    ArrayMapEntry* savedLocalArrayMap = vm->localArrayMap;
     int32_t savedStackTop = vm->stack.top;
 
-    // Save stack values (VM_executeCode resets stack.top to 0, which would let
-    // the nested execution overwrite the caller's stack slot values)
+
+
     RValue* savedStackValues = nullptr;
     if (savedStackTop > 0) {
         savedStackValues = safeMalloc((uint32_t) savedStackTop * sizeof(RValue));
         memcpy(savedStackValues, vm->stack.slots, (uint32_t) savedStackTop * sizeof(RValue));
     }
 
-    // Set instance context
+
     setVMInstanceContext(vm, instance);
 
-    // Execute
+
     const char* codeName = runner->dataWin->code.entries[codeId].name;
+
+
+    if (runner->profileFile != NULL) {
+        ptrdiff_t pi = shgeti(runner->profileCalls, codeName);
+        if (pi >= 0) runner->profileCalls[pi].value++;
+        else shput(runner->profileCalls, (char*)codeName, 1);
+    }
+
+    clock_t _profStart = 0;
+    if (runner->profileFile != NULL) _profStart = clock();
+
+
+    uint64_t _stepT0 = _profTickUs();
 
     NativeCodeFunc nativeFunc = NativeScripts_find(codeName);
     if (nativeFunc != nullptr) {
@@ -138,21 +249,34 @@ static void executeCode(Runner* runner, Instance* instance, int32_t codeId) {
         RValue_free(&result);
     }
 
-    // Restore instance context
+
+    if (vm->currentEventType != EVENT_DRAW) {
+        uint32_t _stepDt = (uint32_t)(_profTickUs() - _stepT0);
+        stepCacheRecord(runner, codeId, _stepDt);
+    }
+
+    if (runner->profileFile != NULL && _profStart != 0) {
+        clock_t _profEnd = clock();
+        int32_t usec = (int32_t)((_profEnd - _profStart) * 1000000 / CLOCKS_PER_SEC);
+        ptrdiff_t ti = shgeti(runner->profileTimes, codeName);
+        if (ti >= 0) runner->profileTimes[ti].value += usec;
+        else shput(runner->profileTimes, (char*)codeName, usec);
+    }
+
+
     restoreVMInstanceContext(vm, savedInstance);
 
-    // Restore VM execution state
+
     vm->bytecodeBase = savedBytecodeBase;
     vm->ip = savedIP;
     vm->codeEnd = savedCodeEnd;
     vm->currentCodeName = savedCodeName;
     vm->localVars = savedLocalVars;
     vm->localVarCount = savedLocalVarCount;
-    vm->currentCodeLocalsSlotMap = savedCodeLocalsSlotMap;
-    vm->currentCodeIndex = savedCodeIndex;
+    vm->localArrayMap = savedLocalArrayMap;
     vm->stack.top = savedStackTop;
 
-    // Restore stack values
+
     if (savedStackTop > 0) {
         memcpy(vm->stack.slots, savedStackValues, (uint32_t) savedStackTop * sizeof(RValue));
         free(savedStackValues);
@@ -300,29 +424,298 @@ static void executeEventPerObject(Runner* runner, int32_t eventType, int32_t eve
     free(bucketsByObject);
 }
 
-void Runner_executeEventForAll(Runner* runner, int32_t eventType, int32_t eventSubtype) {
-    // On GMS 2.x, the native runner dispatches events in the eventUsesPerObjectDispatch set per-object. Route those through executeEventPerObject to match.
-    if (DataWin_isVersionAtLeast(runner->dataWin, 2, 0, 0, 0) && eventUsesBC17PerObjectDispatch(eventType)) {
-        executeEventPerObject(runner, eventType, eventSubtype);
-        return;
+static void addInstanceToCache(Runner* runner, Instance* inst) {
+    if (runner->instancesByObjInclParent == NULL) return;
+    if (runner->cachedInstCount < 0) return;
+    int32_t oi = inst->objectIndex;
+    if (oi < 0 || oi >= runner->instancesByObjMax) return;
+
+
+    arrput(runner->instancesByObjDirect[oi], inst);
+
+    int32_t byte = oi >> 3, mask = 1 << (oi & 7);
+    if (!(runner->oiInListBitmap[byte] & mask)) {
+        runner->oiInListBitmap[byte] |= mask;
+        arrput(runner->activeOIsList, oi);
     }
 
-    // All other events walk the room's active instance list in forward insertion order (oldest first).
-    // Ordering note: a room's own instances are loaded first at initRoom time, then persistent instances carried over from the previous room are appended at the end.
-    int32_t count = (int32_t) arrlen(runner->instances);
-    // Snapshot the iteration list: events may create new instances (appended to runner->instances) and we do NOT want those to fire in this phase, matching GM semantics where only pre-existing instances run the current event phase.
-    Instance** snapshot = nullptr;
-    arrsetcap(snapshot, count);
-    repeat(count, i) {
-        arrput(snapshot, runner->instances[i]);
+
+    int32_t cur = oi;
+    int32_t depth = 0;
+    DataWin* dw = runner->dataWin;
+    while (cur >= 0 && cur < runner->instancesByObjMax && depth < 32) {
+        arrput(runner->instancesByObjInclParent[cur], inst);
+        cur = dw->objt.objects[cur].parentId;
+        depth++;
     }
-    repeat(count, i) {
-        Instance* inst = snapshot[i];
-        if (inst->active) {
-            Runner_executeEvent(runner, inst, eventType, eventSubtype);
+    runner->cachedInstCount++;
+}
+
+
+static void removeInstanceFromCache(Runner* runner, Instance* inst) {
+    if (runner->instancesByObjInclParent == NULL) return;
+    if (runner->cachedInstCount < 0) return;
+    int32_t oi = inst->objectIndex;
+    if (oi < 0 || oi >= runner->instancesByObjMax) return;
+
+
+    {
+        Instance** list = runner->instancesByObjDirect[oi];
+        int32_t n = (int32_t)arrlen(list);
+        for (int32_t k = 0; k < n; k++) {
+            if (list[k] == inst) {
+                list[k] = list[n - 1];
+                arrsetlen(runner->instancesByObjDirect[oi], n - 1);
+                break;
+            }
+        }
+
+    }
+
+
+    int32_t cur = oi;
+    int32_t depth = 0;
+    DataWin* dw = runner->dataWin;
+    while (cur >= 0 && cur < runner->instancesByObjMax && depth < 32) {
+        Instance** plist = runner->instancesByObjInclParent[cur];
+        int32_t pn = (int32_t)arrlen(plist);
+        for (int32_t k = 0; k < pn; k++) {
+            if (plist[k] == inst) {
+                plist[k] = plist[pn - 1];
+                arrsetlen(runner->instancesByObjInclParent[cur], pn - 1);
+                break;
+            }
+        }
+        cur = dw->objt.objects[cur].parentId;
+        depth++;
+    }
+    runner->cachedInstCount--;
+}
+
+
+static void ensureInstancesByObj(Runner* runner) {
+    int32_t current = (int32_t)arrlen(runner->instances);
+    if (current == runner->cachedInstCount && runner->instancesByObjInclParent != NULL) return;
+
+    int32_t maxOI = (int32_t)runner->dataWin->objt.count;
+    DataWin* dw = runner->dataWin;
+
+    if (runner->instancesByObjInclParent == NULL) {
+        runner->instancesByObjInclParent = (Instance***)safeCalloc((size_t)maxOI, sizeof(Instance**));
+        runner->instancesByObjDirect = (Instance***)safeCalloc((size_t)maxOI, sizeof(Instance**));
+        runner->oiInListBitmap = (uint8_t*)safeCalloc((size_t)((maxOI + 7) / 8), 1);
+        runner->instancesByObjMax = maxOI;
+    }
+
+
+    for (int32_t i = 0; i < runner->instancesByObjMax; i++) {
+        if (runner->instancesByObjInclParent[i]) arrsetlen(runner->instancesByObjInclParent[i], 0);
+        if (runner->instancesByObjDirect[i]) arrsetlen(runner->instancesByObjDirect[i], 0);
+    }
+    arrsetlen(runner->activeOIsList, 0);
+    memset(runner->oiInListBitmap, 0, (runner->instancesByObjMax + 7) / 8);
+
+    for (int32_t i = 0; i < current; i++) {
+        Instance* inst = runner->instances[i];
+        int32_t oi = inst->objectIndex;
+        if (oi < 0 || oi >= runner->instancesByObjMax) continue;
+
+
+        arrput(runner->instancesByObjDirect[oi], inst);
+        int32_t byte = oi >> 3, mask = 1 << (oi & 7);
+        if (!(runner->oiInListBitmap[byte] & mask)) {
+            runner->oiInListBitmap[byte] |= mask;
+            arrput(runner->activeOIsList, oi);
+        }
+
+
+        int32_t cur = oi;
+        int32_t depth = 0;
+        while (cur >= 0 && cur < runner->instancesByObjMax && depth < 32) {
+            arrput(runner->instancesByObjInclParent[cur], inst);
+            cur = dw->objt.objects[cur].parentId;
+            depth++;
         }
     }
-    arrfree(snapshot);
+
+    runner->cachedInstCount = current;
+}
+
+typedef struct {
+    int32_t codeId;
+    int32_t ownerObjectIndex;
+    NativeCodeFunc nativeFunc;
+} ObjEventCache;
+
+void Runner_executeEventForAll(Runner* runner, int32_t eventType, int32_t eventSubtype) {
+
+
+
+
+
+
+
+
+
+    DataWin* dw = runner->dataWin;
+    int32_t maxObjIdx = (int32_t)dw->objt.count;
+
+
+    ensureInstancesByObj(runner);
+
+
+
+
+
+    struct DispatchEntry { int32_t oi; int32_t codeId; int32_t ownerObj; NativeCodeFunc nativeFunc; };
+    struct DispatchEntry entries[128];
+    int32_t entryCount = 0;
+
+    int32_t nActiveOIs = (int32_t)arrlen(runner->activeOIsList);
+    for (int32_t u = 0; u < nActiveOIs && entryCount < 128; u++) {
+        int32_t oi = runner->activeOIsList[u];
+        if (oi < 0 || oi >= maxObjIdx) continue;
+
+        if (arrlen(runner->instancesByObjDirect[oi]) == 0) continue;
+
+        int32_t ownerObj = -1;
+        int32_t cid = findEventCodeIdAndOwner(dw, oi, eventType, eventSubtype, &ownerObj);
+        if (cid < 0) continue;
+
+        entries[entryCount].oi = oi;
+        entries[entryCount].codeId = cid;
+        entries[entryCount].ownerObj = ownerObj;
+        entries[entryCount].nativeFunc = NativeScripts_find(dw->code.entries[cid].name);
+        entryCount++;
+    }
+
+    if (entryCount == 0) return;
+
+
+    for (int32_t a = 1; a < entryCount; a++) {
+        struct DispatchEntry key = entries[a];
+        int32_t b = a - 1;
+        while (b >= 0 && entries[b].oi > key.oi) {
+            entries[b + 1] = entries[b];
+            b--;
+        }
+        entries[b + 1] = key;
+    }
+
+
+
+
+
+    int32_t activeCount = entryCount;
+    ObjEventCache objCacheLocal[128];
+    int32_t oiCounts[128];
+    int32_t oiOffsets[128];
+    int32_t totalMatching = 0;
+    for (int32_t e = 0; e < entryCount; e++) {
+        totalMatching += (int32_t)arrlen(runner->instancesByObjDirect[entries[e].oi]);
+    }
+    Instance** sorted = (Instance**)alloca(totalMatching * sizeof(Instance*));
+    int32_t offset = 0;
+    for (int32_t e = 0; e < entryCount; e++) {
+        struct DispatchEntry* de = &entries[e];
+        objCacheLocal[e].codeId = de->codeId;
+        objCacheLocal[e].ownerObjectIndex = de->ownerObj;
+        objCacheLocal[e].nativeFunc = de->nativeFunc;
+        oiOffsets[e] = offset;
+        Instance** list = runner->instancesByObjDirect[de->oi];
+        int32_t listLen = (int32_t)arrlen(list);
+        for (int32_t k = 0; k < listLen; k++) {
+            sorted[offset++] = list[k];
+        }
+        oiCounts[e] = listLen;
+    }
+
+
+    VMContext* vm = runner->vmContext;
+    int32_t savedEventType = vm->currentEventType;
+    int32_t savedEventSubtype = vm->currentEventSubtype;
+    int32_t savedEventObjectIndex = vm->currentEventObjectIndex;
+
+    for (int32_t u = 0; u < activeCount; u++) {
+        ObjEventCache* c = &objCacheLocal[u];
+        int32_t start = oiOffsets[u];
+        int32_t end = start + oiCounts[u];
+
+        vm->currentEventType = eventType;
+        vm->currentEventSubtype = eventSubtype;
+        vm->currentEventObjectIndex = c->ownerObjectIndex;
+
+        const char* cn = NULL;
+        if (runner->profileFile != NULL)
+            cn = dw->code.entries[c->codeId].name;
+
+
+
+
+        bool recordStep = (eventType != EVENT_DRAW);
+
+        if (c->nativeFunc != nullptr) {
+            NativeCodeFunc fn = c->nativeFunc;
+            for (int32_t j = start; j < end; j++) {
+                Instance* inst = sorted[j];
+                if (!inst->active) continue;
+                Instance* savedInst = (Instance*)vm->currentInstance;
+                vm->currentInstance = inst;
+                if (cn != NULL) {
+                    ptrdiff_t pi = shgeti(runner->profileCalls, cn);
+                    if (pi >= 0) runner->profileCalls[pi].value++;
+                    else shput(runner->profileCalls, (char*)cn, 1);
+                    clock_t ps = clock();
+                    fn(vm, runner, inst);
+                    clock_t pe = clock();
+                    int32_t us = (int32_t)((pe - ps) * 1000000 / CLOCKS_PER_SEC);
+                    ptrdiff_t ti = shgeti(runner->profileTimes, cn);
+                    if (ti >= 0) runner->profileTimes[ti].value += us;
+                    else shput(runner->profileTimes, (char*)cn, us);
+                } else {
+                    fn(vm, runner, inst);
+                }
+                vm->currentInstance = savedInst;
+            }
+        } else {
+            int32_t cid = c->codeId;
+            for (int32_t j = start; j < end; j++) {
+                Instance* inst = sorted[j];
+                if (!inst->active) continue;
+                Instance* savedInst = (Instance*)vm->currentInstance;
+                uint8_t* sBB = vm->bytecodeBase; uint32_t sIP = vm->ip;
+                uint32_t sCE = vm->codeEnd; const char* sCN = vm->currentCodeName;
+                RValue* sLV = vm->localVars; uint32_t sLC = vm->localVarCount;
+                ArrayMapEntry* sLA = vm->localArrayMap;
+                vm->currentInstance = inst;
+                if (cn != NULL) {
+                    ptrdiff_t pi = shgeti(runner->profileCalls, cn);
+                    if (pi >= 0) runner->profileCalls[pi].value++;
+                    else shput(runner->profileCalls, (char*)cn, 1);
+                    clock_t ps = clock();
+                    RValue result = VM_executeCode(vm, cid);
+                    RValue_free(&result);
+                    clock_t pe = clock();
+                    int32_t us = (int32_t)((pe - ps) * 1000000 / CLOCKS_PER_SEC);
+                    ptrdiff_t ti = shgeti(runner->profileTimes, cn);
+                    if (ti >= 0) runner->profileTimes[ti].value += us;
+                    else shput(runner->profileTimes, (char*)cn, us);
+                } else {
+                    RValue result = VM_executeCode(vm, cid);
+                    RValue_free(&result);
+                }
+                vm->currentInstance = savedInst;
+                vm->bytecodeBase = sBB; vm->ip = sIP; vm->codeEnd = sCE;
+                vm->currentCodeName = sCN; vm->localVars = sLV;
+                vm->localVarCount = sLC; vm->localArrayMap = sLA;
+            }
+        }
+    }
+
+    vm->currentEventType = savedEventType;
+    vm->currentEventSubtype = savedEventSubtype;
+    vm->currentEventObjectIndex = savedEventObjectIndex;
+
 }
 
 // ===[ Background Scrolling & Drawing ]===
@@ -407,9 +800,68 @@ static int compareInstanceDepth(const void* a, const void* b) {
 
 
 static void fireDrawSubtype(Runner* runner, Instance** drawList, int32_t drawCount, int32_t subtype) {
+
+
+    DataWin* dw = runner->dataWin;
+    int32_t maxObj = (int32_t)dw->objt.count;
+    ObjEventCache* cache = (ObjEventCache*)alloca(maxObj * sizeof(ObjEventCache));
+    int32_t vBytes = (maxObj + 7) / 8;
+    uint8_t* visited = (uint8_t*)alloca(vBytes);
+    memset(visited, 0, vBytes);
+
+    VMContext* vm = runner->vmContext;
+    int32_t savedET = vm->currentEventType;
+    int32_t savedES = vm->currentEventSubtype;
+    int32_t savedEO = vm->currentEventObjectIndex;
+
+    vm->currentEventType = EVENT_DRAW;
+    vm->currentEventSubtype = subtype;
+
     repeat(drawCount, i) {
-        Runner_executeEvent(runner, drawList[i], EVENT_DRAW, subtype);
+        Instance* inst = drawList[i];
+        if (!inst->active) continue;
+        int32_t oi = inst->objectIndex;
+        if (oi >= 0 && oi < maxObj) {
+            bool isVisited = (visited[oi / 8] & (1 << (oi % 8))) != 0;
+            if (isVisited && cache[oi].codeId < 0) continue;
+            if (!isVisited) {
+                visited[oi / 8] |= (1 << (oi % 8));
+                int32_t ownerObj = -1;
+                int32_t cid = findEventCodeIdAndOwner(dw, oi, EVENT_DRAW, subtype, &ownerObj);
+                if (cid < 0) { cache[oi].codeId = -1; continue; }
+                cache[oi].codeId = cid;
+                cache[oi].ownerObjectIndex = ownerObj;
+                const char* cn = dw->code.entries[cid].name;
+                cache[oi].nativeFunc = NativeScripts_find(cn);
+            }
+        } else {
+            Runner_executeEvent(runner, inst, EVENT_DRAW, subtype);
+            continue;
+        }
+
+        vm->currentEventObjectIndex = cache[oi].ownerObjectIndex;
+        Instance* savedInst = (Instance*)vm->currentInstance;
+        vm->currentInstance = inst;
+
+        if (cache[oi].nativeFunc != nullptr) {
+            cache[oi].nativeFunc(vm, runner, inst);
+        } else {
+            uint8_t* sBB = vm->bytecodeBase; uint32_t sIP = vm->ip;
+            uint32_t sCE = vm->codeEnd; const char* sCN = vm->currentCodeName;
+            RValue* sLV = vm->localVars; uint32_t sLC = vm->localVarCount;
+            ArrayMapEntry* sLA = vm->localArrayMap;
+            RValue result = VM_executeCode(vm, cache[oi].codeId);
+            RValue_free(&result);
+            vm->bytecodeBase = sBB; vm->ip = sIP; vm->codeEnd = sCE;
+            vm->currentCodeName = sCN; vm->localVars = sLV;
+            vm->localVarCount = sLC; vm->localArrayMap = sLA;
+        }
+        vm->currentInstance = savedInst;
     }
+
+    vm->currentEventType = savedET;
+    vm->currentEventSubtype = savedES;
+    vm->currentEventObjectIndex = savedEO;
 }
 
 // GMS2 tilemap cell bit layout (matches HTML5 Function_Layers.js TileIndex/Mirror/Flip/Rotate masks)
@@ -475,258 +927,229 @@ static void Runner_drawTileLayer(Runner* runner, RoomLayerTilesData* data, float
 void Runner_draw(Runner* runner) {
     Room* room = runner->currentRoom;
 
-    // Collect active + visible instances for event dispatch
-    Instance** drawList = nullptr;
+
+    uint64_t _dt0 = _profTickUs(), _dt1;
+    #define DRAW_MARK(field) do { _dt1 = _profTickUs(); \
+        runner->field += (uint32_t)(_dt1 - _dt0); \
+        _dt0 = _dt1; } while(0)
+
+    DataWin* dw = runner->dataWin;
+
+
     int32_t count = (int32_t) arrlen(runner->instances);
+    Instance** drawListBuf = (Instance**)alloca(count * sizeof(Instance*));
+    int32_t drawCount = 0;
     repeat(count, i) {
         Instance* inst = runner->instances[i];
         if (inst->active && inst->visible) {
-            arrput(drawList, inst);
+            drawListBuf[drawCount++] = inst;
         }
     }
+    Instance** drawList = drawListBuf;
 
-    // Sort by depth descending (higher depth first)
-    int32_t drawCount = (int32_t) arrlen(drawList);
+
     if (drawCount > 1) {
         qsort(drawList, drawCount, sizeof(Instance*), compareInstanceDepth);
     }
 
-    // Draw non-foreground backgrounds (behind everything)
-    if (!DataWin_isVersionAtLeast(runner->dataWin, 2, 0, 0, 0))
+    DRAW_MARK(drawPhaseSortList);
+
+
+    if(true)
         Runner_drawBackgrounds(runner, false);
 
-    // Fire draw subtypes in correct GameMaker order
-    fireDrawSubtype(runner, drawList, drawCount, DRAW_PRE);
-    fireDrawSubtype(runner, drawList, drawCount, DRAW_BEGIN);
 
-    // DRAW_NORMAL: build a unified drawable list of tiles + instances, sorted by depth
-    Drawable* drawables = nullptr;
 
-    // Add visible instances
-    repeat(drawCount, i) {
-        Drawable d = { .type = DRAWABLE_INSTANCE, .depth = drawList[i]->depth, .instance = drawList[i] };
-        arrput(drawables, d);
-    }
 
-    // Add tiles (skip hidden layers)
-    if (!DataWin_isVersionAtLeast(runner->dataWin, 2, 0, 0, 0)) {
-        repeat(room->tileCount, i) {
-            RoomTile* tile = &room->tiles[i];
-            // Check if this tile's layer is hidden
-            ptrdiff_t layerIdx = hmgeti(runner->tileLayerMap, tile->tileDepth);
-            if (layerIdx >= 0 && !runner->tileLayerMap[layerIdx].value.visible) continue;
 
-            Drawable d = { .type = DRAWABLE_TILE, .depth = tile->tileDepth, .tileIndex = (int32_t) i };
-            arrput(drawables, d);
+
+
+
+    DRAW_MARK(drawPhaseBuildList);
+
+
+    typedef struct { int32_t oi; int32_t codeId; int32_t ownerObj; NativeCodeFunc nativeFunc;
+                     uint32_t vmTimeUs; int32_t vmCalls; } DrawCacheEntry;
+    DrawCacheEntry drawCache[96];
+    int32_t drawCacheCount = 0;
+
+
+
+    #define DRAW_INSTANCE(inst) do { \
+        int32_t _oi = (inst)->objectIndex; \
+        DrawCacheEntry* _found = NULL; \
+        for (int32_t _ci = 0; _ci < drawCacheCount; _ci++) \
+            if (drawCache[_ci].oi == _oi) { _found = &drawCache[_ci]; break; } \
+        if (!_found && drawCacheCount < 96) { \
+            int32_t _ownerObj = -1; \
+            int32_t _cid = findEventCodeIdAndOwner(dw, _oi, EVENT_DRAW, DRAW_NORMAL, &_ownerObj); \
+            _found = &drawCache[drawCacheCount++]; \
+            _found->oi = _oi; _found->codeId = _cid; _found->ownerObj = _ownerObj; \
+            _found->nativeFunc = (_cid >= 0) ? NativeScripts_find(dw->code.entries[_cid].name) : NULL; \
+            _found->vmTimeUs = 0; _found->vmCalls = 0; \
+        } \
+        if (_found && _found->codeId >= 0) { \
+            VMContext* _vm = runner->vmContext; \
+            int32_t _sET = _vm->currentEventType, _sES = _vm->currentEventSubtype, _sEO = _vm->currentEventObjectIndex; \
+            _vm->currentEventType = EVENT_DRAW; _vm->currentEventSubtype = DRAW_NORMAL; \
+            _vm->currentEventObjectIndex = _found->ownerObj; \
+            Instance* _si = (Instance*)_vm->currentInstance; _vm->currentInstance = (inst); \
+            if (_found->nativeFunc) { \
+                uint64_t _nt0 = _profTickUs(); \
+                _found->nativeFunc(_vm, runner, (inst)); \
+                runner->drawNrmInstNative += (uint32_t)(_profTickUs() - _nt0); \
+                runner->drawNrmCountInstNative++; \
+            } else { \
+                uint8_t* _sBB=_vm->bytecodeBase; uint32_t _sIP=_vm->ip, _sCE=_vm->codeEnd; \
+                const char* _sCN=_vm->currentCodeName; RValue* _sLV=_vm->localVars; \
+                uint32_t _sLC=_vm->localVarCount; ArrayMapEntry* _sLA=_vm->localArrayMap; \
+                uint64_t _vt0 = _profTickUs(); \
+                RValue _r = VM_executeCode(_vm, _found->codeId); RValue_free(&_r); \
+                uint32_t _vdt = (uint32_t)(_profTickUs() - _vt0); \
+                runner->drawNrmInstVM += _vdt; \
+                runner->drawNrmCountInstVM++; \
+                _found->vmTimeUs += _vdt; _found->vmCalls++; \
+                _vm->bytecodeBase=_sBB; _vm->ip=_sIP; _vm->codeEnd=_sCE; \
+                _vm->currentCodeName=_sCN; _vm->localVars=_sLV; \
+                _vm->localVarCount=_sLC; _vm->localArrayMap=_sLA; \
+            } \
+            _vm->currentInstance = _si; _vm->currentEventType = _sET; \
+            _vm->currentEventSubtype = _sES; _vm->currentEventObjectIndex = _sEO; \
+        } else if (runner->renderer != nullptr) { \
+            uint64_t _dt = _profTickUs(); \
+            Renderer_drawSelf(runner->renderer, (inst)); \
+            runner->drawNrmInstDrawSelf += (uint32_t)(_profTickUs() - _dt); \
+            runner->drawNrmCountInstDrawSelf++; \
+        } \
+    } while(0)
+
+    if (room->tileCount == 0) {
+
+        repeat(drawCount, i) {
+            Instance* inst = drawList[i];
+            if (inst->active) DRAW_INSTANCE(inst);
         }
-    }
+    } else {
 
-    if (DataWin_isVersionAtLeast(runner->dataWin, 2, 0, 0, 0)) {
-        size_t runtimeLayersCount = arrlenu(runner->runtimeLayers);
-        repeat(runtimeLayersCount, i) {
-            RuntimeLayer* runtimeLayer = &runner->runtimeLayers[i];
-            if (!runtimeLayer->visible) continue;
-            Drawable d = { .type = DRAWABLE_LAYER, .depth = runtimeLayer->depth, .runtimeLayer = runtimeLayer };
-            arrput(drawables, d);
+        uint64_t _nrmBldT0 = _profTickUs();
+        int32_t maxDrawables = drawCount + (int32_t)room->tileCount + 16;
+        Drawable* drawables = (Drawable*)alloca(maxDrawables * sizeof(Drawable));
+        int32_t drawableCount = 0;
+
+        repeat(drawCount, i) {
+            drawables[drawableCount++] = (Drawable){ .type = DRAWABLE_INSTANCE, .depth = drawList[i]->depth, .instance = drawList[i] };
         }
-    }
 
-    // Sort all drawables by depth
-    int32_t drawableCount = (int32_t) arrlen(drawables);
-    if (drawableCount > 1) {
-        qsort(drawables, drawableCount, sizeof(Drawable), compareDrawableDepth);
-    }
+        if (true) {
 
-    // Draw interleaved tiles and instances
-    repeat(drawableCount, i) {
-        Drawable* d = &drawables[i];
-        if (d->type == DRAWABLE_TILE) {
-            if (runner->renderer != nullptr) {
-                RoomTile* tile = &room->tiles[d->tileIndex];
-                float offsetX = 0.0f, offsetY = 0.0f;
-                ptrdiff_t layerIdx = hmgeti(runner->tileLayerMap, tile->tileDepth);
-                if (layerIdx >= 0) {
-                    offsetX = runner->tileLayerMap[layerIdx].value.offsetX;
-                    offsetY = runner->tileLayerMap[layerIdx].value.offsetY;
+            int32_t viewL = 0, viewT = 0, viewR = room->width, viewB = room->height;
+            bool viewsEnabled = (room->flags & 1) != 0;
+            if (viewsEnabled) {
+                int vi = runner->viewCurrent;
+                if (vi >= 0 && vi < 8 && room->views[vi].enabled) {
+                    viewL = room->views[vi].viewX;
+                    viewT = room->views[vi].viewY;
+                    viewR = viewL + room->views[vi].viewWidth;
+                    viewB = viewT + room->views[vi].viewHeight;
                 }
-
-#ifdef ENABLE_VM_TRACING
-                // Trace tile drawing if requested
-                if (shlen(runner->vmContext->tilesToBeTraced) > 0) {
-                    DataWin* dataWin = runner->dataWin;
-                    const char* bgName = (tile->backgroundDefinition >= 0 && dataWin->bgnd.count > (uint32_t) tile->backgroundDefinition) ? dataWin->bgnd.backgrounds[tile->backgroundDefinition].name : "<none>";
-                    const char* roomName = room->name;
-
-                    bool shouldTrace = shgeti(runner->vmContext->tilesToBeTraced, "*") != -1 || shgeti(runner->vmContext->tilesToBeTraced, bgName) != -1 || shgeti(runner->vmContext->tilesToBeTraced, roomName) != -1;
-
-                    if (shouldTrace) {
-                        int32_t tpagIndex = Renderer_resolveObjectTPAGIndex(dataWin, tile);
-                        if (tpagIndex >= 0) {
-                            TexturePageItem* tpag = &dataWin->tpag.items[tpagIndex];
-                            fprintf(stderr, "Runner: [%s] Drawing tile #%d bg=%s(%d) tpag(srcX=%d srcY=%d srcW=%d srcH=%d tgtX=%d tgtY=%d bndW=%d bndH=%d page=%d) tile(srcX=%d srcY=%d w=%u h=%u) at pos=(%d,%d) depth=%d\n", roomName, d->tileIndex, bgName, tile->backgroundDefinition, tpag->sourceX, tpag->sourceY, tpag->sourceWidth, tpag->sourceHeight, tpag->targetX, tpag->targetY, tpag->boundingWidth, tpag->boundingHeight, tpag->texturePageId, tile->sourceX, tile->sourceY, tile->width, tile->height, tile->x, tile->y, tile->tileDepth);
-
-                            // Warn if tile source rect exceeds TPAG content bounds
-                            if ((uint32_t) (tile->sourceX + tile->width) > (uint32_t) tpag->sourceWidth || (uint32_t) (tile->sourceY + tile->height) > (uint32_t) tpag->sourceHeight) {
-                                fprintf(stderr, "Runner: [%s] WARNING: Tile #%d source rect (%d,%d %ux%u) exceeds TPAG content bounds (%dx%d)\n", roomName, d->tileIndex, tile->sourceX, tile->sourceY, tile->width, tile->height, tpag->sourceWidth, tpag->sourceHeight);
-                            }
-                        } else {
-                            fprintf(stderr, "Runner: [%s] Drawing tile #%d bg=%s(%d) tpag=UNRESOLVED tile(srcX=%d srcY=%d w=%u h=%u) at pos=(%d,%d) depth=%d\n", roomName, d->tileIndex, bgName, tile->backgroundDefinition, tile->sourceX, tile->sourceY, tile->width, tile->height, tile->x, tile->y, tile->tileDepth);
-                        }
-                    }
-                }
-#endif
-
-                Renderer_drawTile(runner->renderer, tile, offsetX, offsetY);
-            }
-        } else if (d->type == DRAWABLE_INSTANCE) {
-            Instance* inst = d->instance;
-            int32_t codeId = findEventCodeIdAndOwner(runner->dataWin, inst->objectIndex, EVENT_DRAW, DRAW_NORMAL, nullptr);
-            if (codeId >= 0) {
-                Runner_executeEvent(runner, inst, EVENT_DRAW, DRAW_NORMAL);
-            } else if (runner->renderer != nullptr) {
-                Renderer_drawSelf(runner->renderer, inst);
-            }
-        } else if (d->type == DRAWABLE_LAYER)
-        {
-            RuntimeLayer* runtimeLayer = d->runtimeLayer;
-            if (runtimeLayer == nullptr || !runtimeLayer->visible) continue;
-            float layerOffsetX = runtimeLayer->xOffset;
-            float layerOffsetY = runtimeLayer->yOffset;
-
-            // Dynamic layers created via layer_create have no parsed RoomLayer, render their runtime elements instead (backgrounds, in the future sprites/tilemaps).
-            if (runtimeLayer->dynamic) {
-                if (runner->renderer == nullptr) continue;
-
-                DataWin* dataWin = runner->dataWin;
-                float roomW = (float) runner->currentRoom->width;
-                float roomH = (float) runner->currentRoom->height;
-
-                size_t elementCount = arrlenu(runtimeLayer->elements);
-                repeat(elementCount, j) {
-                    RuntimeLayerElement* layerElement = &runtimeLayer->elements[j];
-                    if (layerElement->type == RuntimeLayerElementType_Background && layerElement->backgroundElement != nullptr) {
-                        RuntimeBackgroundElement* bg = layerElement->backgroundElement;
-                        if (!bg->visible) continue;
-                        int32_t tpagIndex = Renderer_resolveSpriteTPAGIndex(dataWin, bg->spriteIndex);
-                        if (0 > tpagIndex) continue;
-                        if (bg->stretch) {
-                            TexturePageItem* tpag = &dataWin->tpag.items[tpagIndex];
-                            float xscale = roomW / (float) tpag->boundingWidth;
-                            float yscale = roomH / (float) tpag->boundingHeight;
-                            runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex, 0.0f, 0.0f, 0.0f, 0.0f, xscale, yscale, 0.0f, bg->blend, bg->alpha);
-                        } else if (bg->htiled || bg->vtiled) {
-                            Renderer_drawBackgroundTiled(runner->renderer, tpagIndex, layerOffsetX + bg->xOffset, layerOffsetY + bg->yOffset, bg->htiled, bg->vtiled, roomW, roomH, bg->alpha);
-                        } else {
-                            runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex, layerOffsetX + bg->xOffset, layerOffsetY + bg->yOffset, 0.0f, 0.0f, bg->xScale, bg->yScale, 0.0f, bg->blend, bg->alpha);
-                        }
-                    }
-                }
-                continue;
             }
 
-            // Parsed layer: look up the RoomLayer by ID and render its data-driven content.
-            RoomLayer* parsedLayer = Runner_findRoomLayerById(runner, (int32_t) runtimeLayer->id);
-            if (parsedLayer == nullptr) continue;
-            if (parsedLayer->type == RoomLayerType_Assets) {
-                RoomLayerAssetsData* data = parsedLayer->assetsData;
-                repeat(data->legacyTileCount, j) {
-                    if (runner->renderer != nullptr) {
-                        RoomTile* tile = &data->legacyTiles[j];
-                        // Check if this tile's layer is hidden via tile_layer_hide()
-                        ptrdiff_t layerIdx = hmgeti(runner->tileLayerMap, tile->tileDepth);
-                        if (layerIdx >= 0 && !runner->tileLayerMap[layerIdx].value.visible) continue;
-                        float offsetX = 0.0f, offsetY = 0.0f;
-                        if (layerIdx >= 0) {
-                            offsetX = runner->tileLayerMap[layerIdx].value.offsetX;
-                            offsetY = runner->tileLayerMap[layerIdx].value.offsetY;
-                        }
+            int32_t cachedDepth = INT32_MIN; bool cachedVisible = true;
+            float cachedOffX = 0, cachedOffY = 0;
+            repeat(room->tileCount, i) {
+                RoomTile* tile = &room->tiles[i];
+                if (tile->tileDepth != cachedDepth) {
+                    cachedDepth = tile->tileDepth; cachedVisible = true; cachedOffX = 0; cachedOffY = 0;
+                    ptrdiff_t li = hmgeti(runner->tileLayerMap, tile->tileDepth);
+                    if (li >= 0) { cachedVisible = runner->tileLayerMap[li].value.visible;
+                        cachedOffX = runner->tileLayerMap[li].value.offsetX;
+                        cachedOffY = runner->tileLayerMap[li].value.offsetY; }
+                }
+                if (!cachedVisible) continue;
 
-#ifdef ENABLE_VM_TRACING
-                        // Trace tile drawing if requested
-                        if (shlen(runner->vmContext->tilesToBeTraced) > 0) {
-                            DataWin* dataWin = runner->dataWin;
-                            const char* bgName = (tile->backgroundDefinition >= 0 && dataWin->bgnd.count > (uint32_t) tile->backgroundDefinition) ? dataWin->bgnd.backgrounds[tile->backgroundDefinition].name : "<none>";
-                            const char* roomName = room->name;
+                float tileL = (float)tile->x + cachedOffX;
+                float tileT = (float)tile->y + cachedOffY;
+                float tileR = tileL + (float)tile->width;
+                float tileB = tileT + (float)tile->height;
+                if (tileR < (float)viewL || tileL > (float)viewR ||
+                    tileB < (float)viewT || tileT > (float)viewB) continue;
+                drawables[drawableCount++] = (Drawable){ .type = DRAWABLE_TILE, .depth = tile->tileDepth, .tileIndex = (int32_t)i };
+            }
+        }
 
-                            bool shouldTrace = shgeti(runner->vmContext->tilesToBeTraced, "*") != -1 || shgeti(runner->vmContext->tilesToBeTraced, bgName) != -1 || shgeti(runner->vmContext->tilesToBeTraced, roomName) != -1;
+        runner->drawNrmBuildDrawables += (uint32_t)(_profTickUs() - _nrmBldT0);
 
-                            if (shouldTrace) {
-                                int32_t tpagIndex = Renderer_resolveObjectTPAGIndex(dataWin, tile);
-                                if (tpagIndex >= 0) {
-                                    TexturePageItem* tpag = &dataWin->tpag.items[tpagIndex];
-                                    fprintf(stderr, "Runner: [%s] Drawing tile #%d bg=%s(%d) tpag(srcX=%d srcY=%d srcW=%d srcH=%d tgtX=%d tgtY=%d bndW=%d bndH=%d page=%d) tile(srcX=%d srcY=%d w=%u h=%u) at pos=(%d,%d) depth=%d\n", roomName, d->tileIndex, bgName, tile->backgroundDefinition, tpag->sourceX, tpag->sourceY, tpag->sourceWidth, tpag->sourceHeight, tpag->targetX, tpag->targetY, tpag->boundingWidth, tpag->boundingHeight, tpag->texturePageId, tile->sourceX, tile->sourceY, tile->width, tile->height, tile->x, tile->y, tile->tileDepth);
+        if (drawableCount > 1) {
+            uint64_t _qsT0 = _profTickUs();
+            qsort(drawables, drawableCount, sizeof(Drawable), compareDrawableDepth);
+            runner->drawNrmQsort += (uint32_t)(_profTickUs() - _qsT0);
+        }
 
-                                    // Warn if tile source rect exceeds TPAG content bounds
-                                    if ((uint32_t) (tile->sourceX + tile->width) > (uint32_t) tpag->sourceWidth || (uint32_t) (tile->sourceY + tile->height) > (uint32_t) tpag->sourceHeight) {
-                                        fprintf(stderr, "Runner: [%s] WARNING: Tile #%d source rect (%d,%d %ux%u) exceeds TPAG content bounds (%dx%d)\n", roomName, d->tileIndex, tile->sourceX, tile->sourceY, tile->width, tile->height, tpag->sourceWidth, tpag->sourceHeight);
-                                    }
-                                } else {
-                                    fprintf(stderr, "Runner: [%s] Drawing tile #%d bg=%s(%d) tpag=UNRESOLVED tile(srcX=%d srcY=%d w=%u h=%u) at pos=(%d,%d) depth=%d\n", roomName, d->tileIndex, bgName, tile->backgroundDefinition, tile->sourceX, tile->sourceY, tile->width, tile->height, tile->x, tile->y, tile->tileDepth);
-                                }
-                            }
-                        }
-#endif
-
-                        Renderer_drawTile(runner->renderer, tile, offsetX, offsetY);
+        int32_t dCachedDepth = INT32_MIN; float dCachedOffX = 0, dCachedOffY = 0;
+        repeat(drawableCount, i) {
+            Drawable* d = &drawables[i];
+            if (d->type == DRAWABLE_TILE) {
+                if (runner->renderer != nullptr) {
+                    RoomTile* tile = &room->tiles[d->tileIndex];
+                    if (tile->tileDepth != dCachedDepth) {
+                        dCachedDepth = tile->tileDepth; dCachedOffX = 0; dCachedOffY = 0;
+                        ptrdiff_t li = hmgeti(runner->tileLayerMap, tile->tileDepth);
+                        if (li >= 0) { dCachedOffX = runner->tileLayerMap[li].value.offsetX;
+                            dCachedOffY = runner->tileLayerMap[li].value.offsetY; }
                     }
+                    uint64_t _tt0 = _profTickUs();
+                    Renderer_drawTile(runner->renderer, tile, dCachedOffX, dCachedOffY);
+                    runner->drawNrmTiles += (uint32_t)(_profTickUs() - _tt0);
+                    runner->drawNrmCountTiles++;
                 }
-
-                // Sprite elements are rendered from the runtime element list (not the parsed data) so that layer_sprite_destroy can remove them at runtime.
-                size_t elementCount = arrlenu(runtimeLayer->elements);
-                repeat(elementCount, j) {
-                    if (runner->renderer == nullptr) break;
-                    RuntimeLayerElement* el = &runtimeLayer->elements[j];
-                    if (el->type != RuntimeLayerElementType_Sprite || el->spriteElement == nullptr) continue;
-                    RuntimeSpriteElement* spr = el->spriteElement;
-                    if (0 > spr->spriteIndex) continue;
-                    Renderer_drawSpriteExt(
-                        runner->renderer, spr->spriteIndex, (int32_t) spr->frameIndex,
-                        spr->x, spr->y, spr->scaleX,
-                        spr->scaleY, spr->rotation, spr->color,
-                        1.0);
-                }
-            } else if(parsedLayer->type == RoomLayerType_Background) {
-                if (runner->renderer == nullptr) return;
-                    DataWin* dataWin = runner->dataWin;
-                    float roomW = (float) runner->currentRoom->width;
-                    float roomH = (float) runner->currentRoom->height;
-                    RoomLayerBackgroundData* data = parsedLayer->backgroundData;
-
-                        int32_t tpagIndex = Renderer_resolveSpriteTPAGIndex(dataWin, data->spriteIndex);
-                        if (0 > tpagIndex) continue;
-
-                        if (data->stretch) {
-                            // Stretch to fill room dimensions
-                            TexturePageItem* tpag = &dataWin->tpag.items[tpagIndex];
-                            float xscale = roomW / (float) tpag->boundingWidth;
-                            float yscale = roomH / (float) tpag->boundingHeight;
-                            runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex, 0.0f, 0.0f, 0.0f, 0.0f, xscale, yscale, 0.0f, 0xFFFFFF, 1.0);
-                        } else if (data->hTiled || data->vTiled) {
-                            Renderer_drawBackgroundTiled(runner->renderer, tpagIndex, layerOffsetX, layerOffsetY, data->hTiled, data->vTiled, roomW, roomH, 1.0);
-                        } else {
-                            // Single placement
-                            runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex, layerOffsetX, layerOffsetY, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFF, 1.0);
-                        }
-            } else if(parsedLayer->type == RoomLayerType_Instances) {
-                // Instance depth is assigned from layers during room init (initRoom).
-                // Nothing to do here - instances are drawn from the DRAWABLE_INSTANCE path.
-            } else if(parsedLayer->type == RoomLayerType_Tiles) {
-                if (runner->renderer == nullptr) continue;
-                Runner_drawTileLayer(runner, parsedLayer->tilesData, layerOffsetX, layerOffsetY);
+            } else if (d->type == DRAWABLE_INSTANCE) {
+                Instance* inst = d->instance;
+                if (inst->active) DRAW_INSTANCE(inst);
             }
         }
     }
 
-    arrfree(drawables);
+    #undef DRAW_INSTANCE
 
-    fireDrawSubtype(runner, drawList, drawCount, DRAW_END);
 
-    // Draw foreground backgrounds (in front of instances, behind GUI)
+    runner->topVmDrawName[0] = runner->topVmDrawName[1] = runner->topVmDrawName[2] = NULL;
+    runner->topVmDrawTimeUs[0] = runner->topVmDrawTimeUs[1] = runner->topVmDrawTimeUs[2] = 0;
+    runner->topVmDrawCalls[0] = runner->topVmDrawCalls[1] = runner->topVmDrawCalls[2] = 0;
+    for (int32_t _ci = 0; _ci < drawCacheCount; _ci++) {
+        if (drawCache[_ci].vmCalls == 0) continue;
+        uint32_t t = drawCache[_ci].vmTimeUs;
+        int rank = -1;
+        if (t > runner->topVmDrawTimeUs[0]) rank = 0;
+        else if (t > runner->topVmDrawTimeUs[1]) rank = 1;
+        else if (t > runner->topVmDrawTimeUs[2]) rank = 2;
+        if (rank >= 0) {
+            for (int k = 2; k > rank; k--) {
+                runner->topVmDrawName[k] = runner->topVmDrawName[k-1];
+                runner->topVmDrawTimeUs[k] = runner->topVmDrawTimeUs[k-1];
+                runner->topVmDrawCalls[k] = runner->topVmDrawCalls[k-1];
+            }
+            runner->topVmDrawName[rank] = dw->code.entries[drawCache[_ci].codeId].name;
+            runner->topVmDrawTimeUs[rank] = t;
+            runner->topVmDrawCalls[rank] = drawCache[_ci].vmCalls;
+        }
+    }
+    DRAW_MARK(drawPhaseNormal);
+
+
+
+
+
     Runner_drawBackgrounds(runner, true);
 
     fireDrawSubtype(runner, drawList, drawCount, DRAW_POST);
 
-    arrfree(drawList);
+
+    fireDrawSubtype(runner, drawList, drawCount, DRAW_GUI);
+
+
+
+    DRAW_MARK(drawPhaseGUI);
+
 }
 
 void Runner_drawGUI(Runner* runner) {
@@ -1392,15 +1815,47 @@ static void executeCollisionEvent(Runner* runner, Instance* self, Instance* othe
     vm->otherInstance = savedOtherInstance;
 }
 
+typedef struct { int32_t key; int32_t* value; } ObjInstIndex;
+void Runner_ensureBBoxCache(Runner* runner) {
+    if (runner->bboxCacheFrame == runner->frameCount) return;
+    runner->bboxCacheFrame = runner->frameCount;
+    int32_t count = (int32_t) arrlen(runner->instances);
+
+    if (count > runner->bboxCacheCount) {
+        runner->bboxCache = realloc(runner->bboxCache, count * sizeof(InstanceBBox));
+        runner->bboxCacheCount = count;
+    }
+    DataWin* dw = runner->dataWin;
+    repeat(count, i) {
+        Instance* inst = runner->instances[i];
+        inst->indexInRunner = i;
+        if (inst->active)
+            runner->bboxCache[i] = Collision_computeBBox(dw, inst);
+        else
+            runner->bboxCache[i].valid = false;
+    }
+}
+
 static void dispatchCollisionEvents(Runner* runner) {
     DataWin* dataWin = runner->dataWin;
     int32_t count = (int32_t) arrlen(runner->instances);
+
+
+    runner->bboxCacheFrame = -1;
+    Runner_ensureBBoxCache(runner);
+    InstanceBBox* bboxCache = runner->bboxCache;
+
+
+    ensureInstancesByObj(runner);
+
+
+
+
 
     repeat(count, i) {
         Instance* self = runner->instances[i];
         if (!self->active) continue;
 
-        // Walk the parent chain to find all collision event handlers for this object
         int32_t currentObj = self->objectIndex;
         int depth = 0;
         while (currentObj >= 0 && dataWin->objt.count > (uint32_t) currentObj && 32 > depth) {
@@ -1414,23 +1869,29 @@ static void dispatchCollisionEvents(Runner* runner) {
 
                     if (evt->actionCount == 0 || 0 > evt->actions[0].codeId) continue;
 
-                    // Check all instances of the target object
-                    repeat(count, j) {
-                        Instance* other = runner->instances[j];
-                        if (!other->active) continue;
+                    InstanceBBox bboxSelf = bboxCache[i];
+                    if (!bboxSelf.valid) continue;
+
+
+                    if (targetObjIndex < 0 || targetObjIndex >= runner->instancesByObjMax) continue;
+                    Instance** targetList = runner->instancesByObjInclParent[targetObjIndex];
+                    int32_t targetCount = (int32_t)arrlen(targetList);
+
+                    for (int32_t tj = 0; tj < targetCount; tj++) {
+                        Instance* other = targetList[tj];
                         if (other == self) continue;
-                        if (!VM_isObjectOrDescendant(dataWin, other->objectIndex, targetObjIndex)) continue;
+                        if (!other->active) continue;
 
-                        // Compute bboxes
-                        InstanceBBox bboxSelf = Collision_computeBBox(dataWin, self);
-                        InstanceBBox bboxOther = Collision_computeBBox(dataWin, other);
-                        if (!bboxSelf.valid || !bboxOther.valid) continue;
 
-                        // AABB overlap test
+                        int32_t j = other->indexInRunner;
+                        if (j < 0 || j >= count || runner->instances[j] != other) continue;
+                        if (!bboxCache[j].valid) continue;
+
+                        InstanceBBox bboxOther = bboxCache[j];
+
                         if (bboxSelf.left >= bboxOther.right || bboxOther.left >= bboxSelf.right ||
                             bboxSelf.top >= bboxOther.bottom || bboxOther.top >= bboxSelf.bottom) continue;
 
-                        // Precise collision check if either sprite needs it
                         Sprite* sprSelf = Collision_getSprite(dataWin, self);
                         Sprite* sprOther = Collision_getSprite(dataWin, other);
                         bool needsPrecise = (sprSelf != nullptr && sprSelf->sepMasks == 1) || (sprOther != nullptr && sprOther->sepMasks == 1);
@@ -1439,7 +1900,6 @@ static void dispatchCollisionEvents(Runner* runner) {
                             if (!Collision_instancesOverlapPrecise(dataWin, self, other, bboxSelf, bboxOther)) continue;
                         }
 
-                        // Collision detected! If either instance is solid, restore both to xprevious/yprevious
                         if (self->solid || other->solid) {
                             self->x = self->xprevious;
                             self->y = self->yprevious;
@@ -1448,6 +1908,11 @@ static void dispatchCollisionEvents(Runner* runner) {
                         }
 
                         executeCollisionEvent(runner, self, other, targetObjIndex);
+
+
+                        bboxCache[i] = Collision_computeBBox(dataWin, self);
+                        bboxCache[j] = Collision_computeBBox(dataWin, other);
+                        bboxSelf = bboxCache[i];
                     }
                 }
             }
@@ -2022,6 +2487,28 @@ void Runner_dumpState(Runner* runner) {
         }
     }
 
+    int64_t globalArrayLen = hmlen(vm->globalArrayMap);
+    if (globalArrayLen > 0) {
+        repeat(globalArrayLen, arrIdx) {
+            int64_t key = vm->globalArrayMap[arrIdx].key;
+            RValue val = vm->globalArrayMap[arrIdx].value;
+            int32_t varID = (int32_t) (key >> 32);
+            int32_t arrayIndex = (int32_t) (key & 0xFFFFFFFF);
+
+            const char* varName = "<unknown>";
+            repeat(dataWin->vari.variableCount, varIdx) {
+                Variable* var = &dataWin->vari.variables[varIdx];
+                if (var->varID == varID && var->instanceType == INSTANCE_GLOBAL) {
+                    varName = var->name;
+                    break;
+                }
+            }
+
+            char* valStr = RValue_toStringFancy(val);
+            printf("  %s[%d] = %s\n", varName, arrayIndex, valStr);
+            free(valStr);
+        }
+    }
     printf("\n=== End Frame %d State Dump ===\n", runner->frameCount);
 }
 

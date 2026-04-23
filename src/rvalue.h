@@ -38,6 +38,7 @@ typedef enum {
     RVALUE_UNDEFINED = 5,
     RVALUE_ARRAY = 6,
     RVALUE_METHOD = 7,
+    RVALUE_ARRAY_REF = 8,
 } RValueType;
 
 typedef struct RValue {
@@ -162,6 +163,9 @@ static char* RValue_toString(RValue val) {
             snprintf(buf, sizeof(buf), "<method:%d>", val.method->codeIndex);
             return safeStrdup(buf);
 #endif
+        case RVALUE_ARRAY_REF:
+            snprintf(buf, sizeof(buf), "<array_ref:%d>", val.int32);
+            return safeStrdup(buf);
     }
     return safeStrdup("");
 }
@@ -224,6 +228,9 @@ static char* RValue_toStringTyped(RValue val) {
             snprintf(buf, sizeof(buf), "method(code=%d, inst=%d)", val.method->codeIndex, val.method->boundInstanceId);
             return safeStrdup(buf);
 #endif
+        case RVALUE_ARRAY_REF:
+            snprintf(buf, sizeof(buf), "<array_ref:%d>", val.int32);
+            return safeStrdup(buf);
     }
     return safeStrdup("???");
 }
@@ -259,6 +266,7 @@ static GMLReal RValue_toReal(RValue val) {
 #if IS_BC17_OR_HIGHER_ENABLED
         case RVALUE_METHOD: return 0.0;
 #endif
+        case RVALUE_ARRAY_REF: return 0.0;
         default:            return 0.0;
     }
 }
@@ -276,6 +284,8 @@ static int32_t RValue_toInt32(RValue val) {
 #if IS_BC17_OR_HIGHER_ENABLED
         case RVALUE_METHOD: return 0;
 #endif
+        case RVALUE_ARRAY_REF: return 0;
+
         default:            return 0;
     }
 }
@@ -293,6 +303,8 @@ static int64_t RValue_toInt64(RValue val) {
 #if IS_BC17_OR_HIGHER_ENABLED
         case RVALUE_METHOD: return 0;
 #endif
+        case RVALUE_ARRAY_REF: return 0;
+
         default:            return 0;
     }
 }
@@ -310,6 +322,8 @@ static bool RValue_toBool(RValue val) {
 #if IS_BC17_OR_HIGHER_ENABLED
         case RVALUE_METHOD: return true;
 #endif
+        case RVALUE_ARRAY_REF: return false;
+
         default:            return false;
     }
 }

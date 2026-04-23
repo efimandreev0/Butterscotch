@@ -2175,9 +2175,53 @@ static RValue builtinDsListFindIndex(VMContext* ctx, RValue* args, MAYBE_UNUSED 
 // ===[ ARRAY FUNCTIONS ]===
 
 static RValue builtinArrayLength1d(VMContext* ctx, RValue* args, int32_t argCount) {
-    (void) ctx; (void) argCount;
-    if (args[0].type != RVALUE_ARRAY || args[0].array == nullptr) return RValue_makeReal(0.0);
-    return RValue_makeReal((GMLReal) GMLArray_length1D(args[0].array));
+    // array_length_1d(array) takes a single array argument
+    if (args[0].type != RVALUE_ARRAY_REF)
+        return RValue_makeReal(0.0);
+
+    int32_t varID = args[0].int32;
+    int32_t maxIndex = -1;
+
+    // Search selfArrayMap on the current instance
+    Instance* inst = ctx->currentInstance;
+    if (inst != nullptr) {
+        repeat(hmlen(inst->selfArrayMap), idx) {
+            int64_t key = inst->selfArrayMap[idx].key;
+            int32_t keyVarID = (int32_t)(key >> 32);
+            if (keyVarID == varID) {
+                int32_t keyArrayIndex = (int32_t)(key & 0xFFFFFFFF);
+                if (keyArrayIndex > maxIndex) {
+                    maxIndex = keyArrayIndex;
+                }
+            }
+        }
+    }
+
+    // Also search globalArrayMap
+    repeat(hmlen(ctx->globalArrayMap), idx) {
+        int64_t key = ctx->globalArrayMap[idx].key;
+        int32_t keyVarID = (int32_t)(key >> 32);
+        if (keyVarID == varID) {
+            int32_t keyArrayIndex = (int32_t)(key & 0xFFFFFFFF);
+            if (keyArrayIndex > maxIndex) {
+                maxIndex = keyArrayIndex;
+            }
+        }
+    }
+
+    // Also search localArrayMap
+    repeat(hmlen(ctx->localArrayMap), idx) {
+        int64_t key = ctx->localArrayMap[idx].key;
+        int32_t keyVarID = (int32_t)(key >> 32);
+        if (keyVarID == varID) {
+            int32_t keyArrayIndex = (int32_t)(key & 0xFFFFFFFF);
+            if (keyArrayIndex > maxIndex) {
+                maxIndex = keyArrayIndex;
+            }
+        }
+    }
+
+    return RValue_makeReal((GMLReal)(maxIndex + 1));
 }
 
 // ===[ COLLISION FUNCTIONS]===
@@ -6869,40 +6913,20 @@ static RValue builtinAssetGetIndex(VMContext* ctx, RValue* args, int32_t argCoun
     free(name);
     return RValue_makeReal((double) -1);
 }
-// draw_circle(x, y, r, outline)
+// GML: draw_circle(x, y, r, outline)
 static RValue builtin_draw_circle(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
-    if (4 > argCount) return RValue_makeUndefined();
     Runner* runner = (Runner*) ctx->runner;
-    if (runner->renderer == nullptr) return RValue_makeUndefined();
-
-    float cx = (float) RValue_toReal(args[0]);
-    float cy = (float) RValue_toReal(args[1]);
-    float r  = (float) RValue_toReal(args[2]);
-    bool outline = RValue_toBool(args[3]);
-
-    if (r < 0.0f) r = -r; // Исключаем артефакты от отрицательного радиуса
-
-    int32_t segments = 24; // Базовое значение точности (circle precision) в GameMaker
-    float step = (2.0f * (float) M_PI) / (float) segments;
-
-    float prevX = cx + r;
-    float prevY = cy;
-
-    for (int32_t i = 1; i <= segments; i++) {
-        float angle = (float) i * step;
-        float nextX = cx + cosf(angle) * r;
-        float nextY = cy + sinf(angle) * r;
-
-        if (outline) {
-            runner->renderer->vtable->drawLine(runner->renderer, prevX, prevY, nextX, nextY, 1.0f, runner->renderer->drawColor, runner->renderer->drawAlpha);
-        } else {
-            runner->renderer->vtable->drawTriangle(runner->renderer, cx, cy, prevX, prevY, nextX, nextY, false);
-        }
-
-        prevX = nextX;
-        prevY = nextY;
+    if (runner->renderer != nullptr && runner->renderer->vtable->drawCircle != nullptr) {
+        float x = (float) RValue_toReal(args[0]);
+        float y = (float) RValue_toReal(args[1]);
+        float r = (float) RValue_toReal(args[2]);
+        bool outline = RValue_toBool(args[3]);
+        runner->renderer->vtable->drawCircle(runner->renderer, x, y, r,
+                                             runner->renderer->drawColor,
+                                             runner->renderer->drawAlpha,
+                                             outline,
+                                             runner->renderer->circlePrecision);
     }
-
     return RValue_makeUndefined();
 }
 

@@ -2,6 +2,8 @@
 
 #include "common.h"
 #include <stdint.h>
+#include <vm.h>
+
 #include "rvalue.h"
 #include "gml_array.h"
 #include "stb_ds.h"
@@ -48,6 +50,10 @@ typedef struct Instance {
     int32_t pathEndAction;       // 0=stop, 1=restart, 2=continue, 3=reverse
     float pathXStart;             // origin for relative paths
     float pathYStart;
+    ArrayMapEntry* selfArrayMap;
+
+    struct { int32_t key; int32_t value; }* selfArrayVarTracker; // tracks which varIDs have array data
+    int32_t indexInRunner;
 
     int32_t alarm[GML_ALARM_COUNT];
 } Instance;
