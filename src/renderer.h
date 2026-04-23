@@ -43,12 +43,6 @@ typedef struct {
     // Ellipse: centered at (cx, cy) with radii (rx, ry), subdivided into `precision` segments.
     // Filled = triangle fan (center + N+1 perimeter), outlined = line strip.
     void (*drawEllipse)(Renderer* renderer, float cx, float cy, float rx, float ry, uint32_t color, float alpha, bool outline, int32_t precision);
-#ifdef __3DS__
-    // Optional: the runner fires this after a room load completes. On 3DS this
-    // rebuilds per-room texture residency and frees atlases that aren't needed
-    // by the new room. nullptr on other platforms.
-    void (*onRoomChanged)(Renderer* renderer, int32_t roomIndex);
-#endif
 } RendererVtable;
 
 // ===[ Renderer Base Struct ]===

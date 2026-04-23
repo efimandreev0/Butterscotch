@@ -43,8 +43,6 @@ typedef struct {
     // userData: user-provided pointer passed through from the options
     void (*progressCallback)(const char* chunkName, int chunkIndex, int totalChunks, DataWin* dataWin, void* userData);
     void* progressCallbackUserData;
-
-    bool lazyLoadRooms;
 } DataWinParserOptions;
 
 // ===[ GEN8 - General Info ]===
@@ -612,8 +610,6 @@ typedef struct {
     RoomTile* tiles;
     uint32_t layerCount;
     RoomLayer* layers;
-
-    bool payloadLoaded;
 } Room;
 
 typedef struct {
@@ -730,13 +726,9 @@ typedef struct {
     uint32_t count;
     AudioEntry* entries;
 } Audo;
-#include <stdio.h>
+
 // ===[ Top-level DataWin container ]===
 typedef struct DataWin {
-    FILE* lazyLoadFile;
-    char* lazyLoadFilePath;     // owned strdup of the original file path, for diagnostics
-    bool lazyLoadRooms;          // mirrors the parser option so Runner can branch without re-reading options
-
     uint8_t* strgBuffer;        // owned copy of STRG chunk raw data
     // Absolute file offset of strgBuffer[0], we need this because data.win stores absolute offsets (from the beginning of the data.win file) instead of relative offsets
     size_t strgBufferBase;
@@ -782,6 +774,4 @@ void DataWin_printDebugSummary(DataWin* dataWin);
 int32_t DataWin_resolveTPAG(DataWin* dw, uint32_t offset);
 int32_t DataWin_resolveSPRT(DataWin* dw, uint32_t offset);
 void GamePath_computeInternal(GamePath* path);
-void DataWin_loadRoomPayload(DataWin* dw, int32_t roomIndex);
-void DataWin_freeRoomPayload(Room* room);
 PathPositionResult GamePath_getPosition(GamePath* path, double t);

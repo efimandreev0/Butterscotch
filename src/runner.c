@@ -18,11 +18,6 @@
 #ifdef PSP
 #include <psprtc.h>
 static inline uint64_t _profTickUs(void) { u64 t; sceRtcGetCurrentTick(&t); return (uint64_t)t; }
-#elif __3DS__
-#include <3ds.h>
-static inline uint64_t _profTickUs(void) {
-    return (svcGetSystemTick() * 1000000ULL) / 268123480ULL;
-}
 #else
 static inline uint64_t _profTickUs(void) { return (uint64_t)clock() * 1000000 / CLOCKS_PER_SEC; }
 #endif
@@ -1126,19 +1121,6 @@ static Instance* createAndInitInstance(Runner* runner, int32_t instanceId, int32
     return inst;
 }
 
-static void notifyRendererRoomChanged(Runner* runner, int32_t roomIndex) {
-#ifdef __3DS__
-    if (runner != nullptr && runner->renderer != nullptr &&
-        runner->renderer->vtable != nullptr &&
-        runner->renderer->vtable->onRoomChanged != nullptr) {
-        runner->renderer->vtable->onRoomChanged(runner->renderer, roomIndex);
-    }
-#else
-    (void) runner;
-    (void) roomIndex;
-#endif
-}
-
 
 
 static void initRoom(Runner* runner, int32_t roomIndex) {
@@ -1150,11 +1132,6 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     require(roomIndex >= 0 && dataWin->room.count > (uint32_t) roomIndex);
 
     Room* room = &dataWin->room.rooms[roomIndex];
-
-    if (!room->payloadLoaded) {
-        DataWin_loadRoomPayload(dataWin, roomIndex);
-    }
-
     SavedRoomState* savedState = &runner->savedRoomStates[roomIndex];
 
     runner->currentRoom = room;
@@ -1205,8 +1182,6 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         }
         arrfree(savedState->instances);
         savedState->instances = nullptr;
-
-        notifyRendererRoomChanged(runner, roomIndex);
 
         
         fprintf(stderr, "Runner: Room restored (persistent): %s (room %d) with %d instances\n", room->name, roomIndex, (int) arrlen(runner->instances));
@@ -1312,8 +1287,6 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
 
     
     savedState->initialized = true;
-
-    notifyRendererRoomChanged(runner, roomIndex);
 
     fprintf(stderr, "Runner: Room loaded: %s (room %d) with %d instances\n", room->name, roomIndex, (int) arrlen(runner->instances));
 }

@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
 
 #include "data_win.h"
 #include "vm.h"
@@ -26,6 +27,7 @@ u32 __ctru_linear_heap_size = 25 * 1024 * 1024;
 u32 __stacksize__ = 64 * 1024;
 
 #define DATA_WIN_PATH "sdmc:/3ds/butterscotch/data.win"
+#define NOVA_TEX_CACHE_PATH "sdmc:/3ds/butterscotch/cache"
 #define BUTTERSCOTCH_NOVA_CMD_BUF_SIZE      (1024 * 1024)
 #define BUTTERSCOTCH_NOVA_CLIENT_BUF_SIZE   (8 * 1024 * 1024)
 #define BUTTERSCOTCH_NOVA_INDEX_BUF_SIZE    (512 * 1024)
@@ -61,6 +63,7 @@ void printMemoryStats() {
     fprintf(stderr, "[MEMORY] Heap Used: %.2f MB | LINEAR RAM FREE: %.2f MB\n",
            heapUsedMB, linearFreeMB);
 }
+
 int main(int argc, char* argv[]) {
     (void) argc; (void) argv;
     initLogging();
@@ -73,6 +76,40 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "Butterscotch 3DS booting...\n");
     fprintf(stderr, "Loading %s\n", DATA_WIN_PATH);
 
+    // Запускаем NovaGL ЗАРАНЕЕ
+    nova_init();
+    mkdir(NOVA_TEX_CACHE_PATH, 0777);
+    nova_texture_cache_set_directory(NOVA_TEX_CACHE_PATH);
+
+    // =========================================================================
+    // СТАДИЯ 1: ЧИСТЫЙ ПАРСИНГ ТОЛЬКО ДЛЯ КЭША (Без фрагментации памяти!)
+    // =========================================================================
+    fprintf(stderr, "=== STAGE 1: TEXTURE PRE-CACHING ===\n");
+    DataWin* cacheWin = DataWin_parse(
+        DATA_WIN_PATH,
+        (DataWinParserOptions) {
+            .parseGen8 = true,
+            .parseTpag = true,
+            .parseTxtr = true
+            // ВАЖНО: Все остальные галочки опущены (false).
+            // Игра не грузит логику, комнаты и скрипты, сохраняя ОЗУ нетронутым!
+        }
+    );
+
+    if (cacheWin != NULL) {
+        Renderer* tempRenderer = CtrRenderer_create();
+        tempRenderer->vtable->init(tempRenderer, cacheWin); // Триггерит создание кэша
+        tempRenderer->vtable->destroy(tempRenderer);
+        DataWin_free(cacheWin); // Очищаем временную память
+        fprintf(stderr, "=== STAGE 1 COMPLETE ===\n");
+    } else {
+        fprintf(stderr, "WARNING: Stage 1 Cache pass failed to parse data.win!\n");
+    }
+
+    // =========================================================================
+    // СТАДИЯ 2: ПОЛНАЯ ЗАГРУЗКА ИГРЫ
+    // =========================================================================
+    fprintf(stderr, "=== STAGE 2: FULL GAME BOOT ===\n");
     DataWin* dataWin = DataWin_parse(
         DATA_WIN_PATH,
         (DataWinParserOptions) {
@@ -98,20 +135,18 @@ int main(int argc, char* argv[]) {
             .parseFunc = true,
             .parseStrg = true,
             .parseTxtr = true,
-            .parseAudo = true,
+            .parseAudo = false,
             .skipLoadingPreciseMasksForNonPreciseSprites = true,
-            .lazyLoadRooms = true,
-            //.eagerlyLoadedRooms = nullptr
         }
     );
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_AUDIO) != 0) {
         fprintf(stderr, "Failed to initialize SDL: %s\n", SDL_GetError());
-        DataWin_free(dataWin);
+        if (dataWin) DataWin_free(dataWin);
         return 1;
     }
 
-    if (dataWin == nullptr) {
+    if (dataWin == NULL) {
         consoleInit(GFX_BOTTOM, NULL);
         printf("Butterscotch 3DS: failed to parse data.win\n");
         printf("Expected at: %s\n", DATA_WIN_PATH);
@@ -127,41 +162,24 @@ int main(int argc, char* argv[]) {
     Gen8* gen8 = &dataWin->gen8;
     fprintf(stderr, "Loaded \"%s\" (%d) [BC%u]\n", gen8->name, gen8->gameID, gen8->bytecodeVersion);
 
-    nova_init();
-
-    nova_texture_cache_set_directory("sdmc:/3ds/butterscotch/cache");
-
     VMContext* vm = VM_create(dataWin);
 
     N3dsFileSystem* fs = N3dsFileSystem_create(DATA_WIN_PATH);
     Renderer* renderer = CtrRenderer_create();
     AudioSystem* audio = (AudioSystem*) SdlMixerAudioSystem_create();
-    if (audio)
+    if (audio) {
         audio->dataWin = dataWin;
-
-    Runner* runner = Runner_create(dataWin, vm, (FileSystem*) fs);
-    if (!runner) {
-        if (audio) audio->dataWin = nullptr;
-        renderer->vtable->destroy(renderer);
-        if (audio) audio->vtable->destroy(audio);
-        N3dsFileSystem_destroy(fs);
-        VM_free(vm);
-        DataWin_free(dataWin);
-        cfguExit();
-        nova_fini();
-        gfxExit();
-        return 1;
     }
 
+    Runner* runner = Runner_create(dataWin, vm, (FileSystem*) fs);
     runner->renderer = renderer;
     runner->audioSystem = audio;
 
+    audio->vtable->init(audio, audio->dataWin, (FileSystem*) fs);
     renderer->vtable->init(renderer, dataWin);
-
     Runner_initFirstRoom(runner);
 
     double targetFrameSec = 1.0 / 30.0;
-
     int frameCounter = 0;
 
     while (aptMainLoop() && !runner->shouldExit) {
@@ -189,7 +207,10 @@ int main(int argc, char* argv[]) {
         processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_SELECT, VK_ESCAPE);
 
         Runner_step(runner);
-        runner->audioSystem->vtable->update(runner->audioSystem, (float) targetFrameSec);
+        // 🔥 ФИКС 2: Проверка на NULL, если SdlMixer не завёлся
+        if (runner->audioSystem) {
+            runner->audioSystem->vtable->update(runner->audioSystem, (float) targetFrameSec);
+        }
 
         Room* activeRoom = runner->currentRoom;
 
@@ -198,8 +219,7 @@ int main(int argc, char* argv[]) {
 
         bool viewsEnabled = (activeRoom->flags & 1) != 0;
         if (viewsEnabled) {
-            int32_t maxRight = 0;
-            int32_t maxBottom = 0;
+            int32_t maxRight = 0, maxBottom = 0;
             for (int vi = 0; vi < 8; vi++) {
                 if (!activeRoom->views[vi].enabled) continue;
                 int32_t right = activeRoom->views[vi].portX + activeRoom->views[vi].portWidth;
@@ -219,14 +239,11 @@ int main(int argc, char* argv[]) {
         int eyes = novaGetEyeCount();
 
         // ФИКС 3D: Сохраняем состояние клавиатуры!
-        // GML скрипты будут вызываться дважды, если включен 3D.
         RunnerKeyboardState kb_backup = *(runner->keyboard);
 
         for (int eye = 0; eye < eyes; eye++) {
             novaBeginEye(eye);
 
-            // ФИКС 3D: Если это второй проход (правый глаз), прячем импульсные нажатия от игры!
-            // Зажатые кнопки (keyDown) оставляем, чтобы анимации бега не мерцали.
             if (eye == 1) {
                 memset(runner->keyboard->keyPressed, 0, sizeof(runner->keyboard->keyPressed));
                 memset(runner->keyboard->keyReleased, 0, sizeof(runner->keyboard->keyReleased));
@@ -246,56 +263,61 @@ int main(int argc, char* argv[]) {
             bool anyViewRendered = false;
             if (viewsEnabled) {
                 for (int vi = 0; vi < 8; vi++) {
-                    if (!activeRoom->views[vi].enabled) continue;
+                    // Даунгрейд: берем вид напрямую из комнаты
+                    RoomView* view = &activeRoom->views[vi];
 
-                    int32_t viewX = activeRoom->views[vi].viewX;
-                    int32_t viewY = activeRoom->views[vi].viewY;
-                    int32_t viewW = activeRoom->views[vi].viewWidth;
-                    int32_t viewH = activeRoom->views[vi].viewHeight;
-                    int32_t portX = activeRoom->views[vi].portX;
-                    int32_t portY = activeRoom->views[vi].portY;
-                    int32_t portW = activeRoom->views[vi].portWidth;
-                    int32_t portH = activeRoom->views[vi].portHeight;
-                    float viewAngle = runner->viewAngles[vi];
+                    if (!view->enabled) continue;
 
-                    if (viewW <= 0 || viewH <= 0 || portW <= 0 || portH <= 0) continue;
-                    if (!isfinite(viewAngle)) viewAngle = 0.0f;
+                    int32_t viewX = view->viewX;
+                    int32_t viewY = view->viewY;
+                    int32_t viewW = view->viewWidth;
+                    int32_t viewH = view->viewHeight;
+                    int32_t portX = view->portX;
+                    int32_t portY = view->portY;
+                    int32_t portW = view->portWidth;
+                    int32_t portH = view->portHeight;
+                    float viewAngle = runner->viewAngles[vi]; // Углы брались из самого runner'а
 
                     runner->viewCurrent = vi;
-                    renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH,
-                                                 portX, portY, portW, portH, viewAngle);
+
+                    novaSet3DDepth(0.05f);
+                    renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH, portX, portY, portW, portH, viewAngle);
                     Runner_draw(runner);
                     renderer->vtable->endView(renderer);
+
+                    novaSet3DDepth(0.0f);
                     anyViewRendered = true;
                 }
             }
 
             if (!anyViewRendered) {
                 runner->viewCurrent = 0;
-                int32_t fw = (gameW > 0) ? gameW : 400;
-                int32_t fh = (gameH > 0) ? gameH : 240;
-                renderer->vtable->beginView(renderer, 0, 0, fw, fh, 0, 0, fw, fh, 0.0f);
+
+                novaSet3DDepth(0.05f);
+                renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, 0, 0, gameW, gameH, 0.0f);
                 Runner_draw(runner);
                 renderer->vtable->endView(renderer);
+
+                novaSet3DDepth(0.0f);
             }
 
             runner->viewCurrent = 0;
             renderer->vtable->flush(renderer);
         }
 
-        // ФИКС 3D: Возвращаем состояние клавиш обратно для следующего шага игры
+        // ФИКС 3D: Возвращаем состояние клавиш обратно
         *(runner->keyboard) = kb_backup;
 
         // ===[ КОНЕЦ 3D ЦИКЛА ]===
 
         renderer->vtable->endFrame(renderer);
-
         novaSwapBuffers();
 
         if (frameCounter % 60 == 0) {
             printMemoryStats();
         }
         frameCounter++;
+
         // 30 FPS Limiter
         while (osGetTime() - frameStart < 33) {
             gspWaitForVBlank();

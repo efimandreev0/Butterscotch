@@ -16660,25 +16660,7 @@ static void native_mettnewsPart_Step2(VMContext* ctx, Runner* runner, Instance* 
     if (view->viewY <= 0) view->viewY = 0;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#define SNOWFLOOR_MOVING_VARIDS 32
+#define SNOWFLOOR_MOVING_VARIDS 12
 static struct {
     int32_t dodraw, snowx, snowy, moveme;
     int32_t movingCandidates[SNOWFLOOR_MOVING_VARIDS];
@@ -16704,35 +16686,35 @@ static void initSnowfloorCache(VMContext* ctx, DataWin* dw) {
                             snowfloorCache.snowy >= 0 && snowfloorCache.moveme >= 0);
 }
 
+static uint32_t g_snow_rand_seed = 12345;
+static inline float fast_rand_float(void) {
+    g_snow_rand_seed ^= g_snow_rand_seed << 13;
+    g_snow_rand_seed ^= g_snow_rand_seed >> 17;
+    g_snow_rand_seed ^= g_snow_rand_seed << 5;
+    return (float)(g_snow_rand_seed & 0x7FFFFFFF) / (float)0x7FFFFFFF;
+}
+
 static void native_snowfloor_Draw0(VMContext* ctx, Runner* runner, Instance* inst) {
     if (!snowfloorCache.ready || runner->renderer == NULL) return;
     Renderer* r = runner->renderer;
 
-    
     Instance* mc = (snowfloorCache.objMainchara >= 0)
                  ? findInstanceByObject(runner, snowfloorCache.objMainchara) : NULL;
 
-    
-    
-    
-    
-    
-    
-    
     bool hasMainchara = (mc != NULL);
     bool maincharaFar = false;
     InstanceBBox mcBB = { 0, 0, 0, 0, false };
     int32_t mcMoving = 0;
+
     if (hasMainchara) {
         mcBB = Collision_computeBBox(ctx->dataWin, mc);
-        
-        
+
         float dx = mc->x - inst->x;
         float dy = mc->y - inst->y;
         if (dx < -60.0f || dx > 60.0f || dy < -60.0f || dy > 60.0f) {
             maincharaFar = true;
         }
-        
+
         int32_t movingId = resolveSelfVarIdForInst(mc,
                                                    snowfloorCache.movingCandidates,
                                                    snowfloorCache.movingCount);
@@ -16740,7 +16722,6 @@ static void native_snowfloor_Draw0(VMContext* ctx, Runner* runner, Instance* ins
             mcMoving = (int32_t)RValue_toReal(Instance_getSelfVar(mc, movingId));
     }
 
-    
     bool roomIs57 = (runner->currentRoomIndex == 57);
     bool needFlag64Set = false;
     if (roomIs57 && snowfloorCache.gFlag >= 0) {
@@ -16752,25 +16733,27 @@ static void native_snowfloor_Draw0(VMContext* ctx, Runner* runner, Instance* ins
 
     r->drawColor = 0xFFFFFFu;
     int32_t savedPrec = r->circlePrecision;
-    
-    
-    r->circlePrecision = 12;
 
-    float randScale = 1.0f / (float)RAND_MAX;
+    r->circlePrecision = 5;
 
-    
-    for (int32_t yy = 0; yy < 5; yy++) {
-        for (int32_t xx = 0; xx < 5; xx++) {
-            int32_t packedIdx = xx * 32000 + yy;
-            int64_t dodrawKey = ((int64_t)snowfloorCache.dodraw << 32) | (uint32_t)packedIdx;
-            int64_t snowxKey  = ((int64_t)snowfloorCache.snowx  << 32) | (uint32_t)packedIdx;
-            int64_t snowyKey  = ((int64_t)snowfloorCache.snowy  << 32) | (uint32_t)packedIdx;
-            int64_t movemeKey = ((int64_t)snowfloorCache.moveme << 32) | (uint32_t)packedIdx;
+    int64_t dodrawBase = (int64_t)snowfloorCache.dodraw << 32;
+    int64_t snowxBase  = (int64_t)snowfloorCache.snowx  << 32;
+    int64_t snowyBase  = (int64_t)snowfloorCache.snowy  << 32;
+    int64_t movemeBase = (int64_t)snowfloorCache.moveme << 32;
 
-            ptrdiff_t di = hmgeti(inst->selfArrayMap, dodrawKey);
-            ptrdiff_t sxi = hmgeti(inst->selfArrayMap, snowxKey);
-            ptrdiff_t syi = hmgeti(inst->selfArrayMap, snowyKey);
-            ptrdiff_t mmi = hmgeti(inst->selfArrayMap, movemeKey);
+    bool canCollide = (hasMainchara && !maincharaFar && mcBB.valid);
+    bool mcIsMoving = (mcMoving == 1 && hasMainchara);
+
+    for (int32_t xx = 0; xx < 5; xx++) {
+        uint32_t basePacked = (uint32_t)xx * 32000;
+
+        for (int32_t yy = 0; yy < 5; yy++) {
+            uint32_t packedIdx = basePacked + (uint32_t)yy;
+
+            ptrdiff_t sxi = hmgeti(inst->selfArrayMap, snowxBase | packedIdx);
+            ptrdiff_t syi = hmgeti(inst->selfArrayMap, snowyBase | packedIdx);
+            ptrdiff_t mmi = hmgeti(inst->selfArrayMap, movemeBase | packedIdx);
+
             if (sxi < 0 || syi < 0 || mmi < 0) continue;
 
             RValue* sxv = &inst->selfArrayMap[sxi].value;
@@ -16781,7 +16764,7 @@ static void native_snowfloor_Draw0(VMContext* ctx, Runner* runner, Instance* ins
             GMLReal snowy  = (syv->type == RVALUE_REAL) ? syv->real : RValue_toReal(*syv);
             GMLReal moveme = (mmv->type == RVALUE_REAL) ? mmv->real : RValue_toReal(*mmv);
 
-            
+            ptrdiff_t di = hmgeti(inst->selfArrayMap, dodrawBase | packedIdx);
             if (di >= 0) {
                 RValue* dv = &inst->selfArrayMap[di].value;
                 GMLReal dodraw = (dv->type == RVALUE_REAL) ? dv->real : RValue_toReal(*dv);
@@ -16790,50 +16773,39 @@ static void native_snowfloor_Draw0(VMContext* ctx, Runner* runner, Instance* ins
                 }
             }
 
-            
-            
-            
             bool collided = false;
-            if (hasMainchara && !maincharaFar && mcBB.valid) {
-                
+            if (canCollide) {
                 float cx = (float)snowx;
                 float cy = (float)snowy;
                 float clx = (cx < mcBB.left) ? mcBB.left : (cx > mcBB.right ? mcBB.right : cx);
                 float cly = (cy < mcBB.top)  ? mcBB.top  : (cy > mcBB.bottom? mcBB.bottom: cy);
                 float dx = cx - clx;
                 float dy = cy - cly;
-                
+
                 if (dx * dx + dy * dy < 4.0f) collided = true;
             }
 
             if (collided) {
-                
-                float rnd = (float)rand() * randScale * 4.0f;
-                moveme = floorf(rnd) + 2.0f;
+                moveme = floorf(fast_rand_float() * 4.0f) + 2.0f;
             }
 
             if (moveme > 1.0) {
-                if (mcMoving == 1 && hasMainchara) {
-                    
-                    
+                if (mcIsMoving) {
                     if (roomIs57 && needFlag64Set && snowfloorCache.gFlag >= 0) {
                         globalArraySet(ctx, snowfloorCache.gFlag, 64, RValue_makeReal(-1.0));
-                        needFlag64Set = false; 
+                        needFlag64Set = false;
                     }
 
-                    
-                    if (mcBB.left  > snowx) snowx -= moveme;
-                    if (mcBB.right < snowx) snowx += moveme;
-                    if (mcBB.top   > snowy) snowy -= moveme;
-                    if (mcBB.bottom< snowy) snowy += moveme;
+                    if (mcBB.left   > snowx) snowx -= moveme;
+                    if (mcBB.right  < snowx) snowx += moveme;
+                    if (mcBB.top    > snowy) snowy -= moveme;
+                    if (mcBB.bottom < snowy) snowy += moveme;
 
-                    
-                    float rnd1 = (float)rand() * randScale * (float)moveme;
-                    float rnd2 = (float)rand() * randScale * (float)moveme;
+                    float rnd1 = fast_rand_float() * (float)moveme;
+                    float rnd2 = fast_rand_float() * (float)moveme;
                     snowx += (rnd1 - (float)moveme / 2.0f) / 2.0f;
                     snowy += (rnd2 - (float)moveme / 2.0f) / 2.0f;
 
-                    
                     sxv->real = snowx; sxv->type = RVALUE_REAL;
                     syv->real = snowy; syv->type = RVALUE_REAL;
                 }
@@ -16841,7 +16813,6 @@ static void native_snowfloor_Draw0(VMContext* ctx, Runner* runner, Instance* ins
                 moveme -= 1.0;
                 mmv->real = moveme; mmv->type = RVALUE_REAL;
             } else if (collided) {
-                
                 mmv->real = moveme; mmv->type = RVALUE_REAL;
             }
         }

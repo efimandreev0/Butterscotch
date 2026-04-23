@@ -21,9 +21,6 @@
 #include "ini.h"
 #include "audio_system.h"
 #include "file_system.h"
-#ifdef __3DS__
-#include "3ds/ctr_renderer.h"
-#endif
 
 #define MAX_VIEWS 8
 #define MAX_BACKGROUNDS 8
@@ -2229,7 +2226,7 @@ static RValue builtin_audioSoundSetTrackPosition(VMContext* ctx, RValue* args, M
 
 static RValue builtin_audioCreateStream(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     AudioSystem* audio = getAudioSystem(ctx);
-    if (audio == nullptr || audio->vtable == nullptr || audio->vtable->createStream == nullptr) return RValue_makeReal(-1.0);
+    if (audio == nullptr) return RValue_makeReal(-1.0);
     const char* filename = RValue_toString(args[0]);
     int32_t streamIndex = audio->vtable->createStream(audio, filename);
     return RValue_makeReal((GMLReal) streamIndex);
@@ -2237,7 +2234,7 @@ static RValue builtin_audioCreateStream(VMContext* ctx, RValue* args, MAYBE_UNUS
 
 static RValue builtin_audioDestroyStream(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     AudioSystem* audio = getAudioSystem(ctx);
-    if (audio == nullptr || audio->vtable == nullptr || audio->vtable->destroyStream == nullptr) return RValue_makeReal(-1.0);
+    if (audio == nullptr) return RValue_makeReal(-1.0);
     int32_t streamIndex = RValue_toInt32(args[0]);
     bool success = audio->vtable->destroyStream(audio, streamIndex);
     return RValue_makeReal(success ? 1.0 : -1.0);
@@ -4042,19 +4039,6 @@ static RValue builtin_spriteDelete(VMContext* ctx, RValue* args, MAYBE_UNUSED in
     return RValue_makeUndefined();
 }
 
-static RValue builtin_spritePrefetch(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
-    Runner* runner = (Runner*) ctx->runner;
-    if (runner == nullptr || runner->renderer == nullptr || argCount < 1) return RValue_makeUndefined();
-
-    int32_t spriteIndex = RValue_toInt32(args[0]);
-#ifdef __3DS__
-    CtrRenderer_prefetchSprite(runner->renderer, spriteIndex);
-#else
-    (void) spriteIndex;
-#endif
-    return RValue_makeUndefined();
-}
-
 // Font/text measurement
 static RValue builtin_stringWidth(VMContext* ctx, RValue* args, int32_t argCount) {
     if (1 > argCount) return RValue_makeReal(0.0);
@@ -5254,7 +5238,6 @@ void VMBuiltins_registerAll(bool isGMS2) {
     registerBuiltin("sprite_get_number", builtin_spriteGetNumber);
     registerBuiltin("sprite_get_xoffset", builtin_spriteGetXOffset);
     registerBuiltin("sprite_get_yoffset", builtin_spriteGetYOffset);
-    registerBuiltin("sprite_prefetch", builtin_spritePrefetch);
     registerBuiltin("sprite_create_from_surface", builtin_spriteCreateFromSurface);
     registerBuiltin("sprite_delete", builtin_spriteDelete);
 

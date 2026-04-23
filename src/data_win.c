@@ -1452,36 +1452,13 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd) {
             t->textures[i].blobSize = (uint32_t)(chunkEnd - t->textures[i].blobOffset);
         }
     }
-
     // Load blob data into owned buffers
-#ifndef __3DS__
     repeat(count, i) {
         if (t->textures[i].blobOffset == 0 || t->textures[i].blobSize == 0) continue;
         t->textures[i].blobData = BinaryReader_readBytesAt(reader, t->textures[i].blobOffset, t->textures[i].blobSize);
     }
-#endif
 }
-#ifdef __3DS__
-static void parseAUDO(BinaryReader* reader, DataWin* dw) {
-    Audo* a = &dw->audo;
 
-    uint32_t count;
-    uint32_t* ptrs = readPointerTable(reader, &count);
-    a->count = count;
-
-    if (count == 0) { free(ptrs); a->entries = nullptr; return; }
-
-    a->entries = safeMalloc(count * sizeof(AudioEntry));
-    repeat(count, i) {
-        BinaryReader_seek(reader, ptrs[i]);
-        a->entries[i].dataSize = BinaryReader_readUint32(reader);
-        a->entries[i].dataOffset = (uint32_t)BinaryReader_getPosition(reader);
-
-        a->entries[i].data = nullptr;
-    }
-    free(ptrs);
-}
-#else
 static void parseAUDO(BinaryReader* reader, DataWin* dw) {
     Audo* a = &dw->audo;
 
@@ -1506,64 +1483,7 @@ static void parseAUDO(BinaryReader* reader, DataWin* dw) {
     }
     free(ptrs);
 }
-#endif
-static void readRoomPayload(BinaryReader* reader, DataWin* dw, Room* room) {
-    require(!room->payloadLoaded);
-    room->payloadLoaded = true;
-}
-void DataWin_freeRoomPayload(Room* room) {
-    requireNotNull(room);
-    free(room->backgrounds);
-    //room->backgrounds = nullptr;
-    free(room->views);
-    //room->views = nullptr;
-    free(room->gameObjects);
-    room->gameObjects = nullptr;
-    room->gameObjectCount = 0;
-    free(room->tiles);
-    room->tiles = nullptr;
-    room->tileCount = 0;
-    if (room->layerCount != 0 && room->layers != nullptr) {
-        repeat(room->layerCount, j) {
-            RoomLayer* layer = &room->layers[j];
-            if (layer->assetsData) {
-                free(layer->assetsData->legacyTiles);
-                free(layer->assetsData->sprites);
-                free(layer->assetsData);
-            }
-            if (layer->backgroundData) free(layer->backgroundData);
-            if (layer->instancesData) {
-                free(layer->instancesData->instanceIds);
-                free(layer->instancesData);
-            }
-            //if (layer->tilesData) {
-            //    free(layer->tilesData->tileData);
-            //    free(layer->tilesData);
-            //}
-        }
-    }
-    free(room->layers);
-    room->layers = nullptr;
-    room->layerCount = 0;
-    room->payloadLoaded = false;
-}
 
-void DataWin_loadRoomPayload(DataWin* dw, int32_t roomIndex) {
-    require(roomIndex >= 0 && dw->room.count > (uint32_t) roomIndex);
-    Room* room = &dw->room.rooms[roomIndex];
-    if (room->payloadLoaded) return;
-    requireMessage(dw->lazyLoadFile != nullptr, "DataWin_loadRoomPayload called without an open lazy-load FILE*");
-
-    FILE* f = dw->lazyLoadFile;
-    // Find file size at lazy-load time (only needed for BinaryReader bounds checking).
-    long savedPos = ftell(f);
-    fseek(f, 0, SEEK_END);
-    size_t fileSize = (size_t) ftell(f);
-    fseek(f, savedPos, SEEK_SET);
-
-    BinaryReader lazyReader = BinaryReader_create(f, fileSize);
-    readRoomPayload(&lazyReader, dw, room);
-}
 // ===[ MAIN PARSE FUNCTION ]===
 
 DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
@@ -1777,15 +1697,6 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
         }
     }
 
-    dw->lazyLoadRooms = options.lazyLoadRooms;
-    if (options.lazyLoadRooms) {
-        dw->lazyLoadFile = file;
-        dw->lazyLoadFilePath = safeStrdup(filePath);
-    } else {
-        dw->lazyLoadFile = nullptr;
-        dw->lazyLoadFilePath = nullptr;
-        fclose(file);
-    }
     return dw;
 }
 
