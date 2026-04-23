@@ -15,10 +15,17 @@ static bool use_mixer = true;
 #define MUSIC_INSTANCE_ID_BASE 200000
 #define SOUND_INSTANCE_ID_BASE 100000
 
-// КРИТИЧЕСКИ ВАЖНО: 512 КБ. Любой файл меньше 512 КБ загружается в оперативу как эффект (Mix_Chunk).
-// Все файлы больше 512 КБ загружаются как потоковая музыка (Mix_Music).
 #define STREAMING_SIZE_THRESHOLD (512 * 1024)
-#define MAX_CACHED_CHUNKS 32
+// УВЕЛИЧЕНО: 32 звука - это слишком мало, приводит к постоянному передекодированию OGG.
+// На 3DS достаточно памяти для хранения сотен раскодированных эффектов.
+#define MAX_CACHED_CHUNKS 256
+
+// Добавляем глобальный дескриптор в структуру (предполагается, что она определена в .h)
+// struct SdlMixerAudioSystem {
+//     ...
+//     FILE* sharedArchiveFp; // Добавлено для ускорения загрузки SFX
+//     ...
+// };
 
 // ============================================================================
 // [1] MUSIC STREAMING (RWops)
@@ -59,7 +66,12 @@ static int rw_datawin_read(SDL_RWops *context, void *ptr, int size, int maxnum) 
     }
     if (maxnum <= 0) return 0;
 
-    fseek(ctx->fp, (long)(ctx->base + ctx->pos), SEEK_SET);
+    // ОПТИМИЗАЦИЯ: Делаем fseek только если это реально необходимо
+    long target_pos = (long)(ctx->base + ctx->pos);
+    if (ftell(ctx->fp) != target_pos) {
+        fseek(ctx->fp, target_pos, SEEK_SET);
+    }
+
     int read_items = fread(ptr, size, maxnum, ctx->fp);
 
     if (read_items > 0) {
@@ -83,6 +95,9 @@ static int rw_datawin_close(SDL_RWops *context) {
 static SDL_RWops* createMusicRWops(const char* archivePath, uint32_t offset, uint32_t size) {
     FILE* fp = fopen(archivePath, "rb");
     if (!fp) return NULL;
+
+    // ОПТИМИЗАЦИЯ I/O: Увеличиваем буфер чтения для файла музыки
+    setvbuf(fp, NULL, _IOFBF, 32768);
 
     SDL_RWops *rw = SDL_AllocRW();
     if (!rw) {
@@ -167,7 +182,12 @@ static bool loadSfxIntoRAM(SdlMixerAudioSystem* sys, int32_t soundIndex, AudioEn
     evictOldestSfx(sys);
 
     uint8_t* rawBuf = safeMalloc(entry->dataSize);
-    FILE* fp = fopen(sys->archivePath, "rb");
+
+    // ОПТИМИЗАЦИЯ: Используем уже открытый файл вместо постоянных fopen/fclose
+    if (!sys->dataWinFile) {
+        sys->dataWinFile = fopen(sys->archivePath, "rb");
+    }
+    FILE* fp = sys->dataWinFile;
     if (!fp) {
         free(rawBuf);
         return false;
@@ -175,7 +195,7 @@ static bool loadSfxIntoRAM(SdlMixerAudioSystem* sys, int32_t soundIndex, AudioEn
 
     fseek(fp, (long)entry->dataOffset, SEEK_SET);
     fread(rawBuf, 1, entry->dataSize, fp);
-    fclose(fp);
+    // Больше не делаем fclose(fp) здесь!
 
     bool isOgg = (entry->dataSize > 4 && memcmp(rawBuf, "OggS", 4) == 0);
 
@@ -193,7 +213,6 @@ static bool loadSfxIntoRAM(SdlMixerAudioSystem* sys, int32_t soundIndex, AudioEn
             int build_ret = SDL_BuildAudioCVT(&cvt, AUDIO_S16SYS, ogg_channels, ogg_sample_rate, format, mix_channels, freq);
             int original_len = samples * ogg_channels * sizeof(short);
 
-            // Если формат отличается (например, OGG моно, а микшер стерео), конвертируем аудио "на лету"
             if (build_ret == 1) {
                 cvt.len = original_len;
                 cvt.buf = safeMalloc(cvt.len * cvt.len_mult);
@@ -201,10 +220,9 @@ static bool loadSfxIntoRAM(SdlMixerAudioSystem* sys, int32_t soundIndex, AudioEn
                 SDL_ConvertAudio(&cvt);
 
                 sys->chunks[soundIndex] = Mix_QuickLoad_RAW(cvt.buf, cvt.len_cvt);
-                sys->decodedSfxBufs[soundIndex] = cvt.buf; // Сохраняем конвертированный буфер
-                free(decodedPcm); // Исходный моно-сигнал больше не нужен
+                sys->decodedSfxBufs[soundIndex] = cvt.buf;
+                free(decodedPcm);
             } else {
-                // Если звук уже соответствует настройкам микшера
                 sys->chunks[soundIndex] = Mix_QuickLoad_RAW((uint8_t*)decodedPcm, original_len);
                 sys->decodedSfxBufs[soundIndex] = decodedPcm;
             }
@@ -223,6 +241,85 @@ static bool loadSfxIntoRAM(SdlMixerAudioSystem* sys, int32_t soundIndex, AudioEn
     return true;
 }
 
+// ... остальной код из ensureSoundLoaded остается таким же ...
+
+static void sdlmInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileSystem) {
+    SdlMixerAudioSystem* sys = (SdlMixerAudioSystem*) audio;
+    sys->base.dataWin = dataWin;
+    sys->fileSystem = fileSystem;
+    sys->dataWinFile = NULL; // Инициализируем указатель
+
+    // Для 3DS лучше использовать меньший размер буфера (например 1024 или 512),
+    // чтобы уменьшить задержку звука (latency),
+    // но 2048 безопаснее для слабого CPU. Оставь 2048, если звук не отстает.
+    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0) {
+        fprintf(stderr, "Audio: Failed to init SDL_mixer: %s\n", Mix_GetError());
+        use_mixer = false;
+    }
+
+    if (use_mixer) {
+        Mix_Init(MIX_INIT_OGG | MIX_INIT_MP3);
+        Mix_AllocateChannels(MAX_MIXER_CHANNELS);
+
+        uint32_t soundCount = dataWin->sond.count;
+        sys->chunks = safeCalloc(soundCount, sizeof(Mix_Chunk*));
+        sys->music = safeCalloc(soundCount, sizeof(Mix_Music*));
+        sys->decodedSfxBufs = safeCalloc(soundCount, sizeof(void*));
+        sys->chunkLastUsed = safeCalloc(soundCount, sizeof(uint32_t));
+
+        sys->currentMusicSoundIndex = -1;
+        sys->audioFrameCounter = 1;
+
+        sys->archivePath = fileSystem->vtable->resolvePath(fileSystem, "data.win");
+        if (!sys->archivePath) {
+            sys->archivePath = fileSystem->vtable->resolvePath(fileSystem, "game.unx");
+        }
+
+        // Открываем общий файл архива один раз при старте
+        if (sys->archivePath) {
+            sys->dataWinFile = fopen(sys->archivePath, "rb");
+        }
+    }
+}
+
+static void sdlmDestroy(AudioSystem* audio) {
+    if (use_mixer) {
+        SdlMixerAudioSystem* sys = (SdlMixerAudioSystem*) audio;
+
+        Mix_HaltChannel(-1);
+        Mix_HaltMusic();
+
+        uint32_t soundCount = sys->base.dataWin->sond.count;
+        for (uint32_t i = 0; i < soundCount; i++) {
+            if (sys->chunks[i]) Mix_FreeChunk(sys->chunks[i]);
+            if (sys->music[i]) Mix_FreeMusic(sys->music[i]);
+            if (sys->decodedSfxBufs[i]) free(sys->decodedSfxBufs[i]);
+        }
+
+        // Закрываем общий файл
+        if (sys->dataWinFile) {
+            fclose(sys->dataWinFile);
+            sys->dataWinFile = NULL;
+        }
+
+        free(sys->chunks);
+        free(sys->music);
+        free(sys->decodedSfxBufs);
+        free(sys->chunkLastUsed);
+        if (sys->archivePath) free(sys->archivePath);
+
+        Mix_CloseAudio();
+        Mix_Quit();
+        free(sys);
+    }
+}
+
+static void sdlmUpdate(AudioSystem* audio, float deltaTime) {
+    if (use_mixer) {
+        ((SdlMixerAudioSystem*)audio)->audioFrameCounter++;
+        (void)deltaTime;
+    }
+}
 static bool ensureSoundLoaded(SdlMixerAudioSystem* sys, int32_t soundIndex) {
     if (!use_mixer) return true;
     if (soundIndex < 0 || (uint32_t)soundIndex >= sys->base.dataWin->sond.count) return false;
@@ -256,73 +353,6 @@ static bool ensureSoundLoaded(SdlMixerAudioSystem* sys, int32_t soundIndex) {
     }
 
     return (sys->chunks[soundIndex] || sys->music[soundIndex]);
-}
-
-// ============================================================================
-// [3] VTABLE IMPLEMENTATIONS
-// ============================================================================
-
-static void sdlmInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileSystem) {
-    SdlMixerAudioSystem* sys = (SdlMixerAudioSystem*) audio;
-    sys->base.dataWin = dataWin;
-    sys->fileSystem = fileSystem;
-
-    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0) {
-        fprintf(stderr, "Audio: Failed to init SDL_mixer: %s\n", Mix_GetError());
-        use_mixer = false;
-    }
-
-    if (use_mixer) {
-        Mix_Init(MIX_INIT_OGG | MIX_INIT_MP3);
-        Mix_AllocateChannels(MAX_MIXER_CHANNELS);
-
-        uint32_t soundCount = dataWin->sond.count;
-        sys->chunks = safeCalloc(soundCount, sizeof(Mix_Chunk*));
-        sys->music = safeCalloc(soundCount, sizeof(Mix_Music*));
-        sys->decodedSfxBufs = safeCalloc(soundCount, sizeof(void*));
-        sys->chunkLastUsed = safeCalloc(soundCount, sizeof(uint32_t));
-
-        sys->currentMusicSoundIndex = -1;
-        sys->audioFrameCounter = 1;
-
-        sys->archivePath = fileSystem->vtable->resolvePath(fileSystem, "data.win");
-        if (!sys->archivePath) {
-            sys->archivePath = fileSystem->vtable->resolvePath(fileSystem, "game.unx");
-        }
-    }
-}
-
-static void sdlmDestroy(AudioSystem* audio) {
-    if (use_mixer) {
-        SdlMixerAudioSystem* sys = (SdlMixerAudioSystem*) audio;
-
-        Mix_HaltChannel(-1);
-        Mix_HaltMusic();
-
-        uint32_t soundCount = sys->base.dataWin->sond.count;
-        for (uint32_t i = 0; i < soundCount; i++) {
-            if (sys->chunks[i]) Mix_FreeChunk(sys->chunks[i]);
-            if (sys->music[i]) Mix_FreeMusic(sys->music[i]);
-            if (sys->decodedSfxBufs[i]) free(sys->decodedSfxBufs[i]);
-        }
-
-        free(sys->chunks);
-        free(sys->music);
-        free(sys->decodedSfxBufs);
-        free(sys->chunkLastUsed);
-        if (sys->archivePath) free(sys->archivePath);
-
-        Mix_CloseAudio();
-        Mix_Quit();
-        free(sys);
-    }
-}
-
-static void sdlmUpdate(AudioSystem* audio, float deltaTime) {
-    if (use_mixer) {
-        ((SdlMixerAudioSystem*)audio)->audioFrameCounter++;
-        (void)deltaTime;
-    }
 }
 
 static int32_t sdlmPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t priority, bool loop) {
