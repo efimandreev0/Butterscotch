@@ -1124,10 +1124,15 @@ static Instance* createAndInitInstance(Runner* runner, int32_t instanceId, int32
 
 
 static void initRoom(Runner* runner, int32_t roomIndex) {
-    
-    
-    runner->cachedInstCount = -1;
+    // ВЫГРУЖАЕМ СТАРУЮ КОМНАТУ ИЗ ОЗУ
+    if (runner->currentRoomIndex >= 0 && runner->currentRoomIndex != roomIndex) {
+        DataWin_unloadRoom(runner->dataWin, runner->currentRoomIndex);
+    }
 
+    // ЗАГРУЖАЕМ НОВУЮ КОМНАТУ С ФЛЕШКИ
+    DataWin_loadRoom(runner->dataWin, roomIndex);
+
+    runner->cachedInstCount = -1;
     DataWin* dataWin = runner->dataWin;
     require(roomIndex >= 0 && dataWin->room.count > (uint32_t) roomIndex);
 
@@ -1137,6 +1142,9 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     runner->currentRoom = room;
     runner->currentRoomIndex = roomIndex;
 
+    if (runner->renderer && runner->renderer->vtable->onRoomChanged) {
+        runner->renderer->vtable->onRoomChanged(runner->renderer, roomIndex);
+    }
     
     runner->currentRoomOrderPosition = -1;
     repeat(dataWin->gen8.roomOrderCount, i) {
@@ -1146,21 +1154,15 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         }
     }
 
-    
     if (room->persistent && savedState->initialized) {
-        
         memcpy(runner->backgrounds, savedState->backgrounds, sizeof(runner->backgrounds));
         runner->backgroundColor = savedState->backgroundColor;
         runner->drawBackgroundColor = savedState->drawBackgroundColor;
 
-        
         hmfree(runner->tileLayerMap);
         runner->tileLayerMap = savedState->tileLayerMap;
         savedState->tileLayerMap = nullptr;
 
-        
-        
-        
         Instance** keptInstances = nullptr;
         int32_t oldCount = (int32_t) arrlen(runner->instances);
         repeat(oldCount, i) {
@@ -1175,7 +1177,6 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         arrfree(runner->instances);
         runner->instances = keptInstances;
 
-        
         int32_t savedCount = (int32_t) arrlen(savedState->instances);
         repeat(savedCount, i) {
             arrput(runner->instances, savedState->instances[i]);
@@ -1183,18 +1184,13 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         arrfree(savedState->instances);
         savedState->instances = nullptr;
 
-        
         fprintf(stderr, "Runner: Room restored (persistent): %s (room %d) with %d instances\n", room->name, roomIndex, (int) arrlen(runner->instances));
         return;
     }
 
-    
-
-    
     hmfree(runner->tileLayerMap);
     runner->tileLayerMap = nullptr;
 
-    
     runner->backgroundColor = room->backgroundColor;
     runner->drawBackgroundColor = room->drawBackgroundColor;
     repeat(8, i) {
@@ -1213,7 +1209,6 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         dst->alpha = 1.0f;
     }
 
-    
     Instance** keptInstances = nullptr;
     int32_t oldCount = (int32_t) arrlen(runner->instances);
     repeat(oldCount, i) {
@@ -1228,25 +1223,12 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     arrfree(runner->instances);
     runner->instances = keptInstances;
 
-    
-    
-    
-    
-    
-
-    
+    // ===[ ФИКС СКОРОСТИ 3: Убираем O(N^2) циклы из создания инстансов ]===
     repeat(room->gameObjectCount, i) {
         RoomGameObject* roomObj = &room->gameObjects[i];
 
-        
-        bool alreadyExists = false;
-        repeat(arrlen(runner->instances), j) {
-            if (runner->instances[j]->instanceId == roomObj->instanceID) {
-                alreadyExists = true;
-                break;
-            }
-        }
-        if (alreadyExists) continue;
+        // Мгновенная проверка O(1) вместо долгого цикла
+        if (hmgeti(runner->instancesToId, roomObj->instanceID) >= 0) continue;
         if (isObjectDisabled(runner, roomObj->objectDefinition)) continue;
 
         Instance* inst = createAndInitInstance(runner, roomObj->instanceID, roomObj->objectDefinition, (GMLReal) roomObj->x, (GMLReal) roomObj->y);
@@ -1255,21 +1237,14 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         inst->imageAngle = (float) roomObj->rotation;
     }
 
-    
     repeat(room->gameObjectCount, i) {
         RoomGameObject* roomObj = &room->gameObjects[i];
 
-        
-        Instance* inst = nullptr;
-        repeat(arrlen(runner->instances), j) {
-            if (runner->instances[j]->instanceId == roomObj->instanceID) {
-                inst = runner->instances[j];
-                break;
-            }
-        }
-        if (inst == nullptr) continue;
+        // Мгновенный поиск O(1) вместо долгого цикла
+        ptrdiff_t idx = hmgeti(runner->instancesToId, roomObj->instanceID);
+        if (idx < 0) continue;
+        Instance* inst = runner->instancesToId[idx].value;
 
-        
         if (inst->createEventFired) continue;
         inst->createEventFired = true;
 
@@ -1277,17 +1252,14 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         Runner_executeEvent(runner, inst, EVENT_CREATE, 0);
         executeCode(runner, inst, roomObj->creationCode);
     }
+    // ======================================================================
 
-    
     if (room->creationCodeId >= 0 && dataWin->code.count > (uint32_t) room->creationCodeId) {
-        
         RValue result = VM_executeCode(runner->vmContext, room->creationCodeId);
         RValue_free(&result);
     }
 
-    
     savedState->initialized = true;
-
     fprintf(stderr, "Runner: Room loaded: %s (room %d) with %d instances\n", room->name, roomIndex, (int) arrlen(runner->instances));
 }
 

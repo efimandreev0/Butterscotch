@@ -21,6 +21,8 @@
 #define LRU_SWEEP_INTERVAL 60
 #define LRU_IDLE_THRESHOLD 600
 
+static uint8_t* ctrReadPngBlobFromFile(FILE* fp, uint32_t blobOffset, uint32_t blobSize);
+
 static int next_pot(int x) {
     x--;
     x |= x >> 1;  x |= x >> 2;
@@ -227,9 +229,21 @@ static void prefetchRoomTextures(CtrRenderer* gl) {
 
         uint8_t* pixels = nullptr;
         int origW = 0, origH = 0, channels = 0;
+        uint8_t* streamedBlob = nullptr;
 
         if (!all_in_cache) {
             uint8_t* tempPngBuffer = txtr->blobData;
+
+            // Fallback: если блоб выгружен из RAM (обычный случай после Stage 1),
+            // стримим PNG с диска, чтобы не раздувать пик памяти.
+            if (tempPngBuffer == nullptr && dw->filePath != nullptr) {
+                FILE* fp = fopen(dw->filePath, "rb");
+                if (fp) {
+                    streamedBlob = ctrReadPngBlobFromFile(fp, txtr->blobOffset, txtr->blobSize);
+                    fclose(fp);
+                    tempPngBuffer = streamedBlob;
+                }
+            }
 
             if (tempPngBuffer != nullptr) {
                 pixels = stbi_load_from_memory(tempPngBuffer, (int) txtr->blobSize, &origW, &origH, &channels, 4);
@@ -378,6 +392,7 @@ static void prefetchRoomTextures(CtrRenderer* gl) {
             }
         }
         if (pixels != nullptr) stbi_image_free(pixels);
+        if (streamedBlob != nullptr) free(streamedBlob);
     }
 }
 
@@ -419,6 +434,19 @@ static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
     }
 }
 
+// Читает PNG-блоб с диска в свежий malloc-буфер. Вызов освобождает буфер сам.
+// Используется, когда parseTXTR был вызван с skipTextureBlobData=true, т.е.
+// Texture.blobData == NULL и байты PNG нужно подтянуть с SD-карты по offset/size.
+static uint8_t* ctrReadPngBlobFromFile(FILE* fp, uint32_t blobOffset, uint32_t blobSize) {
+    if (!fp || blobSize == 0 || blobOffset == 0) return NULL;
+    if (fseek(fp, (long) blobOffset, SEEK_SET) != 0) return NULL;
+    uint8_t* buf = (uint8_t*) malloc(blobSize);
+    if (!buf) return NULL;
+    size_t got = fread(buf, 1, blobSize, fp);
+    if (got != blobSize) { free(buf); return NULL; }
+    return buf;
+}
+
 static void ctrBuildFullTextureCache(CtrRenderer* gl) {
     DataWin* dw = gl->base.dataWin;
     const char* flagPath = "sdmc:/3ds/butterscotch/cache/cache_ready.flag";
@@ -430,8 +458,8 @@ static void ctrBuildFullTextureCache(CtrRenderer* gl) {
         fclose(flagFile);
         fprintf(stderr, "--- FAST BOOT: Cache flag found. Skipping verification! ---\n");
 
-        // ВАЖНО: Если мы пропускаем кэширование, нам всё равно нужно очистить ОЗУ
-        // от "сырых" PNG картинок из data.win, иначе игре не хватит памяти и она вылетит.
+        // На всякий случай освобождаем блобы, если они почему-то загружены.
+        // При штатной схеме (Stage 1 со skipTextureBlobData=true) они и так NULL.
         for (uint32_t pId = 0; pId < dw->txtr.count; pId++) {
             if (dw->txtr.textures[pId].blobData) {
                 free(dw->txtr.textures[pId].blobData);
@@ -443,6 +471,13 @@ static void ctrBuildFullTextureCache(CtrRenderer* gl) {
     // -----------------------------
 
     fprintf(stderr, "--- STARTING PRE-CACHE VERIFICATION (First Boot) ---\n");
+
+    // Держим один handle открытым на всю сборку кэша — открывать sdmc-файл на каждую
+    // страницу медленно. Читаем только блоб нужной текстуры, а не весь data.win.
+    FILE* dataWinFile = (dw->filePath != NULL) ? fopen(dw->filePath, "rb") : NULL;
+    if (dataWinFile) {
+        setvbuf(dataWinFile, NULL, _IOFBF, 128 * 1024);
+    }
 
     int totalExtracted = 0;
 
@@ -468,8 +503,26 @@ static void ctrBuildFullTextureCache(CtrRenderer* gl) {
             int origW = 0, origH = 0, channels = 0;
             uint8_t* pixels = NULL;
 
-            if (txtr->blobData) {
-                pixels = stbi_load_from_memory(txtr->blobData, (int) txtr->blobSize, &origW, &origH, &channels, 4);
+            // Источник PNG: либо уже в памяти (старый путь), либо читаем с диска
+            // прямо сейчас и освобождаем сразу после decode. Это держит пик RAM
+            // на уровне "один PNG + одна RGBA-копия", а не "все PNG + decode".
+            uint8_t* streamedBlob = NULL;
+            uint8_t* blobPtr = txtr->blobData;
+            uint32_t blobBytes = txtr->blobSize;
+            if (blobPtr == NULL && dataWinFile != NULL) {
+                streamedBlob = ctrReadPngBlobFromFile(dataWinFile, txtr->blobOffset, txtr->blobSize);
+                blobPtr = streamedBlob;
+            }
+
+            if (blobPtr) {
+                pixels = stbi_load_from_memory(blobPtr, (int) blobBytes, &origW, &origH, &channels, 4);
+            }
+
+            // Блоб нужен только на время decode — освобождаем сразу.
+            if (streamedBlob) {
+                free(streamedBlob);
+                streamedBlob = NULL;
+                blobPtr = NULL;
             }
 
             if (!pixels) {
@@ -587,6 +640,8 @@ static void ctrBuildFullTextureCache(CtrRenderer* gl) {
             txtr->blobData = NULL;
         }
     }
+
+    if (dataWinFile) fclose(dataWinFile);
 
     fprintf(stderr, "--- PRE-CACHE VERIFICATION COMPLETE (Extracted %d items) ---\n", totalExtracted);
 
@@ -844,8 +899,13 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
         }
     }
 
-    gl->pendingResidencyUpdate = true;
-    gl->pendingResidencyReadyFrame = g_frameCounter;
+    gl->pendingResidencyUpdate = false;
+    for (uint32_t i = 0; i < gl->tpagCount; i++) {
+        if (!gl->tpags[i].keepResident && gl->tpags[i].isLoaded) {
+            unloadTpagTexture(gl, i);
+        }
+    }
+    prefetchRoomTextures(gl);
 }
 
 static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y, float originX, float originY, float xscale, float yscale, float angleDeg, uint32_t color, float alpha) {
@@ -1426,11 +1486,11 @@ static RendererVtable ctrVtable = {
     .drawText = ctrDrawText, .drawTextColor = ctrDrawTextColor, .flush = ctrRendererFlush,
     .createSpriteFromSurface = ctrCreateSpriteFromSurface, .deleteSprite = ctrDeleteSprite,
     .drawTile = ctrDrawTile,
-    // 🔥 ФИКС: Добавляем пропущенные функции в таблицу!
     .drawCircle = ctrDrawCircle,
     .drawRoundrect = ctrDrawRoundrect,
     .drawTriangleColor = ctrDrawTriangleColor,
-    .drawEllipse = ctrDrawEllipse
+    .drawEllipse = ctrDrawEllipse,
+    .onRoomChanged = ctrOnRoomChanged
 };
 
 Renderer* CtrRenderer_create(void) {

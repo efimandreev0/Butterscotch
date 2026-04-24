@@ -53,7 +53,9 @@ file(GLOB SOURCES src/*.c)
 # Platform specific files builds
 file(GLOB PLATFORM_SOURCES src/${PLATFORM}/*.c)
 
-add_executable(butterscotch ${SOURCES} ${PLATFORM_SOURCES})
+add_executable(butterscotch ${SOURCES} ${PLATFORM_SOURCES}
+        src/3ds/ndsp_audio_system.h
+        src/3ds/ndsp_audio_system.c)
 target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 # stb_ds

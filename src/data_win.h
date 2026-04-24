@@ -43,6 +43,10 @@ typedef struct {
     // userData: user-provided pointer passed through from the options
     void (*progressCallback)(const char* chunkName, int chunkIndex, int totalChunks, DataWin* dataWin, void* userData);
     void* progressCallbackUserData;
+
+    //3DS shit
+    bool skipTextureBlobData;
+    bool skipAudioBlobData;
 } DataWinParserOptions;
 
 // ===[ GEN8 - General Info ]===
@@ -602,6 +606,14 @@ typedef struct {
     float gravityX;
     float gravityY;
     float metersPerPixel;
+
+    uint32_t backgroundsPtr;
+    uint32_t viewsPtr;
+    uint32_t gameObjectsPtr;
+    uint32_t tilesPtr;
+    uint32_t layersPtr;
+    bool isLoaded;
+
     RoomBackground backgrounds[8];
     RoomView views[8];
     uint32_t gameObjectCount;
@@ -737,6 +749,9 @@ typedef struct DataWin {
     // Absolute file offset of bytecodeBuffer[0], we need this because data.win stores absolute offsets (from the beginning of the data.win file) instead of relative offsets
     size_t bytecodeBufferBase;
 
+    uint8_t* roomBuffer;
+    size_t roomBufferBase;
+
     Gen8 gen8;
     Optn optn;
     Lang lang;
@@ -766,6 +781,10 @@ typedef struct DataWin {
     struct { uint32_t key; int32_t value; }* tpagOffsetMap;
     // Lookup map: absolute file offset -> SPRT index (built during SPRT parsing)
     struct { uint32_t key; int32_t value; }* sprtOffsetMap;
+
+    char* filePath;
+    size_t roomChunkOffset;
+    uint32_t roomChunkLength;
 } DataWin;
 
 DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options);
@@ -775,3 +794,5 @@ int32_t DataWin_resolveTPAG(DataWin* dw, uint32_t offset);
 int32_t DataWin_resolveSPRT(DataWin* dw, uint32_t offset);
 void GamePath_computeInternal(GamePath* path);
 PathPositionResult GamePath_getPosition(GamePath* path, double t);
+void DataWin_loadRoom(DataWin* dw, int32_t roomIndex);
+void DataWin_unloadRoom(DataWin* dw, int32_t roomIndex);

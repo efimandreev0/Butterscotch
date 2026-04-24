@@ -43,6 +43,7 @@ typedef struct {
     // Ellipse: centered at (cx, cy) with radii (rx, ry), subdivided into `precision` segments.
     // Filled = triangle fan (center + N+1 perimeter), outlined = line strip.
     void (*drawEllipse)(Renderer* renderer, float cx, float cy, float rx, float ry, uint32_t color, float alpha, bool outline, int32_t precision);
+    void (*onRoomChanged)(Renderer* renderer, int32_t roomIndex);
 } RendererVtable;
 
 // ===[ Renderer Base Struct ]===

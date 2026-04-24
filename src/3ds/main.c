@@ -19,7 +19,7 @@
 #include "runner_keyboard.h"
 #include "ctr_renderer.h"
 #include "ctr_file_system.h"
-#include "sdl12_audio_system.h"
+#include "ndsp_audio_system.h"
 #include "utils.h"
 
 u32 __ctru_heap_size = 0;
@@ -82,34 +82,55 @@ int main(int argc, char* argv[]) {
     nova_texture_cache_set_directory(NOVA_TEX_CACHE_PATH);
 
     // =========================================================================
-    // СТАДИЯ 1: ЧИСТЫЙ ПАРСИНГ ТОЛЬКО ДЛЯ КЭША (Без фрагментации памяти!)
+    // СТАДИЯ 1 выполняется ТОЛЬКО при первом запуске.
+    // Если cache_ready.flag существует — пропускаем всё: и повторный парсинг
+    // data.win, и загрузку PNG-блобов в ОЗУ. Это главная экономия RAM и времени загрузки.
     // =========================================================================
-    fprintf(stderr, "=== STAGE 1: TEXTURE PRE-CACHING ===\n");
-    DataWin* cacheWin = DataWin_parse(
-        DATA_WIN_PATH,
-        (DataWinParserOptions) {
-            .parseGen8 = true,
-            .parseTpag = true,
-            .parseTxtr = true
-            // ВАЖНО: Все остальные галочки опущены (false).
-            // Игра не грузит логику, комнаты и скрипты, сохраняя ОЗУ нетронутым!
+    bool isCacheReady = false;
+    {
+        FILE* cacheFlagFile = fopen(NOVA_TEX_CACHE_PATH "/cache_ready.flag", "r");
+        if (cacheFlagFile) {
+            isCacheReady = true;
+            fclose(cacheFlagFile);
         }
-    );
-
-    if (cacheWin != NULL) {
-        Renderer* tempRenderer = CtrRenderer_create();
-        tempRenderer->vtable->init(tempRenderer, cacheWin); // Триггерит создание кэша
-        tempRenderer->vtable->destroy(tempRenderer);
-        DataWin_free(cacheWin); // Очищаем временную память
-        fprintf(stderr, "=== STAGE 1 COMPLETE ===\n");
-    } else {
-        fprintf(stderr, "WARNING: Stage 1 Cache pass failed to parse data.win!\n");
     }
 
-    // =========================================================================
-    // СТАДИЯ 2: ПОЛНАЯ ЗАГРУЗКА ИГРЫ
-    // =========================================================================
+    if (!isCacheReady) {
+        fprintf(stderr, "=== STAGE 1: TEXTURE PRE-CACHING (first boot) ===\n");
+        DataWin* cacheWin = DataWin_parse(
+            DATA_WIN_PATH,
+            (DataWinParserOptions) {
+                .parseGen8 = true,
+                .parseTpag = true,
+                .parseTxtr = true,
+                // PNG-блобы читаем стримингом с диска при декоде — не держим
+                // все PNG в ОЗУ одновременно (большой пик на 3DS).
+                .skipTextureBlobData = true,
+            }
+        );
+
+        if (cacheWin != NULL) {
+            Renderer* tempRenderer = CtrRenderer_create();
+            tempRenderer->vtable->init(tempRenderer, cacheWin); // Триггерит создание кэша
+            tempRenderer->vtable->destroy(tempRenderer);
+            DataWin_free(cacheWin);
+            fprintf(stderr, "=== STAGE 1 COMPLETE ===\n");
+        } else {
+            fprintf(stderr, "WARNING: Stage 1 Cache pass failed to parse data.win!\n");
+        }
+
+        // После Stage 1 флаг уже должен существовать.
+        FILE* cacheFlagFile = fopen(NOVA_TEX_CACHE_PATH "/cache_ready.flag", "r");
+        if (cacheFlagFile) {
+            isCacheReady = true;
+            fclose(cacheFlagFile);
+        }
+    } else {
+        fprintf(stderr, "=== STAGE 1 SKIPPED (cache ready) ===\n");
+    }
+
     fprintf(stderr, "=== STAGE 2: FULL GAME BOOT ===\n");
+
     DataWin* dataWin = DataWin_parse(
         DATA_WIN_PATH,
         (DataWinParserOptions) {
@@ -135,8 +156,11 @@ int main(int argc, char* argv[]) {
             .parseFunc = true,
             .parseStrg = true,
             .parseTxtr = true,
-            .parseAudo = false,
+            .parseAudo = true,
+
             .skipLoadingPreciseMasksForNonPreciseSprites = true,
+            .skipTextureBlobData = isCacheReady,
+            .skipAudioBlobData = true,
         }
     );
 
@@ -166,7 +190,7 @@ int main(int argc, char* argv[]) {
 
     N3dsFileSystem* fs = N3dsFileSystem_create(DATA_WIN_PATH);
     Renderer* renderer = CtrRenderer_create();
-    AudioSystem* audio = (AudioSystem*) SdlMixerAudioSystem_create();
+    AudioSystem* audio = (AudioSystem*) NdspAudioSystem_create();
     if (audio) {
         audio->dataWin = dataWin;
     }
