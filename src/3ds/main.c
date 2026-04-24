@@ -19,7 +19,7 @@
 #include "runner_keyboard.h"
 #include "ctr_renderer.h"
 #include "ctr_file_system.h"
-#include "ndsp_audio_system.h"
+#include "sdl12_audio_system.h"
 #include "utils.h"
 
 u32 __ctru_heap_size = 0;
@@ -190,7 +190,7 @@ int main(int argc, char* argv[]) {
 
     N3dsFileSystem* fs = N3dsFileSystem_create(DATA_WIN_PATH);
     Renderer* renderer = CtrRenderer_create();
-    AudioSystem* audio = (AudioSystem*) NdspAudioSystem_create();
+    AudioSystem* audio = (AudioSystem*) SdlMixerAudioSystem_create();
     if (audio) {
         audio->dataWin = dataWin;
     }

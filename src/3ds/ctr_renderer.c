@@ -323,7 +323,7 @@ static void prefetchRoomTextures(CtrRenderer* gl) {
                 }
                 alpha_found:;
 
-                uint16_t* pixels16 = malloc(potW * potH * sizeof(uint16_t));
+                uint16_t* pixels16 = g_pixelConvertBuffer;
                 if (pixels16) {
                     memset(pixels16, 0, potW * potH * sizeof(uint16_t));
 
@@ -383,11 +383,8 @@ static void prefetchRoomTextures(CtrRenderer* gl) {
                         gl->tpags[tId].tex = 0;
                     }
 
-                    // ФИКС 0 FPS: Ставим флаг в любом случае, чтобы не застрять в ретраях!
                     gl->tpags[tId].isLoaded = true;
                     gl->tpags[tId].lastUsedFrame = g_frameCounter;
-
-                    free(pixels16);
                 }
             }
         }
@@ -396,15 +393,64 @@ static void prefetchRoomTextures(CtrRenderer* gl) {
     }
 }
 
+static bool ctrExtractAndLoadSingleTpag(CtrRenderer* gl, DataWin* dw, uint32_t tId) {
+    if (gl->tpags[tId].isLoaded) return true;
+
+    TexturePageItem* item = &dw->tpag.items[tId];
+    uint32_t pId = item->texturePageId;
+    Texture* txtr = &dw->txtr.textures[pId];
+
+    uint32_t hash = compute_tpag_hash(txtr, pId, tId);
+
+    // ФИКС ГРАФИКИ: Сначала создаем и биндим текстуру, И ТОЛЬКО ПОТОМ грузим в нее кэш!
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+
+    int cacheW, cacheH;
+
+    if (nova_texture_cache_load(hash, &cacheW, &cacheH)) {
+        int extW = item->sourceWidth > 0 ? item->sourceWidth : 1;
+        int extH = item->sourceHeight > 0 ? item->sourceHeight : 1;
+
+        float downscaleFactor = 1.0f;
+        if (extW > 1024 || extH > 1024) {
+            float scaleX = 1024.0f / (float) extW;
+            float scaleY = 1024.0f / (float) extH;
+            downscaleFactor = fminf(scaleX, scaleY);
+            if (downscaleFactor > 1.0f) downscaleFactor = 1.0f;
+        }
+
+        gl->tpags[tId].tex = tex;
+        gl->tpags[tId].uvScaleX = 1.0f / (float)cacheW;
+        gl->tpags[tId].uvScaleY = 1.0f / (float)cacheH;
+        gl->tpags[tId].downscaleFactor = downscaleFactor;
+        gl->tpags[tId].isLoaded = true;
+        gl->tpags[tId].lastUsedFrame = g_frameCounter;
+
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        return true;
+    }
+
+    // Если в кэше не нашлось (медленный путь), удаляем пустышку, чтобы не было утечки VRAM
+    glDeleteTextures(1, &tex);
+    return false;
+}
+
 static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
     if (tpagIndex < 0 || (uint32_t)tpagIndex >= gl->tpagCount || gl->tpags[tpagIndex].isLoaded) return;
 
+    bool slowFallbackNeeded = false;
     int32_t tempTpags[64];
     int tempCount = 0;
 
     int32_t sprIdx = gl->tpagToSprite[tpagIndex];
     if (sprIdx >= 0) {
-        for (int i = 0; i <= 1; i++) {
+        for (int i = -2; i <= 4; i++) {
             int32_t neighbor = sprIdx + i;
             if (neighbor >= 0 && (uint32_t)neighbor < dw->sprt.count) {
                 Sprite* s = &dw->sprt.sprites[neighbor];
@@ -412,8 +458,12 @@ static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
                     int32_t tIdx = DataWin_resolveTPAG(dw, s->textureOffsets[f]);
                     if (tIdx >= 0 && tIdx < (int32_t)gl->tpagCount) {
                         if (!gl->tpags[tIdx].isLoaded && !gl->tpags[tIdx].keepResident && tempCount < 64) {
-                            gl->tpags[tIdx].keepResident = true;
-                            tempTpags[tempCount++] = tIdx;
+                            // FAST PATH: Грузим за миллисекунду без сканирования всей базы
+                            if (!ctrExtractAndLoadSingleTpag(gl, dw, tIdx)) {
+                                gl->tpags[tIdx].keepResident = true;
+                                tempTpags[tempCount++] = tIdx;
+                                slowFallbackNeeded = true;
+                            }
                         }
                     }
                 }
@@ -421,16 +471,21 @@ static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
         }
     } else {
         if (!gl->tpags[tpagIndex].keepResident && tempCount < 64) {
-            gl->tpags[tpagIndex].keepResident = true;
-            tempTpags[tempCount++] = tpagIndex;
+            if (!ctrExtractAndLoadSingleTpag(gl, dw, tpagIndex)) {
+                gl->tpags[tpagIndex].keepResident = true;
+                tempTpags[tempCount++] = tpagIndex;
+                slowFallbackNeeded = true;
+            }
         }
     }
 
-    prefetchRoomTextures(gl);
-
-    for (int i = 0; i < tempCount; i++) {
-        gl->tpags[tempTpags[i]].keepResident = false;
-        gl->tpags[tempTpags[i]].lastUsedFrame = g_frameCounter;
+    // Если текстуры не оказалось в кэше (флаг не сработал), дергаем медленный метод
+    if (slowFallbackNeeded) {
+        prefetchRoomTextures(gl);
+        for (int i = 0; i < tempCount; i++) {
+            gl->tpags[tempTpags[i]].keepResident = false;
+            gl->tpags[tempTpags[i]].lastUsedFrame = g_frameCounter;
+        }
     }
 }
 
@@ -575,7 +630,7 @@ static void ctrBuildFullTextureCache(CtrRenderer* gl) {
                         }
                         alpha_found_cache:;
 
-                        uint16_t* pixels16 = malloc(potW * potH * sizeof(uint16_t));
+                        uint16_t* pixels16 = g_pixelConvertBuffer;
                         if (pixels16) {
                             memset(pixels16, 0, potW * potH * sizeof(uint16_t));
 
@@ -659,6 +714,9 @@ static void ctrBuildFullTextureCache(CtrRenderer* gl) {
 
 static void ctrInit(Renderer* renderer, DataWin* dataWin) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
+    if (g_pixelConvertBuffer == NULL) {
+        g_pixelConvertBuffer = malloc(1024 * 1024 * sizeof(uint16_t));
+    }
     renderer->dataWin = dataWin;
 
     glEnable(GL_TEXTURE_2D);
@@ -716,6 +774,11 @@ static void ctrInit(Renderer* renderer, DataWin* dataWin) {
 
 static void ctrDestroy(Renderer* renderer) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
+
+    if (g_pixelConvertBuffer != NULL) {
+        free(g_pixelConvertBuffer);
+        g_pixelConvertBuffer = NULL;
+    }
 
     glDeleteTextures(1, &gl->whiteTexture);
     for (uint32_t i = 0; i < gl->tpagCount; i++) {
@@ -846,7 +909,7 @@ static void markSpriteResident(CtrRenderer* gl, DataWin* dw, int32_t spriteIndex
 static void markSpriteNeighborhoodResident(CtrRenderer* gl, DataWin* dw, int32_t baseSpriteIndex, int range) {
     if (baseSpriteIndex < 0) return;
 
-    for (int i = 0; i <= 1; i++) {
+    for (int i = -range; i <= range; i++) {
         int32_t sprIdx = baseSpriteIndex + i;
         if (sprIdx >= 0 && (uint32_t)sprIdx < dw->sprt.count) {
             markSpriteResident(gl, dw, sprIdx);
@@ -888,12 +951,12 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
     for (uint32_t i = 0; i < room->gameObjectCount; i++) {
         int32_t objIdx = room->gameObjects[i].objectDefinition;
         if (objIdx >= 0 && (uint32_t) objIdx < dw->objt.count) {
-            markSpriteNeighborhoodResident(gl, dw, dw->objt.objects[objIdx].spriteId, 1);
+            markSpriteNeighborhoodResident(gl, dw, dw->objt.objects[objIdx].spriteId, 4);
 
             int32_t parent = dw->objt.objects[objIdx].parentId;
             int guard = 8;
             while (parent >= 0 && (uint32_t) parent < dw->objt.count && guard-- > 0) {
-                markSpriteNeighborhoodResident(gl, dw, dw->objt.objects[parent].spriteId, 1);
+                markSpriteNeighborhoodResident(gl, dw, dw->objt.objects[parent].spriteId, 4);
                 parent = dw->objt.objects[parent].parentId;
             }
         }

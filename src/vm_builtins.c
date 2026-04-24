@@ -537,7 +537,14 @@ void VMBuiltins_setVariable(VMContext* ctx, int16_t builtinVarId, const char* na
         if (builtinVarId == BUILTIN_VAR_IMAGE_ANGLE) { inst->imageAngle = (float) RValue_toReal(val); return; }
         if (builtinVarId == BUILTIN_VAR_IMAGE_ALPHA) { inst->imageAlpha = (float) RValue_toReal(val); return; }
         if (builtinVarId == BUILTIN_VAR_IMAGE_BLEND) { inst->imageBlend = (uint32_t) RValue_toReal(val); return; }
-        if (builtinVarId == BUILTIN_VAR_SPRITE_INDEX) { inst->spriteIndex = RValue_toInt32(val); return; }
+        if (builtinVarId == BUILTIN_VAR_SPRITE_INDEX) {
+            inst->spriteIndex = RValue_toInt32(val);
+
+            extern void CtrRenderer_prefetchSprite(void* renderer, int32_t spriteIndex);
+            CtrRenderer_prefetchSprite(ctx->runner->renderer, inst->spriteIndex);
+
+            return;
+        }
         if (builtinVarId == BUILTIN_VAR_VISIBLE) { inst->visible = RValue_toBool(val); return; }
         if (builtinVarId == BUILTIN_VAR_DEPTH) { inst->depth = RValue_toInt32(val); return; }
         if (builtinVarId == BUILTIN_VAR_X) { inst->x = (float) RValue_toReal(val); return; }
@@ -3980,6 +3987,30 @@ static RValue builtinSurfaceGetHeight(VMContext* ctx, RValue* args, MAYBE_UNUSED
 }
 
 // Sprite functions
+
+// GML: sprite_prefetch(sprite_index)
+static RValue builtin_sprite_prefetch(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    if (argCount < 1) return RValue_makeReal(-1.0);
+
+    int32_t spriteIndex = RValue_toInt32(args[0]);
+
+    if (spriteIndex < 0 || (uint32_t)spriteIndex >= ctx->dataWin->sprt.count) {
+        return RValue_makeReal(-1.0);
+    }
+
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner != nullptr && runner->renderer != nullptr) {
+        extern void CtrRenderer_prefetchSprite(void* renderer, int32_t spriteIndex);
+        CtrRenderer_prefetchSprite(runner->renderer, spriteIndex);
+    }
+
+    return RValue_makeReal(0.0); // 0 = успех
+}
+
+static RValue builtin_sprite_flush(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeReal(0.0);
+}
+
 static RValue builtin_spriteGetWidth(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     int32_t spriteIndex = (int32_t) RValue_toReal(args[0]);
     if (0 > spriteIndex || (uint32_t) spriteIndex >= ctx->dataWin->sprt.count) return RValue_makeReal(0.0);
@@ -5240,6 +5271,8 @@ void VMBuiltins_registerAll(bool isGMS2) {
     registerBuiltin("sprite_get_yoffset", builtin_spriteGetYOffset);
     registerBuiltin("sprite_create_from_surface", builtin_spriteCreateFromSurface);
     registerBuiltin("sprite_delete", builtin_spriteDelete);
+    registerBuiltin("sprite_prefetch", builtin_sprite_prefetch);
+    registerBuiltin("sprite_flush", builtin_sprite_flush);
 
     // Text measurement
     registerBuiltin("string_width", builtin_stringWidth);

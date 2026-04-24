@@ -5,7 +5,8 @@
 #include "renderer.h"
 #include <NovaGL.h>
 
-// Данные конкретного вырезанного куска из атласа (TPAG)
+static uint16_t* g_pixelConvertBuffer = NULL;
+
 typedef struct {
     bool isLoaded;
     bool keepResident;
