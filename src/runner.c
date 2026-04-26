@@ -1485,6 +1485,9 @@ static void dispatchCollisionEvents(Runner* runner) {
                         bool needsPrecise = (sprSelf != nullptr && sprSelf->sepMasks == 1) || (sprOther != nullptr && sprOther->sepMasks == 1);
 
                         if (needsPrecise) {
+                            if (sprSelf) DataWin_ensureSpriteMasks(dataWin, sprSelf);
+                            if (sprOther) DataWin_ensureSpriteMasks(dataWin, sprOther);
+
                             if (!Collision_instancesOverlapPrecise(dataWin, self, other, bboxSelf, bboxOther)) continue;
                         }
 

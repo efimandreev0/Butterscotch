@@ -1,66 +1,32 @@
 // --- START OF FILE ctr_renderer.h ---
-
 #pragma once
 
 #include "renderer.h"
 #include <NovaGL.h>
 
-static uint16_t* g_pixelConvertBuffer = NULL;
-
+// Вырезанный спрайт, лежащий в VRAM
 typedef struct {
     bool isLoaded;
     bool keepResident;
     uint32_t lastUsedFrame;
 
     GLuint tex;
-    float uvScaleX;
-    float uvScaleY;
-
+    float uvScaleX;         // <--- ТЕПЕРЬ ОНИ ЗДЕСЬ
+    float uvScaleY;         // <--- И КОМПИЛЯТОР БУДЕТ ДОВОЛЕН
     float downscaleFactor;
 } CtrTpagData;
 
-// Кэш распакованной страницы атласа в ОЗУ (чтобы не статтерить при частом спавне)
-typedef struct {
-    uint8_t* pixels;
-    uint8_t* originalStbiPixels;
-    int width;
-    int height;
-    float dsFactor;
-    uint32_t lastExtractedFrame;
-} CtrDecodedPage;
-
-typedef struct {
-    GLuint tex;              // ID текстуры OpenGL
-    int potWidth;            // Ширина текстуры в VRAM (обычно 1024 или 512)
-    int potHeight;           // Высота текстуры в VRAM
-    float downscaleFactor;   // Насколько мы её ужали (например 0.5)
-
-    bool isLoaded;
-    bool keepResident;
-    uint32_t lastUsedFrame;
-} CtrPageData;
-
-// ===[ CtrRenderer Struct ]===
+// Главная структура рендерера
 typedef struct {
     Renderer base;
 
     CtrTpagData* tpags;
     uint32_t tpagCount;
 
-    int32_t* tpagToSprite;
-
-    CtrDecodedPage* decodedPages; // Массив кэшей атласов
-    uint32_t texturePageCount;
-
-    bool pendingResidencyUpdate;
-    uint32_t pendingResidencyReadyFrame;
+    void* rawAtlases;
+    uint32_t rawAtlasCount;
 
     GLuint whiteTexture;
-
-    uint8_t* textBatchVertices;
-    uint32_t textBatchQuadCapacity;
-    uint32_t textBatchQuadCount;
-    GLuint textBatchTexture;
 
     uint8_t* quadBatchVertices;
     uint32_t quadBatchCapacity;
@@ -72,9 +38,12 @@ typedef struct {
     int32_t gameW;
     int32_t gameH;
 
-    uint32_t vramUsed;
+    int32_t* prefetchQueue;
 } CtrRenderer;
 
 Renderer* CtrRenderer_create(void);
 void CtrRenderer_prefetchSprite(Renderer* renderer, int32_t spriteIndex);
+void CtrRenderer_drainPrefetchQueue(Renderer* renderer, int maxItems);
+bool CtrRenderer_hasPendingPrefetch(Renderer* renderer);
+
 // --- END OF FILE ctr_renderer.h ---

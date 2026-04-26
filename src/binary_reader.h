@@ -16,6 +16,9 @@ typedef struct {
     size_t bufferBase;
     size_t bufferSize;
     size_t bufferPos; // current read position relative to bufferBase
+
+    // NEW: If a seek goes outside the buffer, we switch to reading directly from the file.
+    bool useFileFallback;
 } BinaryReader;
 
 BinaryReader BinaryReader_create(FILE* file, size_t fileSize);

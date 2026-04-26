@@ -15,10 +15,13 @@ static bool use_mixer = true;
 #define MUSIC_INSTANCE_ID_BASE 200000
 #define SOUND_INSTANCE_ID_BASE 100000
 
-// КРИТИЧЕСКИ ВАЖНО: 512 КБ. Любой файл меньше 512 КБ загружается в оперативу как эффект (Mix_Chunk).
-// Все файлы больше 512 КБ загружаются как потоковая музыка (Mix_Music).
-#define STREAMING_SIZE_THRESHOLD (512 * 1024)
-#define MAX_CACHED_CHUNKS 32
+#define STREAMING_SIZE_THRESHOLD (2 * 1024 * 1024)
+
+// Кэш распакованных SFX: каждый чанк конвертирован в формат микшера
+// (44.1 kHz stereo s16 = 176 KB/сек). 16 чанков по 2-3 сек = 5-8 MB heap,
+// что слишком жирно для Old 3DS. 6 хватает (одновременно обычно играет 2-4),
+// остальные подгрузятся из data.win по запросу.
+#define MAX_CACHED_CHUNKS 16
 
 // ============================================================================
 // [1] MUSIC STREAMING (RWops)
@@ -267,7 +270,12 @@ static void sdlmInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileSyste
     sys->base.dataWin = dataWin;
     sys->fileSystem = fileSystem;
 
-    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0) {
+    // Буфер 4096 samples @ 44100 Hz = ~93 мс латентности. Раньше стояло 2048
+    // (~46 мс): звук успевал начаться ДО того, как кадр успел свопнуться на
+    // экран (при 30 fps сам кадр рендерится ~25-33 мс), из-за чего в битве
+    // с Азгором sfx опережали анимацию. 4096 ещё и переживает редкие просадки
+    // главного потока без статтеров в колбэке.
+    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 4096) < 0) {
         fprintf(stderr, "Audio: Failed to init SDL_mixer: %s\n", Mix_GetError());
         use_mixer = false;
     }

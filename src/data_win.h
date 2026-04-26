@@ -35,6 +35,16 @@ typedef struct {
     // If true, precise masks will be skipped when the sprite does not have a precise state set
     bool skipLoadingPreciseMasksForNonPreciseSprites;
 
+    // If true, precise sprite collision masks are NOT read into RAM at parse time.
+    // Instead, their file offsets are recorded and masks are faulted-in on first
+    // collision check via DataWin_ensureSpriteMasks. Saves heap for masks that
+    // the current gameplay session never actually collides against.
+    bool lazyLoadSpriteMasks;
+
+    // If true, the ROOM chunk will not be kept in memory after parsing the chunk table.
+    // Instead, each room's data is temporarily read from data.win when DataWin_loadRoom is called.
+    bool lazyLoadRoom;
+
     // Optional progress callback, called before each chunk is parsed.
     // chunkName: 4-character chunk name (e.g. "GEN8", "SPRT")
     // chunkIndex: 0-based index of the current chunk being parsed
@@ -207,7 +217,11 @@ typedef struct {
                               // Populated at data.win load time so Renderer_resolveTPAGIndex
                               // doesn't have to do a hashmap lookup per sprite draw.
     uint32_t maskCount;       // number of collision masks (one per frame, or 0)
-    uint8_t** masks;          // array of maskCount packed bit arrays (nullptr if none)
+    uint8_t** masks;          // array of maskCount packed bit arrays (nullptr if none or pending lazy load)
+    // LAZY-LOAD: if maskFileOffset != 0, masks are stored on disk at this offset.
+    // On first access, DataWin_ensureSpriteMasks reads all frames from data.win into memory.
+    uint32_t maskFileOffset;  // absolute offset in data.win file of the first mask byte (0 = not lazy)
+    uint32_t bytesPerMask;    // size of a single frame's mask, needed for lazy load
 } Sprite;
 
 typedef struct {
@@ -738,7 +752,7 @@ typedef struct {
     uint32_t count;
     AudioEntry* entries;
 } Audo;
-
+#include <stdio.h>
 // ===[ Top-level DataWin container ]===
 typedef struct DataWin {
     uint8_t* strgBuffer;        // owned copy of STRG chunk raw data
@@ -785,6 +799,10 @@ typedef struct DataWin {
     char* filePath;
     size_t roomChunkOffset;
     uint32_t roomChunkLength;
+
+    // Kept open for on-demand streaming of lazy-loaded data (currently only sprite masks).
+    // NULL if no lazy-loadable data was recorded at parse time.
+    FILE* lazyFile;
 } DataWin;
 
 DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options);
@@ -795,4 +813,8 @@ int32_t DataWin_resolveSPRT(DataWin* dw, uint32_t offset);
 void GamePath_computeInternal(GamePath* path);
 PathPositionResult GamePath_getPosition(GamePath* path, double t);
 void DataWin_loadRoom(DataWin* dw, int32_t roomIndex);
+
+// Fault-in the collision masks for a sprite parsed with lazyLoadSpriteMasks.
+// No-op if masks are already loaded or the sprite was not set up for lazy loading.
+void DataWin_ensureSpriteMasks(DataWin* dw, Sprite* spr);
 void DataWin_unloadRoom(DataWin* dw, int32_t roomIndex);

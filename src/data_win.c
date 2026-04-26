@@ -468,7 +468,7 @@ static void parseAGRP(BinaryReader* reader, DataWin* dw) {
     free(ptrs);
 }
 
-static void parseSPRT(BinaryReader* reader, DataWin* dw, bool skipLoadingPreciseMasksForNonPreciseSprites) {
+static void parseSPRT(BinaryReader* reader, DataWin* dw, bool skipLoadingPreciseMasksForNonPreciseSprites, bool lazyLoadSpriteMasks) {
     Sprt* s = &dw->sprt;
     uint32_t count;
     uint32_t* ptrs = readPointerTable(reader, &count);
@@ -534,11 +534,20 @@ static void parseSPRT(BinaryReader* reader, DataWin* dw, bool skipLoadingPrecise
         // After all masks, data is padded to 4-byte alignment
         uint32_t maskDataCount = BinaryReader_readUint32(reader);
         spr->maskCount = maskDataCount;
+        spr->maskFileOffset = 0;
+        spr->bytesPerMask = 0;
         if (maskDataCount > 0 && spr->width > 0 && spr->height > 0) {
             uint32_t bytesPerRow = (spr->width + 7) / 8;
             uint32_t bytesPerMask = bytesPerRow * spr->height;
 
-            if (spr->sepMasks == 1 || !skipLoadingPreciseMasksForNonPreciseSprites) {
+            bool shouldKeepMasks = (spr->sepMasks == 1 || !skipLoadingPreciseMasksForNonPreciseSprites);
+            if (shouldKeepMasks && lazyLoadSpriteMasks) {
+                // Defer: record the absolute file offset of the first mask byte and skip over the data.
+                spr->maskFileOffset = (uint32_t) BinaryReader_getPosition(reader);
+                spr->bytesPerMask = bytesPerMask;
+                spr->masks = nullptr;
+                BinaryReader_skip(reader, bytesPerMask * maskDataCount);
+            } else if (shouldKeepMasks) {
                 spr->masks = safeMalloc(maskDataCount * sizeof(uint8_t*));
                 repeat(maskDataCount, j) {
                     spr->masks[j] = safeMalloc(bytesPerMask);
@@ -997,12 +1006,28 @@ void DataWin_loadRoom(DataWin* dw, int32_t roomIndex) {
     Room* room = &dw->room.rooms[roomIndex];
     if (room->isLoaded) return;
 
-    // Защита: если буфер не загружен, выходим
-    if (!dw->roomBuffer) return;
+    // Защита: если буфер не загружен и размер 0, выходим
+    if (!dw->roomBuffer && dw->roomChunkLength == 0) return;
 
-    // Инициализируем BinaryReader ПРЯМО ИЗ ОЗУ (без файлов и fread!)
+    bool tempBuffer = false;
+    uint8_t* activeBuf = dw->roomBuffer;
+
+    if (!activeBuf) {
+        if (!dw->lazyFile) {
+            dw->lazyFile = fopen(dw->filePath, "rb");
+            if (dw->lazyFile) setvbuf(dw->lazyFile, nullptr, _IOFBF, 64 * 1024);
+        }
+        if (!dw->lazyFile) return;
+
+        activeBuf = safeMalloc(dw->roomChunkLength);
+        fseek(dw->lazyFile, (long)dw->roomChunkOffset, SEEK_SET);
+        fread(activeBuf, 1, dw->roomChunkLength, dw->lazyFile);
+        tempBuffer = true;
+    }
+
+    // Инициализируем BinaryReader ПРЯМО ИЗ ОЗУ
     BinaryReader reader = BinaryReader_create(NULL, 0);
-    BinaryReader_setBuffer(&reader, dw->roomBuffer, dw->roomBufferBase, dw->roomChunkLength);
+    BinaryReader_setBuffer(&reader, activeBuf, dw->roomBufferBase, dw->roomChunkLength);
 
     // 1. Загрузка Backgrounds
     BinaryReader_seek(&reader, room->backgroundsPtr);
@@ -1106,6 +1131,10 @@ void DataWin_loadRoom(DataWin* dw, int32_t roomIndex) {
     if (tilePtrs) free(tilePtrs);
 
     BinaryReader_clearBuffer(&reader);
+
+    if (tempBuffer) {
+        free(activeBuf);
+    }
 
     room->isLoaded = true;
 }
@@ -1502,7 +1531,7 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
         } else if (options.parseAgrp && memcmp(chunkName, "AGRP", 4) == 0) {
             parseAGRP(&reader, dw);
         } else if (options.parseSprt && memcmp(chunkName, "SPRT", 4) == 0) {
-            parseSPRT(&reader, dw, options.skipLoadingPreciseMasksForNonPreciseSprites);
+            parseSPRT(&reader, dw, options.skipLoadingPreciseMasksForNonPreciseSprites, options.lazyLoadSpriteMasks);
         } else if (options.parseBgnd && memcmp(chunkName, "BGND", 4) == 0) {
             parseBGND(&reader, dw);
         } else if (options.parsePath && memcmp(chunkName, "PATH", 4) == 0) {
@@ -1522,12 +1551,14 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
         } else if (options.parseRoom && memcmp(chunkName, "ROOM", 4) == 0) {
             dw->roomChunkOffset = chunkDataStart;
             dw->roomChunkLength = chunkLength;
-
-            // Переиспользуем chunkBuffer как постоянный roomBuffer — не дублируем
-            // содержимое ROOM-чанка в памяти. Освобождение перенесено в DataWin_free.
             dw->roomBufferBase = chunkDataStart;
-            dw->roomBuffer = chunkBuffer;
-            chunkBuffer = nullptr; // предотвращаем освобождение в блоке ниже
+
+            if (!options.lazyLoadRoom) {
+                dw->roomBuffer = chunkBuffer;
+                chunkBuffer = nullptr;
+            } else {
+                dw->roomBuffer = nullptr;
+            }
 
             parseROOM(&reader, dw);
         } else if (memcmp(chunkName, "DAFL", 4) == 0) {
@@ -1656,7 +1687,6 @@ void DataWin_free(DataWin* dw) {
         free(dw->sprt.sprites);
         hmfree(dw->sprtOffsetMap);
     }
-
 
     // BGND
     free(dw->bgnd.backgrounds);
@@ -1793,6 +1823,11 @@ void DataWin_free(DataWin* dw) {
     free(dw->bytecodeBuffer);
     free(dw->filePath);
     free(dw->roomBuffer);
+
+    if (dw->lazyFile) {
+        fclose(dw->lazyFile);
+    }
+
     free(dw);
 }
 
@@ -1805,6 +1840,29 @@ int32_t DataWin_resolveTPAG(DataWin* dw, uint32_t offset) {
 }
 
 // ===[ SPRT Offset Resolution ]===
+
+void DataWin_ensureSpriteMasks(DataWin* dw, Sprite* spr) {
+    if (!dw || !spr) return;
+    if (spr->masks != nullptr) return; // Уже загружено или нет масок
+    if (spr->maskFileOffset == 0 || spr->maskCount == 0 || spr->bytesPerMask == 0) return;
+
+    if (!dw->lazyFile) {
+        dw->lazyFile = fopen(dw->filePath, "rb");
+        if (dw->lazyFile) setvbuf(dw->lazyFile, nullptr, _IOFBF, 64 * 1024);
+    }
+    if (!dw->lazyFile) return;
+
+    fseek(dw->lazyFile, (long)spr->maskFileOffset, SEEK_SET);
+
+    spr->masks = safeMalloc(spr->maskCount * sizeof(uint8_t*));
+    for (uint32_t j = 0; j < spr->maskCount; j++) {
+        spr->masks[j] = safeMalloc(spr->bytesPerMask);
+        size_t read = fread(spr->masks[j], 1, spr->bytesPerMask, dw->lazyFile);
+        if (read != spr->bytesPerMask) {
+            fprintf(stderr, "WARNING: short read while lazy loading sprite mask\n");
+        }
+    }
+}
 
 int32_t DataWin_resolveSPRT(DataWin* dw, uint32_t offset) {
     ptrdiff_t idx = hmgeti(dw->sprtOffsetMap, offset);

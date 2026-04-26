@@ -23,7 +23,7 @@
 #include "utils.h"
 
 u32 __ctru_heap_size = 0;
-u32 __ctru_linear_heap_size = 25 * 1024 * 1024;
+u32 __ctru_linear_heap_size = 32 * 1024 * 1024;
 u32 __stacksize__ = 64 * 1024;
 
 #define DATA_WIN_PATH "sdmc:/3ds/butterscotch/data.win"
@@ -33,7 +33,11 @@ u32 __stacksize__ = 64 * 1024;
 #define BUTTERSCOTCH_NOVA_INDEX_BUF_SIZE    (512 * 1024)
 #define BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE  (512 * 1024)
 
-// Умный помощник для ввода
+// Сколько текстур грузим за одну итерацию warmup loop.
+// 8 штук = ~8-10 SD-ридов за ~80-100 мс. При 60+ текстурах на комнату
+// это даёт ~8 кадров «загрузки» вместо одного 800 мс фриза.
+#define WARMUP_DRAIN_PER_ITER 8
+
 static void processCombinedKey(RunnerKeyboardState* kb, u32 kDown, u32 kUp, u32 kHeld, u32 mask, int32_t gmlKey) {
     if (kDown & mask) {
         RunnerKeyboard_onKeyDown(kb, gmlKey);
@@ -52,6 +56,7 @@ void initLogging() {
     printf("Logging initialized!\n");
     fprintf(stderr, "This goes to stderr!\n");
 }
+
 void printMemoryStats() {
     struct mallinfo mi = mallinfo();
 
@@ -64,27 +69,96 @@ void printMemoryStats() {
            heapUsedMB, linearFreeMB);
 }
 
+// ===[ WARMUP LOOP ]===
+// Вызывается сразу после того, как Runner_step() вызвал onRoomChanged внутри себя
+// и тем самым наполнил prefetchQueue рендерера.
+//
+// Алгоритм:
+//   1. Пауза аудио (чтобы Mix_callback не голодал пока мы долбим SD).
+//   2. Цикл: грузим WARMUP_DRAIN_PER_ITER текстур, рендерим фон, свопаем буфер.
+//   3. Продолжаем, пока очередь не опустеет.
+//   4. Возобновляем аудио.
+//
+// В результате: вместо 6-8 секунд чёрного экрана — несколько кадров с цветом
+// фона, без статтеров звука и без фризов при первых шагах персонажа.
+static void runRoomWarmupLoop(Runner* runner, Renderer* renderer,
+                              int32_t gameW, int32_t gameH,
+                              double targetFrameSec)
+{
+    if (!CtrRenderer_hasPendingPrefetch(renderer)) return;
+
+    fprintf(stderr, "WARMUP: Starting prefetch drain loop...\n");
+
+    // Pause audio — SD-риды конкурируют с аудио DMA на шине памяти 3DS.
+    // Без паузы Mix callback пропускает буферы и слышны щелчки.
+    if (runner->audioSystem) {
+        runner->audioSystem->vtable->pauseAll(runner->audioSystem);
+    }
+
+    // Цвет фона новой комнаты (BGR → RGB)
+    float bgR = (float)BGR_R(runner->backgroundColor) / 255.0f;
+    float bgG = (float)BGR_G(runner->backgroundColor) / 255.0f;
+    float bgB = (float)BGR_B(runner->backgroundColor) / 255.0f;
+    // Если drawBackgroundColor выключен — просто чёрный
+    if (!runner->drawBackgroundColor) { bgR = 0.0f; bgG = 0.0f; bgB = 0.0f; }
+
+    int warmupIter = 0;
+
+    while (CtrRenderer_hasPendingPrefetch(renderer)) {
+        u64 iterStart = osGetTime();
+
+        // Грузим пачку текстур
+        CtrRenderer_drainPrefetchQueue(renderer, WARMUP_DRAIN_PER_ITER);
+
+        // Рендерим один кадр с цветом фона, чтобы экран не оставался чёрным
+        renderer->vtable->beginFrame(renderer, gameW, gameH, NOVA_SCREEN_W, NOVA_SCREEN_H);
+
+        int eyes = novaGetEyeCount();
+        for (int eye = 0; eye < eyes; eye++) {
+            novaBeginEye(eye);
+            glClearColor(bgR, bgG, bgB, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        }
+
+        renderer->vtable->endFrame(renderer);
+        novaSwapBuffers();
+
+        warmupIter++;
+
+        // Поддерживаем 30 fps темп даже в warmup loop
+        while (osGetTime() - iterStart < 33) {
+            gspWaitForVBlank();
+        }
+    }
+
+    fprintf(stderr, "WARMUP: Done in %d iterations.\n", warmupIter);
+
+    // Возобновляем аудио только после того, как все текстуры готовы.
+    // Теперь Core 1 получает шину обратно и Mix callback заполнит буферы
+    // без щелчков.
+    if (runner->audioSystem) {
+        runner->audioSystem->vtable->resumeAll(runner->audioSystem);
+    }
+}
+
 int main(int argc, char* argv[]) {
     (void) argc; (void) argv;
     initLogging();
     cfguInit();
     gfxInitDefault();
 
-    APT_SetAppCpuTimeLimit(30);
+    APT_SetAppCpuTimeLimit(80);
     osSetSpeedupEnable(true);
 
     fprintf(stderr, "Butterscotch 3DS booting...\n");
     fprintf(stderr, "Loading %s\n", DATA_WIN_PATH);
 
-    // Запускаем NovaGL ЗАРАНЕЕ
     nova_init();
     mkdir(NOVA_TEX_CACHE_PATH, 0777);
     nova_texture_cache_set_directory(NOVA_TEX_CACHE_PATH);
 
     // =========================================================================
-    // СТАДИЯ 1 выполняется ТОЛЬКО при первом запуске.
-    // Если cache_ready.flag существует — пропускаем всё: и повторный парсинг
-    // data.win, и загрузку PNG-блобов в ОЗУ. Это главная экономия RAM и времени загрузки.
+    // STAGE 1: Только при первом запуске (создание кэша .nsw файлов)
     // =========================================================================
     bool isCacheReady = false;
     {
@@ -103,15 +177,13 @@ int main(int argc, char* argv[]) {
                 .parseGen8 = true,
                 .parseTpag = true,
                 .parseTxtr = true,
-                // PNG-блобы читаем стримингом с диска при декоде — не держим
-                // все PNG в ОЗУ одновременно (большой пик на 3DS).
                 .skipTextureBlobData = true,
             }
         );
 
         if (cacheWin != NULL) {
             Renderer* tempRenderer = CtrRenderer_create();
-            tempRenderer->vtable->init(tempRenderer, cacheWin); // Триггерит создание кэша
+            tempRenderer->vtable->init(tempRenderer, cacheWin);
             tempRenderer->vtable->destroy(tempRenderer);
             DataWin_free(cacheWin);
             fprintf(stderr, "=== STAGE 1 COMPLETE ===\n");
@@ -119,7 +191,6 @@ int main(int argc, char* argv[]) {
             fprintf(stderr, "WARNING: Stage 1 Cache pass failed to parse data.win!\n");
         }
 
-        // После Stage 1 флаг уже должен существовать.
         FILE* cacheFlagFile = fopen(NOVA_TEX_CACHE_PATH "/cache_ready.flag", "r");
         if (cacheFlagFile) {
             isCacheReady = true;
@@ -159,6 +230,8 @@ int main(int argc, char* argv[]) {
             .parseAudo = true,
 
             .skipLoadingPreciseMasksForNonPreciseSprites = true,
+            .lazyLoadSpriteMasks = true,
+            .lazyLoadRoom = true,
             .skipTextureBlobData = isCacheReady,
             .skipAudioBlobData = true,
         }
@@ -201,7 +274,30 @@ int main(int argc, char* argv[]) {
 
     audio->vtable->init(audio, audio->dataWin, (FileSystem*) fs);
     renderer->vtable->init(renderer, dataWin);
+
+    if (runner->audioSystem) {
+        runner->audioSystem->vtable->pauseAll(runner->audioSystem);
+    }
     Runner_initFirstRoom(runner);
+
+    // ===[ WARMUP ПЕРВОЙ КОМНАТЫ ]===
+    // Runner_initFirstRoom вызывает onRoomChanged -> заполняет prefetchQueue.
+    // Запускаем warmup ДО первого показа кадра, чтобы текстуры были готовы.
+    {
+        int32_t firstGameW = (int32_t)gen8->defaultWindowWidth;
+        int32_t firstGameH = (int32_t)gen8->defaultWindowHeight;
+        runRoomWarmupLoop(runner, renderer, firstGameW, firstGameH, 1.0 / 30.0);
+    }
+
+    renderer->vtable->beginFrame(renderer, NOVA_SCREEN_W, NOVA_SCREEN_H, NOVA_SCREEN_W, NOVA_SCREEN_H);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    renderer->vtable->endFrame(renderer);
+    novaSwapBuffers();
+
+    if (runner->audioSystem) {
+        runner->audioSystem->vtable->resumeAll(runner->audioSystem);
+    }
 
     double targetFrameSec = 1.0 / 30.0;
     int frameCounter = 0;
@@ -230,12 +326,49 @@ int main(int argc, char* argv[]) {
         processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_R, VK_SPACE);
         processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_SELECT, VK_ESCAPE);
 
+        // ===[ GAME STEP ]===
+        // Runner_step() может вызвать onRoomChanged внутри, который заполнит
+        // prefetchQueue. Мы проверяем это ПОСЛЕ step'а.
         Runner_step(runner);
-        // 🔥 ФИКС 2: Проверка на NULL, если SdlMixer не завёлся
+
         if (runner->audioSystem) {
             runner->audioSystem->vtable->update(runner->audioSystem, (float) targetFrameSec);
         }
 
+        // ===[ WARMUP LOOP ПОСЛЕ СМЕНЫ КОМНАТЫ ]===
+        // Если после step'а очередь не пуста — значит, комната сменилась.
+        // Запускаем warmup: показываем фон и грузим текстуры пакетами.
+        // Аудио на время паузируется чтобы не статтерило.
+        if (CtrRenderer_hasPendingPrefetch(renderer)) {
+            Room* warmupRoom = runner->currentRoom;
+            int32_t warmupGameW = (int32_t)gen8->defaultWindowWidth;
+            int32_t warmupGameH = (int32_t)gen8->defaultWindowHeight;
+
+            // Учитываем views новой комнаты для правильных размеров
+            bool warmupViewsEnabled = warmupRoom && (warmupRoom->flags & 1) != 0;
+            if (warmupViewsEnabled && warmupRoom) {
+                int32_t maxRight = 0, maxBottom = 0;
+                for (int vi = 0; vi < 8; vi++) {
+                    if (!warmupRoom->views[vi].enabled) continue;
+                    int32_t right  = warmupRoom->views[vi].portX + warmupRoom->views[vi].portWidth;
+                    int32_t bottom = warmupRoom->views[vi].portY + warmupRoom->views[vi].portHeight;
+                    if (right > maxRight)   maxRight  = right;
+                    if (bottom > maxBottom) maxBottom = bottom;
+                }
+                if (maxRight > 0 && maxBottom > 0) {
+                    warmupGameW = maxRight;
+                    warmupGameH = maxBottom;
+                }
+            }
+
+            runRoomWarmupLoop(runner, renderer, warmupGameW, warmupGameH, targetFrameSec);
+
+            // После warmup сбрасываем таймер кадра — не нужно наверстывать
+            // "упущенные" 33 мс, которые мы потратили на загрузку.
+            frameStart = osGetTime();
+        }
+
+        // ===[ RENDER ]===
         Room* activeRoom = runner->currentRoom;
 
         int32_t gameW = (int32_t) gen8->defaultWindowWidth;
@@ -287,7 +420,6 @@ int main(int argc, char* argv[]) {
             bool anyViewRendered = false;
             if (viewsEnabled) {
                 for (int vi = 0; vi < 8; vi++) {
-                    // Даунгрейд: берем вид напрямую из комнаты
                     RoomView* view = &activeRoom->views[vi];
 
                     if (!view->enabled) continue;
@@ -300,7 +432,7 @@ int main(int argc, char* argv[]) {
                     int32_t portY = view->portY;
                     int32_t portW = view->portWidth;
                     int32_t portH = view->portHeight;
-                    float viewAngle = runner->viewAngles[vi]; // Углы брались из самого runner'а
+                    float viewAngle = runner->viewAngles[vi];
 
                     runner->viewCurrent = vi;
 

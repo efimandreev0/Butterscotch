@@ -89,8 +89,9 @@ static inline InstanceBBox Collision_computeBBox(DataWin* dataWin, Instance* ins
 
     return (InstanceBBox){left, right, top, bottom, true};
 }
-
+static DataWin* dwin;
 static inline bool Collision_hasFrameMasks(Sprite* sprite) {
+    DataWin_ensureSpriteMasks(dwin, sprite);
     return sprite != nullptr && sprite->sepMasks == 1 && sprite->masks != nullptr && sprite->maskCount > 0;
 }
 
@@ -160,6 +161,11 @@ static inline bool Collision_instancesOverlapPrecise(DataWin* dataWin, Instance*
 
     Sprite* sprA = Collision_getSprite(dataWin, a);
     Sprite* sprB = Collision_getSprite(dataWin, b);
+    dwin = dataWin;
+
+    if (sprA) DataWin_ensureSpriteMasks(dataWin, sprA);
+    if (sprB) DataWin_ensureSpriteMasks(dataWin, sprB);
+
     if (sprA == nullptr || sprB == nullptr) return false;
 
     
