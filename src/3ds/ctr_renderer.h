@@ -26,6 +26,12 @@ typedef struct {
     void* rawAtlases;
     uint32_t rawAtlasCount;
 
+    // Persistent memlz state — sizeof(memlz_state) ~768 KB. Allocating it
+    // per-decompression call (as memlz_decompress does internally) blew up
+    // the regular heap and inserted a 768 KB malloc + memset on every atlas
+    // touch. We allocate once and reset before each call.
+    void* memlzState;
+
     GLuint whiteTexture;
 
     uint8_t* quadBatchVertices;

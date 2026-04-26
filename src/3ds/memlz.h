@@ -36,6 +36,25 @@ static void memlz_reset(memlz_state* c);
 
 #define MEMLZ__RESTRICT __restrict
 
+// ARM11 (3DS) safety: at -O3 -funroll-loops GCC happily fuses adjacent
+// memcpy(&u64, src, 8) calls from a uint8_t* into LDRD / LDM. LDRD on ARMv6
+// requires 4-byte alignment regardless of SCTLR.U; once `src` slides to an
+// odd offset (variable-length headers, hash-hit codes), the load faults on
+// real hardware even though Citra silently accepts it.
+//
+// Forcing reads/writes through packed typedefs guarantees the compiler emits
+// only byte / unaligned-word ops, never LDRD.
+typedef uint64_t memlz__u64_una __attribute__((aligned(1), may_alias));
+typedef uint32_t memlz__u32_una __attribute__((aligned(1), may_alias));
+typedef uint16_t memlz__u16_una __attribute__((aligned(1), may_alias));
+
+static inline uint64_t memlz__loadu64(const void* p) { return *(const memlz__u64_una*)p; }
+static inline uint32_t memlz__loadu32(const void* p) { return *(const memlz__u32_una*)p; }
+static inline uint16_t memlz__loadu16(const void* p) { return *(const memlz__u16_una*)p; }
+static inline void memlz__storeu64(void* p, uint64_t v) { *(memlz__u64_una*)p = v; }
+static inline void memlz__storeu32(void* p, uint32_t v) { *(memlz__u32_una*)p = v; }
+static inline void memlz__storeu16(void* p, uint16_t v) { *(memlz__u16_una*)p = v; }
+
 #define MEMLZ__UNROLL4(op) op; op; op; op
 #define MEMLZ__UNROLL16(op) op; op; op; op; op; op; op; op; op; op; op; op; op; op; op; op;
 #define MEMLZ__NORMAL32 'A'
@@ -166,13 +185,13 @@ static size_t memlz_stream_compress(void* MEMLZ__RESTRICT destination, const voi
             flags <<= 1; \
             if ((tbl)[(h)] == (val)) { \
             flags |= 1; \
-            uint16_t _memlz_hv = (uint16_t)(h); \
-            memcpy(dst, &_memlz_hv, 2); \
+            memlz__storeu16(dst, (uint16_t)(h)); \
             dst += 2; \
             next; \
             } else { \
             (tbl)[(h)] = (val); \
-            memcpy(dst, &(val), sizeof(typ)); \
+            if (sizeof(typ) == 8) memlz__storeu64(dst, (uint64_t)(val)); \
+            else                  memlz__storeu32(dst, (uint32_t)(val)); \
             dst += sizeof(typ); \
             next; \
             } \
@@ -316,9 +335,9 @@ static size_t memlz_stream_decompress(void* MEMLZ__RESTRICT destination, const v
             size_t len = memlz__bytes(src); MEMLZ__R(src, len);
             uint64_t z = memlz__read(src); src += len;
             MEMLZ__R(src, 8);
-            uint64_t v; memcpy(&v, src, 8); src += 8;
+            uint64_t v = memlz__loadu64(src); src += 8;
             MEMLZ__W(dst, z);
-            for (uint64_t n = 0; n < z / 8; n++) memcpy(dst + n * 8, &v, 8);
+            for (uint64_t n = 0; n < z / 8; n++) memlz__storeu64(dst + n * 8, v);
             dst += z; missing -= z;
             continue;
         }
@@ -331,21 +350,27 @@ static size_t memlz_stream_decompress(void* MEMLZ__RESTRICT destination, const v
         if (missing < memlz__wordlen * 16) break;
 
         MEMLZ__R(src, 2);
-        uint16_t flags; memcpy(&flags, src, 2); src += 2;
+        uint16_t flags = memlz__loadu16(src); src += 2;
 
 #define MEMLZ__DECODE_WORD(safe, h, tbl, typ, next) \
         if (flags & 0b1000000000000000) { \
             if(safe) { MEMLZ__R(src, 2); } \
-            memcpy(&hash_idx, src, 2); src += 2; \
+            hash_idx = memlz__loadu16(src); src += 2; \
             word = tbl[hash_idx]; \
-            memcpy(dst, &word, sizeof(typ)); dst += sizeof(typ); \
+            if (sizeof(typ) == 8) memlz__storeu64(dst, (uint64_t)word); \
+            else                  memlz__storeu32(dst, (uint32_t)word); \
+            dst += sizeof(typ); \
             flags = (uint16_t)(flags << 1); \
             next; \
         } else { \
             if(safe) { MEMLZ__R(src, sizeof(typ)); } \
-            memcpy(&word, src, sizeof(typ)); src += sizeof(typ); \
+            if (sizeof(typ) == 8) word = (typ)memlz__loadu64(src); \
+            else                  word = (typ)memlz__loadu32(src); \
+            src += sizeof(typ); \
             tbl[h(word)] = word; \
-            memcpy(dst, &word, sizeof(typ)); dst += sizeof(typ); \
+            if (sizeof(typ) == 8) memlz__storeu64(dst, (uint64_t)word); \
+            else                  memlz__storeu32(dst, (uint32_t)word); \
+            dst += sizeof(typ); \
             flags = (uint16_t)(flags << 1); \
             next; \
         }
@@ -380,7 +405,7 @@ static size_t memlz_stream_decompress(void* MEMLZ__RESTRICT destination, const v
     }
     if (missing >= memlz__wordlen) {
         MEMLZ__R(src, 2);
-        uint16_t flags; memcpy(&flags, src, 2); src += 2;
+        uint16_t flags = memlz__loadu16(src); src += 2;
 
         while (missing >= memlz__wordlen) {
             if (memlz__wordlen == 8) {

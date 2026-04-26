@@ -195,6 +195,7 @@ static void ctrBuildAtlasCache(CtrRenderer* gl) {
 }
 
 static void loadRawAtlas(CtrRenderer* gl, DataWin* dw, uint32_t pId) {
+    (void)dw;
     RawAtlasData* rawAtlases = (RawAtlasData*)gl->rawAtlases;
     if (pId >= gl->rawAtlasCount || rawAtlases[pId].isLoaded) return;
 
@@ -211,8 +212,11 @@ static void loadRawAtlas(CtrRenderer* gl, DataWin* dw, uint32_t pId) {
     fread(&rawSize, sizeof(size_t), 1, f);
     fread(&compSize, sizeof(size_t), 1, f);
 
-    // Выделяем память ОБЫЧНОМ HEAP'Е только под сжатый буфер (сущие копейки!)
-    uint8_t* compPixels = linearAlloc(compSize);
+    // Compressed pixels live in regular heap, NOT linear RAM. They are pure
+    // data — never touched by GPU/DMA — so spending precious linear RAM on
+    // them was wasteful (and previously the source of the `free` vs
+    // `linearFree` mismatch on the one-shot path).
+    uint8_t* compPixels = (uint8_t*)malloc(compSize);
     if (compPixels) {
         fread(compPixels, 1, compSize, f);
         rawAtlases[pId].compressedPixels = compPixels;
@@ -226,6 +230,20 @@ static void loadRawAtlas(CtrRenderer* gl, DataWin* dw, uint32_t pId) {
     fclose(f);
 }
 
+// Decompress a loaded atlas into the supplied linear scratch buffer.
+// Reuses the renderer's persistent memlz_state to avoid the 768 KB malloc
+// the memlz_decompress() convenience wrapper would otherwise issue.
+static bool decompressAtlasInto(CtrRenderer* gl, RawAtlasData* atlas, uint16_t* scratch) {
+    if (!atlas || !atlas->compressedPixels || !scratch || !gl->memlzState) return false;
+    memlz_reset((memlz_state*)gl->memlzState);
+    return memlz_stream_decompress(scratch, atlas->compressedPixels,
+                                   (memlz_state*)gl->memlzState) != 0;
+}
+
+// Forward decl — used by the batch extraction below.
+static void ctrExtractTpagFromDecompressed(CtrRenderer* gl, DataWin* dw,
+                                           uint32_t tId, const uint16_t* atlasPixels);
+
 void CtrRenderer_drainPrefetchQueue(Renderer* renderer, int maxItems) {
 }
 
@@ -233,29 +251,19 @@ bool CtrRenderer_hasPendingPrefetch(Renderer* renderer) {
     return false;
 }
 
-static void ctrExtractTpag(CtrRenderer* gl, DataWin* dw, uint32_t tId) {
+// Cut a single tpag region out of an already-decompressed atlas pixel
+// buffer and upload it as a GL texture. Caller owns the decompressed
+// buffer's lifetime — this is the inner loop of the batched extractor.
+static void ctrExtractTpagFromDecompressed(CtrRenderer* gl, DataWin* dw,
+                                           uint32_t tId, const uint16_t* atlasPixels) {
     if (tId >= gl->tpagCount || gl->tpags[tId].isLoaded) return;
 
     TexturePageItem* item = &dw->tpag.items[tId];
     uint32_t pId = item->texturePageId;
     RawAtlasData* rawAtlases = (RawAtlasData*)gl->rawAtlases;
-
-    bool wasLoadedJustNow = false;
-    if (!rawAtlases[pId].isLoaded) {
-        loadRawAtlas(gl, dw, pId);
-        wasLoadedJustNow = true;
-    }
-
-    if (!rawAtlases[pId].isLoaded) return;
+    if (pId >= gl->rawAtlasCount || !rawAtlases[pId].isLoaded) return;
 
     RawAtlasData* atlas = &rawAtlases[pId];
-
-    // ВРЕМЕННЫЙ БУФЕР ДЛЯ РАСПАКОВКИ! Выделяется и умирает за миллисекунду
-    uint16_t* uncompressedPixels = linearAlloc(atlas->decompressedSize);
-    if (!uncompressedPixels) return; // Не хватило памяти для распаковки
-
-    // Распаковываем
-    memlz_decompress(uncompressedPixels, atlas->compressedPixels);
 
     int extW = item->sourceWidth > 0 ? item->sourceWidth : 1;
     int extH = item->sourceHeight > 0 ? item->sourceHeight : 1;
@@ -273,68 +281,93 @@ static void ctrExtractTpag(CtrRenderer* gl, DataWin* dw, uint32_t tId) {
     int potH = next_pot(scaledH);
 
     uint16_t* buffer = linearAlloc(potW * potH * sizeof(uint16_t));
-    if (buffer) {
-        memset(buffer, 0, potW * potH * sizeof(uint16_t));
+    if (!buffer) return;
+    memset(buffer, 0, potW * potH * sizeof(uint16_t));
 
-        float invScale = (downscale > 0.0f) ? (1.0f / downscale) : 1.0f;
+    float invScale = (downscale > 0.0f) ? (1.0f / downscale) : 1.0f;
 
-        for (int y = 0; y < scaledH; y++) {
-            int srcY = extractY + (int)floorf(((float)y + 0.5f) * invScale);
-            if (srcY < 0) srcY = 0; else if (srcY >= atlas->height) srcY = atlas->height - 1;
+    for (int y = 0; y < scaledH; y++) {
+        int srcY = extractY + (int)floorf(((float)y + 0.5f) * invScale);
+        if (srcY < 0) srcY = 0; else if (srcY >= atlas->height) srcY = atlas->height - 1;
+        const uint16_t* srcRow = atlasPixels + srcY * atlas->width;
 
-            for (int x = 0; x < scaledW; x++) {
-                int srcX = extractX + (int)floorf(((float)x + 0.5f) * invScale);
-                if (srcX < 0) srcX = 0; else if (srcX >= atlas->width) srcX = atlas->width - 1;
-
-                // Читаем пиксели из временного РАСПАКОВАННОГО буфера
-                buffer[y * potW + x] = uncompressedPixels[srcY * atlas->width + srcX];
-            }
+        for (int x = 0; x < scaledW; x++) {
+            int srcX = extractX + (int)floorf(((float)x + 0.5f) * invScale);
+            if (srcX < 0) srcX = 0; else if (srcX >= atlas->width) srcX = atlas->width - 1;
+            buffer[y * potW + x] = srcRow[srcX];
         }
-
-        GLuint tex;
-        glGenTextures(1, &tex);
-        glBindTexture(GL_TEXTURE_2D, tex);
-
-        GLenum format = atlas->hasAlpha ? GL_RGBA : GL_RGB;
-        GLenum type = atlas->hasAlpha ? GL_UNSIGNED_SHORT_4_4_4_4 : GL_UNSIGNED_SHORT_5_6_5;
-
-        while (glGetError() != GL_NO_ERROR);
-        glTexImage2D(GL_TEXTURE_2D, 0, format, potW, potH, 0, format, type, buffer);
-
-        if (glGetError() == GL_NO_ERROR) {
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-            gl->tpags[tId].tex = tex;
-            gl->tpags[tId].uvScaleX = 1.0f / (float)potW;
-            gl->tpags[tId].uvScaleY = 1.0f / (float)potH;
-            gl->tpags[tId].downscaleFactor = downscale;
-        } else {
-            glDeleteTextures(1, &tex);
-            gl->tpags[tId].tex = 0;
-        }
-
-        gl->tpags[tId].isLoaded = true;
-        gl->tpags[tId].lastUsedFrame = g_frameCounter;
-        linearFree(buffer);
     }
 
-    // 💥 УНИЧТОЖАЕМ временный распакованный буфер!
-    linearFree(uncompressedPixels);
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
 
-    // Удаляем даже СЖАТЫЙ атлас, если он был загружен чисто ради одного динамического чиха
-    if (wasLoadedJustNow && !atlas->keepResident) {
-        free(atlas->compressedPixels);
-        atlas->compressedPixels = NULL;
-        atlas->isLoaded = false;
+    GLenum format = atlas->hasAlpha ? GL_RGBA : GL_RGB;
+    GLenum type = atlas->hasAlpha ? GL_UNSIGNED_SHORT_4_4_4_4 : GL_UNSIGNED_SHORT_5_6_5;
+
+    while (glGetError() != GL_NO_ERROR);
+    glTexImage2D(GL_TEXTURE_2D, 0, format, potW, potH, 0, format, type, buffer);
+
+    if (glGetError() == GL_NO_ERROR) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        gl->tpags[tId].tex = tex;
+        gl->tpags[tId].uvScaleX = 1.0f / (float)potW;
+        gl->tpags[tId].uvScaleY = 1.0f / (float)potH;
+        gl->tpags[tId].downscaleFactor = downscale;
+    } else {
+        glDeleteTextures(1, &tex);
+        gl->tpags[tId].tex = 0;
     }
+
+    gl->tpags[tId].isLoaded = true;
+    gl->tpags[tId].lastUsedFrame = g_frameCounter;
+    linearFree(buffer);
+}
+
+// Batch-extract: decompress an atlas ONCE and pull every still-unloaded
+// tpag that maps to it. This is the stutter killer — previously each tpag
+// triggered its own full-atlas decompress, so an atlas with N tpags paid
+// the decompression cost N times.
+static void ctrExtractAllTpagsForAtlas(CtrRenderer* gl, DataWin* dw, uint32_t pId) {
+    RawAtlasData* rawAtlases = (RawAtlasData*)gl->rawAtlases;
+    if (pId >= gl->rawAtlasCount) return;
+    if (!rawAtlases[pId].isLoaded) loadRawAtlas(gl, dw, pId);
+    if (!rawAtlases[pId].isLoaded) return;
+
+    RawAtlasData* atlas = &rawAtlases[pId];
+
+    bool anyPending = false;
+    for (uint32_t t = 0; t < gl->tpagCount; t++) {
+        if (gl->tpags[t].isLoaded) continue;
+        if (dw->tpag.items[t].texturePageId == pId) { anyPending = true; break; }
+    }
+    if (!anyPending) return;
+
+    uint16_t* uncompressed = linearAlloc(atlas->decompressedSize);
+    if (!uncompressed) return;
+
+    if (!decompressAtlasInto(gl, atlas, uncompressed)) {
+        linearFree(uncompressed);
+        return;
+    }
+
+    for (uint32_t t = 0; t < gl->tpagCount; t++) {
+        if (gl->tpags[t].isLoaded) continue;
+        if (dw->tpag.items[t].texturePageId != pId) continue;
+        ctrExtractTpagFromDecompressed(gl, dw, t, uncompressed);
+    }
+
+    linearFree(uncompressed);
 }
 
 static void ensureTpagLoaded(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
     if (tpagIndex < 0 || (uint32_t)tpagIndex >= gl->tpagCount || gl->tpags[tpagIndex].isLoaded) return;
-    ctrExtractTpag(gl, dw, tpagIndex);
+    uint32_t pId = dw->tpag.items[tpagIndex].texturePageId;
+    ctrExtractAllTpagsForAtlas(gl, dw, pId);
 }
 
 // =========================================================================
@@ -420,6 +453,11 @@ static void ctrInit(Renderer* renderer, DataWin* dataWin) {
     gl->rawAtlasCount = dataWin->txtr.count;
     gl->rawAtlases = safeCalloc(gl->rawAtlasCount, sizeof(RawAtlasData));
 
+    // One persistent memlz_state shared by every decompression call.
+    // sizeof(memlz_state) is ~768 KB; previously memlz_decompress() malloc'd
+    // and freed this every single tpag extract.
+    gl->memlzState = safeMalloc(sizeof(memlz_state));
+
     gl->quadBatchCapacity = CTR_QUAD_BATCH_CAPACITY;
     gl->quadBatchVertices = safeMalloc((size_t) gl->quadBatchCapacity * 6 * sizeof(CtrPackedVertex));
 
@@ -453,12 +491,13 @@ static void ctrDestroy(Renderer* renderer) {
 
     RawAtlasData* rawAtlases = (RawAtlasData*)gl->rawAtlases;
     for (uint32_t i = 0; i < gl->rawAtlasCount; i++) {
-        if (rawAtlases[i].compressedPixels) linearFree(rawAtlases[i].compressedPixels);
+        if (rawAtlases[i].compressedPixels) free(rawAtlases[i].compressedPixels);
     }
 
     free(gl->rawAtlases);
     free(gl->tpags);
     free(gl->quadBatchVertices);
+    if (gl->memlzState) free(gl->memlzState);
     free(gl);
 }
 
@@ -555,19 +594,28 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
     }
     for (uint32_t i = 0; i < dw->font.count; i++) markAtlasResident(gl, dw, dw->font.fonts[i].textureOffset);
 
-    // Удаляем из Linear RAM атласы, которые не нужны в новой комнате (защита от OOM)
+    // Drop compressed atlases not needed in the new room. They live in
+    // regular heap now (not linear), so plain free().
     for (uint32_t i = 0; i < gl->rawAtlasCount; i++) {
         if (!rawAtlases[i].keepResident && rawAtlases[i].isLoaded) {
-            linearFree(rawAtlases[i].compressedPixels);
+            free(rawAtlases[i].compressedPixels);
             rawAtlases[i].compressedPixels = NULL;
             rawAtlases[i].isLoaded = false;
         }
     }
 
-    // Загружаем нужные атласы из .bin, чтобы избежать статтеров во время игры
+    // Eagerly load + decompress + extract every keep-resident atlas right
+    // here, while the warmup loop is hiding the latency. After this returns,
+    // gameplay draws should hit zero memlz decompressions for the room's
+    // resident sprite/tile/font set.
     for (uint32_t i = 0; i < gl->rawAtlasCount; i++) {
         if (rawAtlases[i].keepResident && !rawAtlases[i].isLoaded) {
             loadRawAtlas(gl, dw, i);
+        }
+    }
+    for (uint32_t i = 0; i < gl->rawAtlasCount; i++) {
+        if (rawAtlases[i].keepResident && rawAtlases[i].isLoaded) {
+            ctrExtractAllTpagsForAtlas(gl, dw, i);
         }
     }
 }
@@ -584,6 +632,11 @@ void CtrRenderer_prefetchSprite(Renderer* renderer, int32_t spriteIndex) {
     RawAtlasData* rawAtlases = (RawAtlasData*)gl->rawAtlases;
     for (uint32_t i = 0; i < gl->rawAtlasCount; i++) {
         if (rawAtlases[i].keepResident && !rawAtlases[i].isLoaded) loadRawAtlas(gl, dw, i);
+    }
+    for (uint32_t i = 0; i < gl->rawAtlasCount; i++) {
+        if (rawAtlases[i].keepResident && rawAtlases[i].isLoaded) {
+            ctrExtractAllTpagsForAtlas(gl, dw, i);
+        }
     }
 }
 
