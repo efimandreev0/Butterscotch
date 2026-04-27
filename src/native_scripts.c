@@ -1051,12 +1051,14 @@ static void initChasefire2Cache(VMContext* ctx, DataWin* dw) {
 }
 
 static Instance* findInstanceByObject(Runner* runner, int32_t objIdx) {
-    int32_t count = (int32_t)arrlen(runner->instances);
-    for (int32_t i = 0; i < count; i++) {
-        Instance* inst = runner->instances[i];
-        if (inst->active && inst->objectIndex == objIdx) return inst;
+    if (objIdx < 0 || objIdx >= runner->instancesByObjMax || runner->instancesByObjInclParent == NULL) return NULL;
+
+    Instance** list = runner->instancesByObjInclParent[objIdx];
+    int32_t n = (int32_t)arrlen(list);
+    for (int32_t i = 0; i < n; i++) {
+        if (list[i]->active) return list[i];
     }
-    return nullptr;
+    return NULL;
 }
 
 static void native_chasefire2_Step0(VMContext* ctx, Runner* runner, Instance* inst) {
@@ -5759,49 +5761,42 @@ static void initLavaWaverCache(DataWin* dw) {
 }
 
 static void native_trueLavawaver_Draw0(VMContext* ctx, Runner* runner, Instance* inst) {
-    (void)ctx;
     if (!lavaWaverCache.ready || runner->renderer == NULL) return;
     Renderer* r = runner->renderer;
 
-    
     GMLReal siner = selfReal(inst, lavaWaverCache.siner) + 1.0;
     Instance_setSelfVar(inst, lavaWaverCache.siner, RValue_makeReal(siner));
 
-    
-    
-    
     GMLReal b = selfReal(inst, lavaWaverCache.boff);
     GMLReal c = selfReal(inst, lavaWaverCache.coff);
     GMLReal a = selfReal(inst, lavaWaverCache.a) + 3.0;
+
     uint32_t spriteIdx = (uint32_t)inst->spriteIndex;
-    int32_t spriteW = 0;
-    if (spriteIdx < ctx->dataWin->sprt.count)
-        spriteW = (int32_t)ctx->dataWin->sprt.sprites[spriteIdx].width;
+    int32_t spriteW = (spriteIdx < ctx->dataWin->sprt.count) ? (int32_t)ctx->dataWin->sprt.sprites[spriteIdx].width : 0;
     int32_t subimg = (int32_t)inst->imageIndex;
 
-    
     int32_t tpagIndex = Renderer_resolveTPAGIndex(ctx->dataWin, inst->spriteIndex, subimg);
     if (b != 0.0 && spriteW > 0 && tpagIndex >= 0) {
         float drawAlpha = r->drawAlpha;
+
+        // ОПТИМИЗАЦИЯ: Математика вынесена из самого глубокого цикла
         for (int32_t i = 0; i < 40; i += 2) {
             a += 1.0;
-            float xx = (float)(inst->x + GMLReal_sin(a / b) * c);
+            float base_xx = (float)(inst->x + GMLReal_sin(a / b) * c);
+            float base_yy = inst->y + (float)i;
+
             for (int32_t g = 0; g < 4; g++) {
-                float yy = inst->y + (float)i;
+                float xx = base_xx + (float)(g * 100);
                 for (int32_t f = 0; f < 8; f++) {
                     r->vtable->drawSpritePart(r, tpagIndex, 0, i, spriteW, 2,
-                                              xx, yy, 1.0f, 1.0f,
+                                              xx, base_yy + (float)(f * 40), 1.0f, 1.0f,
                                               0xFFFFFFu, drawAlpha);
-                    yy += 40.0f;
                 }
-                xx += 100.0f;
             }
         }
     }
     Instance_setSelfVar(inst, lavaWaverCache.a, RValue_makeReal(a));
 
-    
-    
     float darkAlpha = (float)(GMLReal_sin(siner / 12.0) * 0.3 + 0.5);
     if (darkAlpha < 0.0f) darkAlpha = 0.0f;
     if (darkAlpha > 1.0f) darkAlpha = 1.0f;
@@ -5811,18 +5806,8 @@ static void native_trueLavawaver_Draw0(VMContext* ctx, Runner* runner, Instance*
         r->vtable->drawRectangle(r, vx - 10.0f, vy - 10.0f, vx + 330.0f, vy + 250.0f,
                                  0x000000u, darkAlpha, false);
     }
-    
     r->drawAlpha = 1.0f;
 }
-
-
-
-
-
-
-
-
-
 
 static struct {
     int32_t siner;
@@ -15595,13 +15580,14 @@ static void initSpeartileCache(DataWin* dw) {
 
 
 
-static bool speartile_collisionPoint(Runner* runner, DataWin* dw, Instance* self,
-                                     float px, float py, int32_t targetObj) {
-    int32_t n = (int32_t)arrlen(runner->instances);
+static bool speartile_collisionPoint(Runner* runner, DataWin* dw, Instance* self, float px, float py, int32_t targetObj) {
+    if (targetObj < 0 || targetObj >= runner->instancesByObjMax || runner->instancesByObjInclParent == NULL) return false;
+    Instance** list = runner->instancesByObjInclParent[targetObj];
+    int32_t n = (int32_t)arrlen(list);
+
     for (int32_t i = 0; i < n; i++) {
-        Instance* it = runner->instances[i];
+        Instance* it = list[i];
         if (!it->active || it == self) continue;
-        if (!Collision_matchesTarget(dw, it, targetObj)) continue;
         InstanceBBox bb = Collision_computeBBox(dw, it);
         if (!bb.valid) continue;
         if (bb.left > px || px >= bb.right || bb.top > py || py >= bb.bottom) continue;
@@ -16685,6 +16671,9 @@ static void initSnowfloorCache(VMContext* ctx, DataWin* dw) {
     snowfloorCache.ready = (snowfloorCache.dodraw >= 0 && snowfloorCache.snowx >= 0 &&
                             snowfloorCache.snowy >= 0 && snowfloorCache.moveme >= 0);
 }
+typedef struct {
+    RValue* sxv; RValue* syv; RValue* mmv; RValue* ddv;
+} SnowFlakeCacheStruct;
 
 static uint32_t g_snow_rand_seed = 12345;
 static inline float fast_rand_float(void) {
@@ -16731,10 +16720,13 @@ static void native_snowfloor_Draw0(VMContext* ctx, Runner* runner, Instance* ins
         needFlag64Set = (f64 == 0.0);
     }
 
-    r->drawColor = 0xFFFFFFu;
-    int32_t savedPrec = r->circlePrecision;
-
-    r->circlePrecision = 5;
+    // View culling: находим границы экрана
+    float viewX = runner->currentRoom ? (float)runner->currentRoom->views[0].viewX : 0.0f;
+    float viewY = runner->currentRoom ? (float)runner->currentRoom->views[0].viewY : 0.0f;
+    float viewW = runner->currentRoom ? (float)runner->currentRoom->views[0].viewWidth : 320.0f;
+    float viewH = runner->currentRoom ? (float)runner->currentRoom->views[0].viewHeight : 240.0f;
+    float vL = viewX - 10.0f, vR = viewX + viewW + 10.0f;
+    float vT = viewY - 10.0f, vB = viewY + viewH + 10.0f;
 
     int64_t dodrawBase = (int64_t)snowfloorCache.dodraw << 32;
     int64_t snowxBase  = (int64_t)snowfloorCache.snowx  << 32;
@@ -16743,6 +16735,8 @@ static void native_snowfloor_Draw0(VMContext* ctx, Runner* runner, Instance* ins
 
     bool canCollide = (hasMainchara && !maincharaFar && mcBB.valid);
     bool mcIsMoving = (mcMoving == 1 && hasMainchara);
+
+    r->drawColor = 0xFFFFFFu;
 
     for (int32_t xx = 0; xx < 5; xx++) {
         uint32_t basePacked = (uint32_t)xx * 32000;
@@ -16756,20 +16750,21 @@ static void native_snowfloor_Draw0(VMContext* ctx, Runner* runner, Instance* ins
 
             if (sxi < 0 || syi < 0 || mmi < 0) continue;
 
-            RValue* sxv = &inst->selfArrayMap[sxi].value;
-            RValue* syv = &inst->selfArrayMap[syi].value;
-            RValue* mmv = &inst->selfArrayMap[mmi].value;
+            GMLReal snowx  = RValue_toReal(inst->selfArrayMap[sxi].value);
+            GMLReal snowy  = RValue_toReal(inst->selfArrayMap[syi].value);
+            GMLReal moveme = RValue_toReal(inst->selfArrayMap[mmi].value);
 
-            GMLReal snowx  = (sxv->type == RVALUE_REAL) ? sxv->real : RValue_toReal(*sxv);
-            GMLReal snowy  = (syv->type == RVALUE_REAL) ? syv->real : RValue_toReal(*syv);
-            GMLReal moveme = (mmv->type == RVALUE_REAL) ? mmv->real : RValue_toReal(*mmv);
+            // CULLING: Пропускаем снежинки за экраном!
+            bool inView = (snowx >= vL && snowx <= vR && snowy >= vT && snowy <= vB);
 
-            ptrdiff_t di = hmgeti(inst->selfArrayMap, dodrawBase | packedIdx);
-            if (di >= 0) {
-                RValue* dv = &inst->selfArrayMap[di].value;
-                GMLReal dodraw = (dv->type == RVALUE_REAL) ? dv->real : RValue_toReal(*dv);
-                if (dodraw == 1.0) {
-                    Renderer_drawCircle(r, (float)snowx, (float)snowy, 2.8f, false);
+            if (inView) {
+                ptrdiff_t di = hmgeti(inst->selfArrayMap, dodrawBase | packedIdx);
+                if (di >= 0 && RValue_toReal(inst->selfArrayMap[di].value) == 1.0) {
+                    // ОПТИМИЗАЦИЯ: Отрисовываем квадратик 5x5 вместо сложного круга!
+                    // Это спасает 3DS от тысяч тригонометрических вычислений каждый кадр!
+                    r->vtable->drawRectangle(r, (float)snowx - 2.5f, (float)snowy - 2.5f,
+                                             (float)snowx + 2.5f, (float)snowy + 2.5f,
+                                             0xFFFFFFu, 1.0f, false);
                 }
             }
 
@@ -16806,19 +16801,21 @@ static void native_snowfloor_Draw0(VMContext* ctx, Runner* runner, Instance* ins
                     snowx += (rnd1 - (float)moveme / 2.0f) / 2.0f;
                     snowy += (rnd2 - (float)moveme / 2.0f) / 2.0f;
 
-                    sxv->real = snowx; sxv->type = RVALUE_REAL;
-                    syv->real = snowy; syv->type = RVALUE_REAL;
+                    inst->selfArrayMap[sxi].value.real = snowx;
+                    inst->selfArrayMap[sxi].value.type = RVALUE_REAL;
+                    inst->selfArrayMap[syi].value.real = snowy;
+                    inst->selfArrayMap[syi].value.type = RVALUE_REAL;
                 }
 
                 moveme -= 1.0;
-                mmv->real = moveme; mmv->type = RVALUE_REAL;
+                inst->selfArrayMap[mmi].value.real = moveme;
+                inst->selfArrayMap[mmi].value.type = RVALUE_REAL;
             } else if (collided) {
-                mmv->real = moveme; mmv->type = RVALUE_REAL;
+                inst->selfArrayMap[mmi].value.real = moveme;
+                inst->selfArrayMap[mmi].value.type = RVALUE_REAL;
             }
         }
     }
-
-    r->circlePrecision = savedPrec;
 }
 
 void NativeScripts_init(VMContext* ctx, [[maybe_unused]] Runner* runner) {
