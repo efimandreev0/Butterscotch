@@ -324,6 +324,38 @@ static void extract_tpag_from_ram(CtrRenderer* gl, DataWin* dw, uint32_t tId, ui
     free(sprite_pixels);
 }
 
+// ---------------------------------------------------------
+// УПРАВЛЕНИЕ ПАМЯТЬЮ: ЭВИКШН ПОД ДАВЛЕНИЕМ
+// ---------------------------------------------------------
+// Если LINEAR RAM становится мало, выгружаем самые старые НЕ-резидентные
+// tpag'и (не нужные текущей комнате). Перезагрузим лениво, если понадобится.
+#define CTR_LINEAR_LOW_THRESHOLD   (3u * 1024u * 1024u) // ниже 3 МБ — давим
+#define CTR_LINEAR_SAFE_TARGET     (5u * 1024u * 1024u) // освобождаем до 5 МБ
+#define CTR_EVICT_MAX_PER_CALL     32
+
+static void ctrEvictLruIfPressure(CtrRenderer* gl) {
+    if (linearSpaceFree() >= CTR_LINEAR_LOW_THRESHOLD) return;
+
+    int evicted = 0;
+    while (evicted < CTR_EVICT_MAX_PER_CALL && linearSpaceFree() < CTR_LINEAR_SAFE_TARGET) {
+        uint32_t oldestFrame = UINT32_MAX;
+        int32_t victim = -1;
+        for (uint32_t i = 0; i < gl->tpagCount; i++) {
+            if (!gl->tpags[i].isLoaded) continue;
+            if (gl->tpags[i].keepResident) continue;
+            if (gl->tpags[i].lastFrameUsed < oldestFrame) {
+                oldestFrame = gl->tpags[i].lastFrameUsed;
+                victim = (int32_t) i;
+            }
+        }
+        if (victim < 0) break;
+        glDeleteTextures(1, &gl->tpags[victim].tex);
+        gl->tpags[victim].isLoaded = false;
+        gl->tpags[victim].tex = 0;
+        evicted++;
+    }
+}
+
 // 🔥 ФИКС СТАТТЕРОВ: Читает только нужный кусок прямо с SD-карты!
 static void extract_tpag_direct_from_file(CtrRenderer* gl, DataWin* dw, uint32_t tId, FILE* f, int atlas_w, int atlas_h) {
     TexturePageItem* item = &dw->tpag.items[tId];
@@ -362,21 +394,62 @@ static void extract_tpag_direct_from_file(CtrRenderer* gl, DataWin* dw, uint32_t
     free(sprite_pixels);
 }
 
-// Вызывается во время игры, если вдруг мы забыли закэшировать анимацию
+// Минимальный порог, при котором выгоднее одним fread'ом прочитать всю
+// страницу атласа целиком, чем делать N "ленточных" fread'ов на отдельные tpag'и.
+#define CTR_PAGE_BATCH_THRESHOLD 4
+
+// Вызывается во время игры, когда нужный tpag ещё не в VRAM.
+// Если на этой же странице атласа маркировано несколько tpag'ов как
+// keepResident — батчим их одной загрузкой целой страницы (один fread,
+// один проход по памяти). Иначе — дешёвый "ленточный" fread только под
+// нужный кусок.
 static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
     if (tpagIndex < 0 || (uint32_t)tpagIndex >= gl->tpagCount || gl->tpags[tpagIndex].isLoaded) return;
 
+    // Перед любой новой загрузкой проверяем давление на LINEAR RAM.
+    ctrEvictLruIfPressure(gl);
+
     uint32_t pageId = dw->tpag.items[tpagIndex].texturePageId;
+
+    int pendingOnPage = 0;
+    for (uint32_t i = 0; i < gl->tpagCount; i++) {
+        if (dw->tpag.items[i].texturePageId != pageId) continue;
+        if (!gl->tpags[i].isLoaded && gl->tpags[i].keepResident) pendingOnPage++;
+    }
+
     char path[256];
     snprintf(path, sizeof(path), "sdmc:/3ds/butterscotch/cache/page_%u.atlas", pageId);
 
     FILE* f = fopen(path, "rb");
     if (!f) return;
+    setvbuf(f, NULL, _IOFBF, 64 * 1024);
 
     AtlasHeader hdr;
-    if (fread(&hdr, sizeof(hdr), 1, f) == 1 && hdr.magic == ATLAS_MAGIC) {
+    if (fread(&hdr, sizeof(hdr), 1, f) != 1 || hdr.magic != ATLAS_MAGIC) { fclose(f); return; }
+
+    if (pendingOnPage >= CTR_PAGE_BATCH_THRESHOLD) {
+        // Один fread всей страницы атласа, далее каждому маркированному tpag'у
+        // выкусываем его кусок из памяти. Сильно дешевле, чем N fseek'ов на SD.
+        size_t data_size = (size_t)hdr.width * (size_t)hdr.height * 2;
+        uint16_t* atlas_pixels = (uint16_t*) malloc(data_size);
+        if (atlas_pixels) {
+            if (fread(atlas_pixels, 1, data_size, f) == data_size) {
+                for (uint32_t tId = 0; tId < gl->tpagCount; tId++) {
+                    if (dw->tpag.items[tId].texturePageId != pageId) continue;
+                    if (gl->tpags[tId].isLoaded) continue;
+                    if (!gl->tpags[tId].keepResident && (int32_t)tId != tpagIndex) continue;
+                    extract_tpag_from_ram(gl, dw, tId, atlas_pixels, hdr.width, hdr.height);
+                }
+            }
+            free(atlas_pixels);
+        } else {
+            // Не хватает памяти на полный атлас — fallback на ленточный read.
+            extract_tpag_direct_from_file(gl, dw, tpagIndex, f, hdr.width, hdr.height);
+        }
+    } else {
         extract_tpag_direct_from_file(gl, dw, tpagIndex, f, hdr.width, hdr.height);
     }
+
     fclose(f);
 }
 
@@ -392,27 +465,30 @@ static void markSpriteResident(CtrRenderer* gl, DataWin* dw, int32_t spriteIndex
     for (uint32_t f = 0; f < s->textureCount; f++) markTpagOffsetResident(gl, dw, s->textureOffsets[f]);
 }
 
-// 🔥 ФИКС АНИМАЦИЙ: Загружаем соседние ID спрайтов
-static void markSpriteNeighborhoodResident(CtrRenderer* gl, DataWin* dw, int32_t baseSpriteIndex, int range) {
-    if (baseSpriteIndex < 0) return;
-    for (int i = -range; i <= range; i++) {
-        int32_t sprIdx = baseSpriteIndex + i;
-        if (sprIdx >= 0 && (uint32_t)sprIdx < dw->sprt.count) {
-            markSpriteResident(gl, dw, sprIdx);
-        }
-    }
-}
-
 static void markBackgroundResident(CtrRenderer* gl, DataWin* dw, int32_t bgndIndex) {
     if (bgndIndex >= 0 && (uint32_t) bgndIndex < dw->bgnd.count) markTpagOffsetResident(gl, dw, dw->bgnd.backgrounds[bgndIndex].textureOffset);
 }
 
+// Лёгкий префетч: только метим спрайт как резидентный, реальная загрузка
+// случится лениво на первый ctrDrawTpagRegion. Никаких "соседних ID" —
+// раньше мы превентивно тянули по 25 спрайтов на каждый change, и это
+// и было главной причиной 7-секундных фризов на смене комнаты.
 void CtrRenderer_prefetchSprite(Renderer* renderer, int32_t spriteIndex) {
     if (!renderer || !renderer->dataWin) return;
     CtrRenderer* gl = (CtrRenderer*) renderer;
-    markSpriteNeighborhoodResident(gl, renderer->dataWin, spriteIndex, 6);
+    markSpriteResident(gl, renderer->dataWin, spriteIndex);
 }
 
+// При смене комнаты НЕ читаем диск и НЕ выгружаем сразу всё подряд.
+// Просто переразмечаем "это нужно держать в VRAM". Реальная загрузка
+// случится лениво в loadDynamicSprite на первый draw, и только для
+// тех tpag'ов, которые комната действительно рисует — а не для всего,
+// что теоретически мог бы заспавнить любой объект из room->gameObjects.
+//
+// Резидентные перетекают между комнатами: если вернулись в уже
+// посещённую комнату — почти всё ещё в VRAM, переход моментальный.
+// Когда LINEAR RAM кончается, ctrEvictLruIfPressure снесёт
+// самые старые НЕ-резидентные tpag'и.
 static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
     DataWin* dw = renderer->dataWin;
@@ -436,61 +512,18 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
         else if (bgIdx >= 0) markBackgroundResident(gl, dw, bgIdx);
     }
 
+    // Спрайты объектов комнаты — без раздутия "соседей". Если объект реально
+    // зариcуется, его tpag будет лениво подтянут с диска.
     for (uint32_t i = 0; i < room->gameObjectCount; i++) {
         int32_t objIdx = room->gameObjects[i].objectDefinition;
         if (objIdx >= 0 && (uint32_t) objIdx < dw->objt.count) {
-            markSpriteNeighborhoodResident(gl, dw, dw->objt.objects[objIdx].spriteId, 12);
+            markSpriteResident(gl, dw, dw->objt.objects[objIdx].spriteId);
             int32_t parent = dw->objt.objects[objIdx].parentId;
             if (parent >= 0 && (uint32_t)parent < dw->objt.count) {
-                markSpriteNeighborhoodResident(gl, dw, dw->objt.objects[parent].spriteId, 8);
+                markSpriteResident(gl, dw, dw->objt.objects[parent].spriteId);
             }
         }
     }
-
-    for (uint32_t i = 0; i < gl->tpagCount; i++) {
-        if (!gl->tpags[i].keepResident && gl->tpags[i].isLoaded) {
-            glDeleteTextures(1, &gl->tpags[i].tex);
-            gl->tpags[i].isLoaded = false;
-        }
-    }
-
-    uint8_t* page_needed = (uint8_t*) calloc(dw->txtr.count, sizeof(uint8_t));
-    if (!page_needed) return;
-
-    for (uint32_t i = 0; i < gl->tpagCount; i++) {
-        if (gl->tpags[i].keepResident && !gl->tpags[i].isLoaded) {
-            uint32_t pageId = dw->tpag.items[i].texturePageId;
-            if (pageId < dw->txtr.count) page_needed[pageId] = 1;
-        }
-    }
-
-    for (uint32_t pageId = 0; pageId < dw->txtr.count; pageId++) {
-        if (!page_needed[pageId]) continue;
-
-        char path[256];
-        snprintf(path, sizeof(path), "sdmc:/3ds/butterscotch/cache/page_%u.atlas", pageId);
-        FILE* f = fopen(path, "rb");
-        if (!f) continue;
-        setvbuf(f, NULL, _IOFBF, 128 * 1024);
-
-        AtlasHeader hdr;
-        if (fread(&hdr, sizeof(hdr), 1, f) != 1 || hdr.magic != ATLAS_MAGIC) { fclose(f); continue; }
-
-        size_t data_size = (size_t)hdr.width * (size_t)hdr.height * 2;
-        uint16_t* atlas_pixels = (uint16_t*) malloc(data_size);
-        if (atlas_pixels) {
-            if (fread(atlas_pixels, 1, data_size, f) == data_size) {
-                for (uint32_t tId = 0; tId < gl->tpagCount; tId++) {
-                    if (dw->tpag.items[tId].texturePageId == pageId && gl->tpags[tId].keepResident && !gl->tpags[tId].isLoaded) {
-                        extract_tpag_from_ram(gl, dw, tId, atlas_pixels, hdr.width, hdr.height);
-                    }
-                }
-            }
-            free(atlas_pixels);
-        }
-        fclose(f);
-    }
-    free(page_needed);
 }
 
 // ---------------------------------------------------------
@@ -502,6 +535,10 @@ static void ctrDrawTpagRegion(CtrRenderer* gl, uint32_t tpagIndex, float srcOffX
 
     if (!gl->tpags[tpagIndex].isLoaded) loadDynamicSprite(gl, gl->base.dataWin, tpagIndex);
     if (!gl->tpags[tpagIndex].isLoaded) return;
+
+    // LRU: помечаем, что этот tpag только что использовался — чтобы при
+    // давлении памяти выгружали в первую очередь самые "холодные".
+    gl->tpags[tpagIndex].lastFrameUsed = g_frameCounter;
 
     CtrTpagData* tpagData = &gl->tpags[tpagIndex];
 

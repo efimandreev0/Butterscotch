@@ -12,6 +12,9 @@ typedef struct {
     float uvScaleX;
     float uvScaleY;
     float downscaleFactor;
+
+    // For LRU memory-pressure eviction. Updated each time the tpag is drawn.
+    uint32_t lastFrameUsed;
 } CtrTpagData;
 
 typedef struct {
