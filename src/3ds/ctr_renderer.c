@@ -206,7 +206,7 @@ static void ctrInit(Renderer* renderer, DataWin* dataWin) {
     glBindTexture(GL_TEXTURE_2D, gl->whiteTexture);
     uint8_t whitePixel[4] = {255, 255, 255, 255};
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, whitePixel);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
     glEnable(GL_BLEND);
@@ -219,7 +219,13 @@ static void ctrDestroy(Renderer* renderer) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
     glDeleteTextures(1, &gl->whiteTexture);
     for (uint32_t i = 0; i < gl->tpagCount; i++) {
-        if (gl->tpags[i].isLoaded) glDeleteTextures(1, &gl->tpags[i].tex);
+        if (gl->tpags[i].isLoaded) {
+            for (int cx = 0; cx < gl->tpags[i].chunksX; cx++) {
+                for (int cy = 0; cy < gl->tpags[i].chunksY; cy++) {
+                    glDeleteTextures(1, &gl->tpags[i].chunks[cx][cy].tex);
+                }
+            }
+        }
     }
     free(gl->tpags);
     if (gl->quadBatchVertices) linearFree(gl->quadBatchVertices);
@@ -294,34 +300,50 @@ static void extract_tpag_from_ram(CtrRenderer* gl, DataWin* dw, uint32_t tId, ui
     int extH = item->sourceHeight > 0 ? item->sourceHeight : 1;
     int extX = item->sourceX; int extY = item->sourceY;
 
-    int potW = next_pot(extW);
-    int potH = next_pot(extH);
+    CtrTpagData* tpag = &gl->tpags[tId];
+    tpag->origW = extW;
+    tpag->origH = extH;
 
-    uint16_t* sprite_pixels = (uint16_t*) calloc(potW * potH, 2);
-    if (!sprite_pixels) return;
+    tpag->chunksX = (extW + 1023) / 1024;
+    tpag->chunksY = (extH + 1023) / 1024;
+    if (tpag->chunksX > CTR_MAX_CHUNKS_X) tpag->chunksX = CTR_MAX_CHUNKS_X;
+    if (tpag->chunksY > CTR_MAX_CHUNKS_Y) tpag->chunksY = CTR_MAX_CHUNKS_Y;
 
-    for (int y = 0; y < extH; y++) {
-        int sy = extY + y;
-        if (sy < 0 || sy >= atlas_h) continue;
-        for (int x = 0; x < extW; x++) {
-            int sx = extX + x;
-            if (sx < 0 || sx >= atlas_w) continue;
-            sprite_pixels[y * potW + x] = atlas_pixels[sy * atlas_w + sx];
+    for (int cy = 0; cy < tpag->chunksY; cy++) {
+        for (int cx = 0; cx < tpag->chunksX; cx++) {
+            CtrTpagChunk* chunk = &tpag->chunks[cx][cy];
+            chunk->srcX = cx * 1024;
+            chunk->srcY = cy * 1024;
+            chunk->width = extW - chunk->srcX; if (chunk->width > 1024) chunk->width = 1024;
+            chunk->height = extH - chunk->srcY; if (chunk->height > 1024) chunk->height = 1024;
+            chunk->potW = next_pot(chunk->width);
+            chunk->potH = next_pot(chunk->height);
+
+            uint16_t* sprite_pixels = (uint16_t*) calloc(chunk->potW * chunk->potH, 2);
+            if (!sprite_pixels) continue;
+
+            for (int y = 0; y < chunk->height; y++) {
+                int sy = extY + chunk->srcY + y;
+                if (sy < 0 || sy >= atlas_h) continue;
+                for (int x = 0; x < chunk->width; x++) {
+                    int sx = extX + chunk->srcX + x;
+                    if (sx < 0 || sx >= atlas_w) continue;
+                    sprite_pixels[y * chunk->potW + x] = atlas_pixels[sy * atlas_w + sx];
+                }
+            }
+
+            GLuint tex; glGenTextures(1, &tex); glBindTexture(GL_TEXTURE_2D, tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, chunk->potW, chunk->potH, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, sprite_pixels);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+            chunk->tex = tex;
+            free(sprite_pixels);
         }
     }
-
-    GLuint tex; glGenTextures(1, &tex); glBindTexture(GL_TEXTURE_2D, tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, potW, potH, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, sprite_pixels);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    gl->tpags[tId].tex = tex;
-    gl->tpags[tId].uvScaleX = 1.0f / (float)potW;
-    gl->tpags[tId].uvScaleY = 1.0f / (float)potH;
-    gl->tpags[tId].downscaleFactor = 1.0f;
-    gl->tpags[tId].isLoaded = true;
-
-    free(sprite_pixels);
+    tpag->isLoaded = true;
 }
 
 // ---------------------------------------------------------
@@ -329,8 +351,8 @@ static void extract_tpag_from_ram(CtrRenderer* gl, DataWin* dw, uint32_t tId, ui
 // ---------------------------------------------------------
 // Если LINEAR RAM становится мало, выгружаем самые старые НЕ-резидентные
 // tpag'и (не нужные текущей комнате). Перезагрузим лениво, если понадобится.
-#define CTR_LINEAR_LOW_THRESHOLD   (3u * 1024u * 1024u) // ниже 3 МБ — давим
-#define CTR_LINEAR_SAFE_TARGET     (5u * 1024u * 1024u) // освобождаем до 5 МБ
+#define CTR_LINEAR_LOW_THRESHOLD   (6u * 1024u * 1024u) // ниже 3 МБ — давим
+#define CTR_LINEAR_SAFE_TARGET     (8u * 1024u * 1024u) // освобождаем до 5 МБ
 #define CTR_EVICT_MAX_PER_CALL     32
 
 static void ctrEvictLruIfPressure(CtrRenderer* gl) {
@@ -349,49 +371,66 @@ static void ctrEvictLruIfPressure(CtrRenderer* gl) {
             }
         }
         if (victim < 0) break;
-        glDeleteTextures(1, &gl->tpags[victim].tex);
+        for (int cx = 0; cx < gl->tpags[victim].chunksX; cx++) {
+            for (int cy = 0; cy < gl->tpags[victim].chunksY; cy++) {
+                glDeleteTextures(1, &gl->tpags[victim].chunks[cx][cy].tex);
+            }
+        }
         gl->tpags[victim].isLoaded = false;
-        gl->tpags[victim].tex = 0;
         evicted++;
     }
 }
 
-// 🔥 ФИКС СТАТТЕРОВ: Читает только нужный кусок прямо с SD-карты!
 static void extract_tpag_direct_from_file(CtrRenderer* gl, DataWin* dw, uint32_t tId, FILE* f, int atlas_w, int atlas_h) {
     TexturePageItem* item = &dw->tpag.items[tId];
     int extW = item->sourceWidth > 0 ? item->sourceWidth : 1;
     int extH = item->sourceHeight > 0 ? item->sourceHeight : 1;
     int extX = item->sourceX; int extY = item->sourceY;
 
-    int potW = next_pot(extW); int potH = next_pot(extH);
+    CtrTpagData* tpag = &gl->tpags[tId];
+    tpag->origW = extW;
+    tpag->origH = extH;
 
-    uint16_t* sprite_pixels = (uint16_t*) calloc(potW * potH, 2);
-    if (!sprite_pixels) return;
+    tpag->chunksX = (extW + 1023) / 1024;
+    tpag->chunksY = (extH + 1023) / 1024;
+    if (tpag->chunksX > CTR_MAX_CHUNKS_X) tpag->chunksX = CTR_MAX_CHUNKS_X;
+    if (tpag->chunksY > CTR_MAX_CHUNKS_Y) tpag->chunksY = CTR_MAX_CHUNKS_Y;
 
     int header_size = sizeof(AtlasHeader);
-    int band_size = extH * atlas_w * 2;
-    uint16_t* band = (uint16_t*) malloc(band_size);
 
-    if (band) {
-        fseek(f, header_size + (extY * atlas_w) * 2, SEEK_SET);
-        if (fread(band, 1, band_size, f) == (size_t)band_size) {
-            for (int y = 0; y < extH; y++) {
-                memcpy(&sprite_pixels[y * potW], &band[y * atlas_w + extX], extW * 2);
+    for (int cy = 0; cy < tpag->chunksY; cy++) {
+        for (int cx = 0; cx < tpag->chunksX; cx++) {
+            CtrTpagChunk* chunk = &tpag->chunks[cx][cy];
+            chunk->srcX = cx * 1024;
+            chunk->srcY = cy * 1024;
+            chunk->width = extW - chunk->srcX; if (chunk->width > 1024) chunk->width = 1024;
+            chunk->height = extH - chunk->srcY; if (chunk->height > 1024) chunk->height = 1024;
+            chunk->potW = next_pot(chunk->width);
+            chunk->potH = next_pot(chunk->height);
+
+            uint16_t* sprite_pixels = (uint16_t*) calloc(chunk->potW * chunk->potH, 2);
+            if (!sprite_pixels) continue;
+
+            for (int y = 0; y < chunk->height; y++) {
+                int sy = extY + chunk->srcY + y;
+                if (sy < 0 || sy >= atlas_h) continue;
+
+                fseek(f, header_size + (sy * atlas_w + extX + chunk->srcX) * 2, SEEK_SET);
+                fread(&sprite_pixels[y * chunk->potW], 2, chunk->width, f);
             }
+
+            GLuint tex; glGenTextures(1, &tex); glBindTexture(GL_TEXTURE_2D, tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, chunk->potW, chunk->potH, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, sprite_pixels);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+            chunk->tex = tex;
+            free(sprite_pixels);
         }
-        free(band);
     }
-
-    GLuint tex; glGenTextures(1, &tex); glBindTexture(GL_TEXTURE_2D, tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, potW, potH, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, sprite_pixels);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    gl->tpags[tId].tex = tex;
-    gl->tpags[tId].uvScaleX = 1.0f / (float)potW; gl->tpags[tId].uvScaleY = 1.0f / (float)potH;
-    gl->tpags[tId].downscaleFactor = 1.0f; gl->tpags[tId].isLoaded = true;
-
-    free(sprite_pixels);
+    tpag->isLoaded = true;
 }
 
 // Минимальный порог, при котором выгоднее одним fread'ом прочитать всю
@@ -526,6 +565,16 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
     }
 }
 
+// Математическая интерполяция суб-квадрата
+static void lerp2D_quad(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3, float tx, float ty, float* outX, float* outY) {
+    float topX = x0 + (x1 - x0) * tx;
+    float topY = y0 + (y1 - y0) * tx;
+    float botX = x3 + (x2 - x3) * tx;
+    float botY = y3 + (y2 - y3) * tx;
+    *outX = topX + (botX - topX) * ty;
+    *outY = topY + (botY - topY) * ty;
+}
+
 // ---------------------------------------------------------
 // ФУНКЦИИ ОТРИСОВКИ (2D API)
 // ---------------------------------------------------------
@@ -536,24 +585,57 @@ static void ctrDrawTpagRegion(CtrRenderer* gl, uint32_t tpagIndex, float srcOffX
     if (!gl->tpags[tpagIndex].isLoaded) loadDynamicSprite(gl, gl->base.dataWin, tpagIndex);
     if (!gl->tpags[tpagIndex].isLoaded) return;
 
-    // LRU: помечаем, что этот tpag только что использовался — чтобы при
-    // давлении памяти выгружали в первую очередь самые "холодные".
     gl->tpags[tpagIndex].lastFrameUsed = g_frameCounter;
-
     CtrTpagData* tpagData = &gl->tpags[tpagIndex];
 
-    float dx = srcOffX * tpagData->downscaleFactor;
-    float dy = srcOffY * tpagData->downscaleFactor;
-    float dw = srcW * tpagData->downscaleFactor;
-    float dh = srcH * tpagData->downscaleFactor;
+    if (srcW <= 0.0f || srcH <= 0.0f) return;
 
-    // ФИКС: Убрано вычитание halfU/halfV. Теперь текстура берется 1 к 1.
-    float u0 = dx * tpagData->uvScaleX;
-    float v0 = dy * tpagData->uvScaleY;
-    float u1 = (dx + dw) * tpagData->uvScaleX;
-    float v1 = (dy + dh) * tpagData->uvScaleY;
+    // Зона, которую запрашивает GameMaker внутри огромного спрайта
+    float reqL = srcOffX;
+    float reqT = srcOffY;
+    float reqR = srcOffX + srcW;
+    float reqB = srcOffY + srcH;
 
-    ctrPushQuad(gl, tpagData->tex, x0, y0, x1, y1, x2, y2, x3, y3, u0, v0, u1, v1, r, g, b, a);
+    for (int cy = 0; cy < tpagData->chunksY; cy++) {
+        for (int cx = 0; cx < tpagData->chunksX; cx++) {
+            CtrTpagChunk* chunk = &tpagData->chunks[cx][cy];
+
+            float chunkL = (float)chunk->srcX;
+            float chunkT = (float)chunk->srcY;
+            float chunkR = chunkL + (float)chunk->width;
+            float chunkB = chunkT + (float)chunk->height;
+
+            // Находим пересечение запрошенной зоны и этого чанка
+            float drawL = fmaxf(reqL, chunkL);
+            float drawT = fmaxf(reqT, chunkT);
+            float drawR = fminf(reqR, chunkR);
+            float drawB = fminf(reqB, chunkB);
+
+            // Если не пересекаются, пропускаем этот чанк
+            if (drawL >= drawR || drawT >= drawB) continue;
+
+            // Считаем UV-координаты конкретно для этого чанка (0.0 - 1.0)
+            float u0 = (drawL - chunkL) / (float)chunk->potW;
+            float v0 = (drawT - chunkT) / (float)chunk->potH;
+            float u1 = (drawR - chunkL) / (float)chunk->potW;
+            float v1 = (drawB - chunkT) / (float)chunk->potH;
+
+            // Высчитываем проценты [0.0 - 1.0], чтобы понять, где рисовать на экране
+            float tL = (drawL - reqL) / srcW;
+            float tR = (drawR - reqL) / srcW;
+            float tT = (drawT - reqT) / srcH;
+            float tB = (drawB - reqT) / srcH;
+
+            // Интерполируем координаты экрана под этот конкретный кусок текстуры
+            float px0, py0, px1, py1, px2, py2, px3, py3;
+            lerp2D_quad(x0,y0, x1,y1, x2,y2, x3,y3, tL, tT, &px0, &py0);
+            lerp2D_quad(x0,y0, x1,y1, x2,y2, x3,y3, tR, tT, &px1, &py1);
+            lerp2D_quad(x0,y0, x1,y1, x2,y2, x3,y3, tR, tB, &px2, &py2);
+            lerp2D_quad(x0,y0, x1,y1, x2,y2, x3,y3, tL, tB, &px3, &py3);
+
+            ctrPushQuad(gl, chunk->tex, px0, py0, px1, py1, px2, py2, px3, py3, u0, v0, u1, v1, r, g, b, a);
+        }
+    }
 }
 
 static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y, float originX, float originY, float xscale, float yscale, float angleDeg, uint32_t color, float alpha) {

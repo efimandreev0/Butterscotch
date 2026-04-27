@@ -4,16 +4,32 @@
 #include "renderer.h"
 #include <NovaGL.h>
 
+#define CTR_MAX_CHUNKS_X 4
+#define CTR_MAX_CHUNKS_Y 4
+
+// Данные отдельного куска текстуры (чанка)
+typedef struct {
+    GLuint tex;
+    int srcX;
+    int srcY;
+    int width;
+    int height;
+    int potW;
+    int potH;
+} CtrTpagChunk;
+
 typedef struct {
     bool isLoaded;
     bool keepResident;
 
-    GLuint tex;
-    float uvScaleX;
-    float uvScaleY;
-    float downscaleFactor;
+    int origW;
+    int origH;
+    int chunksX;
+    int chunksY;
 
-    // For LRU memory-pressure eviction. Updated each time the tpag is drawn.
+    CtrTpagChunk chunks[CTR_MAX_CHUNKS_X][CTR_MAX_CHUNKS_Y];
+
+    // For LRU memory-pressure eviction
     uint32_t lastFrameUsed;
 } CtrTpagData;
 

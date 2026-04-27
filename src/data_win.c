@@ -495,7 +495,6 @@ static void parseSPRT(BinaryReader* reader, DataWin* dw, bool skipLoadingPrecise
         spr->originX = BinaryReader_readInt32(reader);
         spr->originY = BinaryReader_readInt32(reader);
 
-        // Detect special type vs normal: peek next int32
         int32_t check = BinaryReader_readInt32(reader);
         if (check == -1) {
             spr->specialType = true;
@@ -505,16 +504,15 @@ static void parseSPRT(BinaryReader* reader, DataWin* dw, bool skipLoadingPrecise
                 spr->gms2PlaybackSpeed = BinaryReader_readFloat32(reader);
                 spr->gms2PlaybackSpeedType = BinaryReader_readUint32(reader);
                 if (spr->sVersion >= 2) {
-                    BinaryReader_skip(reader, 4); //sequenceOffset;
+                    BinaryReader_skip(reader, 4);
                     if (spr->sVersion >= 3) {
-                       BinaryReader_skip(reader, 4); // nineSliceOffset;
+                       BinaryReader_skip(reader, 4);
                     }
                 }
                 check = BinaryReader_readUint32(reader);
             }
         }
 
-        // 'check' is the texture count (start of SimpleList)
         spr->textureCount = (uint32_t)check;
         if (spr->textureCount > 0) {
             spr->textureOffsets = safeMalloc(spr->textureCount * sizeof(uint32_t));
@@ -525,13 +523,6 @@ static void parseSPRT(BinaryReader* reader, DataWin* dw, bool skipLoadingPrecise
             spr->textureOffsets = nullptr;
         }
 
-        // Collision mask data
-        // sepMasks: 0 = axis-aligned rect (no mask data stored in some cases)
-        //           1 = precise per-frame masks
-        //           2 = rotated rect (no mask data)
-        // Mask format: each bit = 1 pixel, MSB first, row-major
-        // Width in bytes = (spriteWidth + 7) / 8, total = widthInBytes * spriteHeight
-        // After all masks, data is padded to 4-byte alignment
         uint32_t maskDataCount = BinaryReader_readUint32(reader);
         spr->maskCount = maskDataCount;
         if (maskDataCount > 0 && spr->width > 0 && spr->height > 0) {
@@ -548,7 +539,6 @@ static void parseSPRT(BinaryReader* reader, DataWin* dw, bool skipLoadingPrecise
                 BinaryReader_skip(reader, bytesPerMask * maskDataCount);
                 spr->masks = nullptr;
             }
-            // Pad the TOTAL mask data to 4-byte alignment (not per-mask)
             uint32_t totalMaskBytes = bytesPerMask * maskDataCount;
             uint32_t remainder = totalMaskBytes % 4;
             if (remainder != 0) {
@@ -558,12 +548,14 @@ static void parseSPRT(BinaryReader* reader, DataWin* dw, bool skipLoadingPrecise
             spr->masks = nullptr;
         }
     }
-    
-    // Build sprtOffsetMap: absolute file offset -> SPRT index
-    // TODO: This is only needed for GMS2
-    repeat(count, i) {
-        hmput(dw->sprtOffsetMap, ptrs[i], (int32_t) i);
+
+    //only for GMS2
+    if (dw->gen8.major >= 2) {
+        repeat(count, i) {
+            hmput(dw->sprtOffsetMap, ptrs[i], (int32_t) i);
+        }
     }
+
     free(ptrs);
 }
 
@@ -997,12 +989,20 @@ void DataWin_loadRoom(DataWin* dw, int32_t roomIndex) {
     Room* room = &dw->room.rooms[roomIndex];
     if (room->isLoaded) return;
 
-    // Защита: если буфер не загружен, выходим
-    if (!dw->roomBuffer) return;
+    // Открываем файл на лету для загрузки комнаты
+    FILE* file = fopen(dw->filePath, "rb");
+    if (!file) return;
 
-    // Инициализируем BinaryReader ПРЯМО ИЗ ОЗУ (без файлов и fread!)
-    BinaryReader reader = BinaryReader_create(NULL, 0);
-    BinaryReader_setBuffer(&reader, dw->roomBuffer, dw->roomBufferBase, dw->roomChunkLength);
+    // Узнаем реальный размер файла для BinaryReader
+    fseek(file, 0, SEEK_END);
+    long fileSize = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    // Временный буфер на 32КБ — достаточно для быстрого чтения объектов и тайлов
+    setvbuf(file, nullptr, _IOFBF, 32 * 1024);
+
+    // ПЕРЕДАЕМ ПРАВИЛЬНЫЙ РАЗМЕР ФАЙЛА СЮДА
+    BinaryReader reader = BinaryReader_create(file, (size_t)fileSize);
 
     // 1. Загрузка Backgrounds
     BinaryReader_seek(&reader, room->backgroundsPtr);
@@ -1105,7 +1105,7 @@ void DataWin_loadRoom(DataWin* dw, int32_t roomIndex) {
     }
     if (tilePtrs) free(tilePtrs);
 
-    BinaryReader_clearBuffer(&reader);
+    fclose(file); // Закрываем файл!
 
     room->isLoaded = true;
 }
@@ -1374,9 +1374,8 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
         exit(1);
     }
 
-    // Use a large read buffer to reduce the number of physical reads
-    // This is critical for slow I/O devices like the PS2 CDVD drive, where each fread
-    // call would otherwise trigger a separate disc read of just a few sectors
+    // Для SD-карты буфера в 128 КБ более чем достаточно для быстрого чтения!
+    // Нам больше не нужно загружать мегабайтные чанки в ОЗУ целиком.
     setvbuf(file, nullptr, _IOFBF, 128 * 1024);
 
     fseek(file, 0, SEEK_END);
@@ -1389,7 +1388,6 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
         exit(1);
     }
 
-    // Allocate and zero-initialize DataWin
     DataWin* dw = safeCalloc(1, sizeof(DataWin));
     dw->filePath = strdup(filePath);
 
@@ -1408,11 +1406,10 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
     uint32_t formLength = BinaryReader_readUint32(&reader);
     (void) formLength;
 
-    // Pass 1: Count total chunks and find STRG chunk offset.
-    // All other chunks reference strings from STRG, so it must be loaded first.
     int totalChunks = 0;
     BinaryReader_seek(&reader, 8); // reset to after FORM header
 
+    // Pass 1: Count total chunks and find STRG chunk offset.
     if (options.parseStrg) {
         while ((size_t) fileSize > BinaryReader_getPosition(&reader)) {
             if (BinaryReader_getPosition(&reader) + 8 > (size_t) fileSize) break;
@@ -1432,10 +1429,7 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
         }
     }
 
-    // Pass 2: Parse all chunks
-    // For each chunk that will be parsed, we bulk-read the entire chunk into memory first
-    // and then parse from the memory buffer. This dramatically reduces the number of physical
-    // reads on slow I/O devices like the PS2 CDVD drive.
+    // Pass 2: Parse all chunks directly from file stream
     BinaryReader_seek(&reader, 8); // skip past FORM header
     int chunkIndex = 0;
     while ((size_t) fileSize > BinaryReader_getPosition(&reader)) {
@@ -1451,44 +1445,7 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
             options.progressCallback(chunkName, chunkIndex, totalChunks, dw, options.progressCallbackUserData);
         }
 
-        // Determine if this chunk will be parsed (and thus needs bulk loading)
-        bool shouldParse =
-            (options.parseGen8 && memcmp(chunkName, "GEN8", 4) == 0) ||
-            (options.parseOptn && memcmp(chunkName, "OPTN", 4) == 0) ||
-            (options.parseLang && memcmp(chunkName, "LANG", 4) == 0) ||
-            (options.parseExtn && memcmp(chunkName, "EXTN", 4) == 0) ||
-            (options.parseSond && memcmp(chunkName, "SOND", 4) == 0) ||
-            (options.parseAgrp && memcmp(chunkName, "AGRP", 4) == 0) ||
-            (options.parseSprt && memcmp(chunkName, "SPRT", 4) == 0) ||
-            (options.parseBgnd && memcmp(chunkName, "BGND", 4) == 0) ||
-            (options.parsePath && memcmp(chunkName, "PATH", 4) == 0) ||
-            (options.parseScpt && memcmp(chunkName, "SCPT", 4) == 0) ||
-            (options.parseGlob && memcmp(chunkName, "GLOB", 4) == 0) ||
-            (options.parseShdr && memcmp(chunkName, "SHDR", 4) == 0) ||
-            (options.parseFont && memcmp(chunkName, "FONT", 4) == 0) ||
-            (options.parseTmln && memcmp(chunkName, "TMLN", 4) == 0) ||
-            (options.parseObjt && memcmp(chunkName, "OBJT", 4) == 0) ||
-            (options.parseRoom && memcmp(chunkName, "ROOM", 4) == 0) ||
-            (options.parseTpag && memcmp(chunkName, "TPAG", 4) == 0) ||
-            (options.parseCode && memcmp(chunkName, "CODE", 4) == 0) ||
-            (options.parseVari && memcmp(chunkName, "VARI", 4) == 0) ||
-            (options.parseFunc && memcmp(chunkName, "FUNC", 4) == 0) ||
-            (options.parseStrg && memcmp(chunkName, "STRG", 4) == 0) ||
-            (options.parseTxtr && memcmp(chunkName, "TXTR", 4) == 0) ||
-            (options.parseAudo && memcmp(chunkName, "AUDO", 4) == 0);
-
-        // Bulk-read the chunk data into memory for fast parsing
-        uint8_t* chunkBuffer = nullptr;
-        if (shouldParse && chunkLength > 0) {
-            chunkBuffer = safeMalloc(chunkLength);
-            size_t read = fread(chunkBuffer, 1, chunkLength, reader.file);
-            if (read != chunkLength) {
-                fprintf(stderr, "DataWin: short read on chunk %.4s (expected %u, got %zu)\n", chunkName, chunkLength, read);
-                exit(1);
-            }
-            BinaryReader_setBuffer(&reader, chunkBuffer, chunkDataStart, chunkLength);
-        }
-
+        // Прямой парсинг с диска (Lazy-load для памяти)
         if (options.parseGen8 && memcmp(chunkName, "GEN8", 4) == 0) {
             parseGEN8(&reader, dw);
         } else if (options.parseOptn && memcmp(chunkName, "OPTN", 4) == 0) {
@@ -1522,16 +1479,9 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
         } else if (options.parseRoom && memcmp(chunkName, "ROOM", 4) == 0) {
             dw->roomChunkOffset = chunkDataStart;
             dw->roomChunkLength = chunkLength;
-
-            // Переиспользуем chunkBuffer как постоянный roomBuffer — не дублируем
-            // содержимое ROOM-чанка в памяти. Освобождение перенесено в DataWin_free.
-            dw->roomBufferBase = chunkDataStart;
-            dw->roomBuffer = chunkBuffer;
-            chunkBuffer = nullptr; // предотвращаем освобождение в блоке ниже
-
-            parseROOM(&reader, dw);
+            parseROOM(&reader, dw); // ROOM-чанк больше не сохраняется в ОЗУ
         } else if (memcmp(chunkName, "DAFL", 4) == 0) {
-            // Empty chunk, nothing to parse
+            // Empty chunk
         } else if (options.parseTpag && memcmp(chunkName, "TPAG", 4) == 0) {
             parseTPAG(&reader, dw);
         } else if (options.parseCode && memcmp(chunkName, "CODE", 4) == 0) {
@@ -1546,40 +1496,21 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
             parseTXTR(&reader, dw, chunkEnd, options);
         } else if (options.parseAudo && memcmp(chunkName, "AUDO", 4) == 0) {
             parseAUDO(&reader, dw, options);
-        } else {
-            printf("Unknown chunk: %.4s (length %u at offset 0x%zX)\n", chunkName, chunkLength, chunkDataStart - 8);
         }
 
-        // Revert to FILE*-based reads for the next chunk header. Always clear the
-        // reader buffer — parseROOM may steal chunkBuffer and null it out, but the
-        // reader still points at the stolen memory until we clear it here.
-        if (reader.buffer != nullptr) {
-            BinaryReader_clearBuffer(&reader);
-        }
-        if (chunkBuffer != nullptr) {
-            free(chunkBuffer);
-        }
-
-        // Seek to chunk end (skip any unread data or trailing padding)
-        fseek(reader.file, (long) chunkEnd, SEEK_SET);
+        // Seek to chunk end
+        BinaryReader_seek(&reader, chunkEnd);
         chunkIndex++;
     }
 
-    // GMS2: apply default FPS to rooms with speed=0
     if (dw->gen8.gms2FPS > 0) {
         repeat(dw->room.count, i) {
-            if (dw->room.rooms[i].speed == 0) {
-                dw->room.rooms[i].speed = (uint32_t) dw->gen8.gms2FPS;
-            }
+            if (dw->room.rooms[i].speed == 0) dw->room.rooms[i].speed = (uint32_t) dw->gen8.gms2FPS;
         }
     }
 
     fclose(file);
 
-    // ===[ Post-parse: pre-resolve sprite→TPAG indices ]===
-    // Renderer_resolveTPAGIndex is called per sprite draw. Previously each call
-    // did a hashmap lookup (hmgeti on tpagOffsetMap). Precomputing the indices
-    // at load time turns that into a flat array read during rendering.
     repeat(dw->sprt.count, si) {
         Sprite* spr = &dw->sprt.sprites[si];
         if (spr->textureCount == 0 || spr->textureOffsets == NULL) {
@@ -1792,7 +1723,7 @@ void DataWin_free(DataWin* dw) {
     free(dw->strgBuffer);
     free(dw->bytecodeBuffer);
     free(dw->filePath);
-    free(dw->roomBuffer);
+    //free(dw->roomBuffer);
     free(dw);
 }
 

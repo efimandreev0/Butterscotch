@@ -748,10 +748,10 @@ typedef struct DataWin {
     uint8_t* bytecodeBuffer;     // owned copy of CODE bytecode blob
     // Absolute file offset of bytecodeBuffer[0], we need this because data.win stores absolute offsets (from the beginning of the data.win file) instead of relative offsets
     size_t bytecodeBufferBase;
-
+#ifndef __3DS__
     uint8_t* roomBuffer;
     size_t roomBufferBase;
-
+#endif
     Gen8 gen8;
     Optn optn;
     Lang lang;
