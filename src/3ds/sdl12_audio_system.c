@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <3ds.h>
+#include <malloc.h>
 #include <SDL/SDL.h>
 #include <SDL/SDL_mixer.h>
 #include "../vorbis/stb_vorbis.c"
@@ -18,7 +20,9 @@ static bool use_mixer = true;
 // КРИТИЧЕСКИ ВАЖНО: 512 КБ. Любой файл меньше 512 КБ загружается в оперативу как эффект (Mix_Chunk).
 // Все файлы больше 512 КБ загружаются как потоковая музыка (Mix_Music).
 #define STREAMING_SIZE_THRESHOLD (512 * 1024)
-#define MAX_CACHED_CHUNKS 32
+// Подняли до 128: ранее 32 — слишком агрессивный eviction приводил к постоянному
+// re-decode OGG (главный источник статтеров). С linear RAM держать больше дёшево.
+#define MAX_CACHED_CHUNKS 128
 
 // ============================================================================
 // [1] MUSIC STREAMING (RWops)
@@ -156,7 +160,8 @@ static void evictOldestSfx(SdlMixerAudioSystem* sys) {
             sys->chunks[oldestId] = NULL;
 
             if (sys->decodedSfxBufs[oldestId]) {
-                free(sys->decodedSfxBufs[oldestId]);
+                // Декодированные PCM-буферы лежат в LINEAR RAM (см. loadSfxIntoRAM)
+                linearFree(sys->decodedSfxBufs[oldestId]);
                 sys->decodedSfxBufs[oldestId] = NULL;
             }
         }
@@ -166,10 +171,14 @@ static void evictOldestSfx(SdlMixerAudioSystem* sys) {
 static bool loadSfxIntoRAM(SdlMixerAudioSystem* sys, int32_t soundIndex, AudioEntry* entry) {
     evictOldestSfx(sys);
 
-    uint8_t* rawBuf = safeMalloc(entry->dataSize);
+    // Временный read-буфер тоже в LINEAR RAM — это снимает фрагментацию heap
+    // во время частых SFX-загрузок (главный источник статтеров).
+    uint8_t* rawBuf = (uint8_t*) linearAlloc(entry->dataSize);
+    if (!rawBuf) return false;
+
     FILE* fp = fopen(sys->archivePath, "rb");
     if (!fp) {
-        free(rawBuf);
+        linearFree(rawBuf);
         return false;
     }
 
@@ -196,25 +205,41 @@ static bool loadSfxIntoRAM(SdlMixerAudioSystem* sys, int32_t soundIndex, AudioEn
             // Если формат отличается (например, OGG моно, а микшер стерео), конвертируем аудио "на лету"
             if (build_ret == 1) {
                 cvt.len = original_len;
-                cvt.buf = safeMalloc(cvt.len * cvt.len_mult);
+                // Конвертированный PCM остаётся жить вместе с Mix_Chunk — кладём в LINEAR.
+                cvt.buf = (uint8_t*) linearAlloc(cvt.len * cvt.len_mult);
+                if (!cvt.buf) {
+                    free(decodedPcm);
+                    linearFree(rawBuf);
+                    return false;
+                }
                 memcpy(cvt.buf, decodedPcm, cvt.len);
                 SDL_ConvertAudio(&cvt);
 
                 sys->chunks[soundIndex] = Mix_QuickLoad_RAW(cvt.buf, cvt.len_cvt);
-                sys->decodedSfxBufs[soundIndex] = cvt.buf; // Сохраняем конвертированный буфер
-                free(decodedPcm); // Исходный моно-сигнал больше не нужен
+                sys->decodedSfxBufs[soundIndex] = cvt.buf;
+                free(decodedPcm); // stb_vorbis возвращает heap-память — освобождаем сразу
             } else {
-                // Если звук уже соответствует настройкам микшера
-                sys->chunks[soundIndex] = Mix_QuickLoad_RAW((uint8_t*)decodedPcm, original_len);
-                sys->decodedSfxBufs[soundIndex] = decodedPcm;
+                // stb_vorbis отдал PCM на heap — копируем в LINEAR, чтобы не висеть на heap
+                // (Mix_QuickLoad_RAW лишь хранит указатель, освобождаем мы сами при eviction).
+                uint8_t* linearPcm = (uint8_t*) linearAlloc(original_len);
+                if (!linearPcm) {
+                    free(decodedPcm);
+                    linearFree(rawBuf);
+                    return false;
+                }
+                memcpy(linearPcm, decodedPcm, original_len);
+                free(decodedPcm);
+                sys->chunks[soundIndex] = Mix_QuickLoad_RAW(linearPcm, original_len);
+                sys->decodedSfxBufs[soundIndex] = linearPcm;
             }
         }
     } else {
+        // WAV-путь: SDL_mixer внутри маллочит свой буфер (не наш rawBuf), это не страшно.
         SDL_RWops* rw = SDL_RWFromConstMem(rawBuf, entry->dataSize);
         sys->chunks[soundIndex] = Mix_LoadWAV_RW(rw, 1);
     }
 
-    free(rawBuf);
+    linearFree(rawBuf);
 
     if (!sys->chunks[soundIndex]) {
         fprintf(stderr, "Audio Error: Failed to load SFX '%s'\n", sys->base.dataWin->sond.sounds[soundIndex].name);
@@ -267,7 +292,9 @@ static void sdlmInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileSyste
     sys->base.dataWin = dataWin;
     sys->fileSystem = fileSystem;
 
-    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0) {
+    // 4096 сэмплов ~93мс @ 44100 — на 30 FPS даёт двухкадровый запас и убирает
+    // аудио-underrun (один из главных источников статтеров на 3DS под нагрузкой).
+    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 4096) < 0) {
         fprintf(stderr, "Audio: Failed to init SDL_mixer: %s\n", Mix_GetError());
         use_mixer = false;
     }
@@ -303,7 +330,7 @@ static void sdlmDestroy(AudioSystem* audio) {
         for (uint32_t i = 0; i < soundCount; i++) {
             if (sys->chunks[i]) Mix_FreeChunk(sys->chunks[i]);
             if (sys->music[i]) Mix_FreeMusic(sys->music[i]);
-            if (sys->decodedSfxBufs[i]) free(sys->decodedSfxBufs[i]);
+            if (sys->decodedSfxBufs[i]) linearFree(sys->decodedSfxBufs[i]);
         }
 
         free(sys->chunks);

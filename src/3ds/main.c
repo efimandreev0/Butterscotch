@@ -23,7 +23,7 @@
 #include "utils.h"
 
 u32 __ctru_heap_size = 0;
-u32 __ctru_linear_heap_size = 25 * 1024 * 1024;
+u32 __ctru_linear_heap_size = 32 * 1024 * 1024;
 u32 __stacksize__ = 64 * 1024;
 
 #define DATA_WIN_PATH "sdmc:/3ds/butterscotch/data.win"
@@ -33,7 +33,6 @@ u32 __stacksize__ = 64 * 1024;
 #define BUTTERSCOTCH_NOVA_INDEX_BUF_SIZE    (512 * 1024)
 #define BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE  (512 * 1024)
 
-// Умный помощник для ввода
 static void processCombinedKey(RunnerKeyboardState* kb, u32 kDown, u32 kUp, u32 kHeld, u32 mask, int32_t gmlKey) {
     if (kDown & mask) {
         RunnerKeyboard_onKeyDown(kb, gmlKey);
@@ -76,16 +75,10 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "Butterscotch 3DS booting...\n");
     fprintf(stderr, "Loading %s\n", DATA_WIN_PATH);
 
-    // Запускаем NovaGL ЗАРАНЕЕ
     nova_init();
     mkdir(NOVA_TEX_CACHE_PATH, 0777);
     nova_texture_cache_set_directory(NOVA_TEX_CACHE_PATH);
 
-    // =========================================================================
-    // СТАДИЯ 1 выполняется ТОЛЬКО при первом запуске.
-    // Если cache_ready.flag существует — пропускаем всё: и повторный парсинг
-    // data.win, и загрузку PNG-блобов в ОЗУ. Это главная экономия RAM и времени загрузки.
-    // =========================================================================
     bool isCacheReady = false;
     {
         FILE* cacheFlagFile = fopen(NOVA_TEX_CACHE_PATH "/cache_ready.flag", "r");
@@ -337,7 +330,16 @@ int main(int argc, char* argv[]) {
         renderer->vtable->endFrame(renderer);
         novaSwapBuffers();
 
-        if (frameCounter % 60 == 0) {
+        // -------------------------------------------------------------
+        // Детектор статтеров (если кадр длился дольше 34 миллисекунд)
+        // -------------------------------------------------------------
+        u64 frameDuration = osGetTime() - frameStart;
+        if (frameDuration > 34) {
+            fprintf(stderr, "statter WARNING NAHUY: Frame took %llu ms!\n", frameDuration);
+        }
+
+        // mallinfo() обходит весь heap — не вызываем чаще, чем раз в 5 секунд.
+        if (frameCounter % 300 == 0) {
             printMemoryStats();
         }
         frameCounter++;
