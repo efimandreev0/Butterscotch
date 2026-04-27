@@ -5779,7 +5779,7 @@ static void native_trueLavawaver_Draw0(VMContext* ctx, Runner* runner, Instance*
     if (b != 0.0 && spriteW > 0 && tpagIndex >= 0) {
         float drawAlpha = r->drawAlpha;
 
-        // ОПТИМИЗАЦИЯ: Математика вынесена из самого глубокого цикла
+        // ОПТИМИЗАЦИЯ: Математика вынесена из внутреннего цикла!
         for (int32_t i = 0; i < 40; i += 2) {
             a += 1.0;
             float base_xx = (float)(inst->x + GMLReal_sin(a / b) * c);
@@ -16671,9 +16671,6 @@ static void initSnowfloorCache(VMContext* ctx, DataWin* dw) {
     snowfloorCache.ready = (snowfloorCache.dodraw >= 0 && snowfloorCache.snowx >= 0 &&
                             snowfloorCache.snowy >= 0 && snowfloorCache.moveme >= 0);
 }
-typedef struct {
-    RValue* sxv; RValue* syv; RValue* mmv; RValue* ddv;
-} SnowFlakeCacheStruct;
 
 static uint32_t g_snow_rand_seed = 12345;
 static inline float fast_rand_float(void) {
@@ -16682,6 +16679,10 @@ static inline float fast_rand_float(void) {
     g_snow_rand_seed ^= g_snow_rand_seed << 5;
     return (float)(g_snow_rand_seed & 0x7FFFFFFF) / (float)0x7FFFFFFF;
 }
+
+typedef struct {
+    RValue* sxv; RValue* syv; RValue* mmv; RValue* ddv;
+} SnowFlakeCacheStruct;
 
 static void native_snowfloor_Draw0(VMContext* ctx, Runner* runner, Instance* inst) {
     if (!snowfloorCache.ready || runner->renderer == NULL) return;
@@ -16720,100 +16721,112 @@ static void native_snowfloor_Draw0(VMContext* ctx, Runner* runner, Instance* ins
         needFlag64Set = (f64 == 0.0);
     }
 
-    // View culling: находим границы экрана
-    float viewX = runner->currentRoom ? (float)runner->currentRoom->views[0].viewX : 0.0f;
-    float viewY = runner->currentRoom ? (float)runner->currentRoom->views[0].viewY : 0.0f;
-    float viewW = runner->currentRoom ? (float)runner->currentRoom->views[0].viewWidth : 320.0f;
-    float viewH = runner->currentRoom ? (float)runner->currentRoom->views[0].viewHeight : 240.0f;
+    // Находим границы экрана (Culling), чтобы не рисовать снег, который мы не видим
+    int viewIdx = runner->viewCurrent;
+    float viewX = runner->currentRoom ? (float)runner->currentRoom->views[viewIdx].viewX : 0.0f;
+    float viewY = runner->currentRoom ? (float)runner->currentRoom->views[viewIdx].viewY : 0.0f;
+    float viewW = runner->currentRoom ? (float)runner->currentRoom->views[viewIdx].viewWidth : 320.0f;
+    float viewH = runner->currentRoom ? (float)runner->currentRoom->views[viewIdx].viewHeight : 240.0f;
+
+    // Расширяем границы на 10 пикселей
     float vL = viewX - 10.0f, vR = viewX + viewW + 10.0f;
     float vT = viewY - 10.0f, vB = viewY + viewH + 10.0f;
-
-    int64_t dodrawBase = (int64_t)snowfloorCache.dodraw << 32;
-    int64_t snowxBase  = (int64_t)snowfloorCache.snowx  << 32;
-    int64_t snowyBase  = (int64_t)snowfloorCache.snowy  << 32;
-    int64_t movemeBase = (int64_t)snowfloorCache.moveme << 32;
 
     bool canCollide = (hasMainchara && !maincharaFar && mcBB.valid);
     bool mcIsMoving = (mcMoving == 1 && hasMainchara);
 
     r->drawColor = 0xFFFFFFu;
 
-    for (int32_t xx = 0; xx < 5; xx++) {
-        uint32_t basePacked = (uint32_t)xx * 32000;
+    // ШАГ 1: Избавляемся от 100 тяжелых хэш-запросов за кадр!
+    // Делаем один единственный линейный проход по памяти объекта.
+    SnowFlakeCacheStruct flakes[25];
+    memset(flakes, 0, sizeof(flakes));
 
-        for (int32_t yy = 0; yy < 5; yy++) {
-            uint32_t packedIdx = basePacked + (uint32_t)yy;
+    int32_t mapLen = (int32_t)hmlen(inst->selfArrayMap);
+    for (int32_t i = 0; i < mapLen; i++) {
+        int64_t k = inst->selfArrayMap[i].key;
+        int32_t varId = (int32_t)(k >> 32);
+        uint32_t packedIdx = (uint32_t)(k & 0xFFFFFFFF);
 
-            ptrdiff_t sxi = hmgeti(inst->selfArrayMap, snowxBase | packedIdx);
-            ptrdiff_t syi = hmgeti(inst->selfArrayMap, snowyBase | packedIdx);
-            ptrdiff_t mmi = hmgeti(inst->selfArrayMap, movemeBase | packedIdx);
+        int32_t xx = packedIdx / 32000;
+        int32_t yy = packedIdx % 32000;
 
-            if (sxi < 0 || syi < 0 || mmi < 0) continue;
+        if (xx >= 0 && xx < 5 && yy >= 0 && yy < 5) {
+            int32_t fIdx = xx * 5 + yy;
+            if (varId == snowfloorCache.snowx) flakes[fIdx].sxv = &inst->selfArrayMap[i].value;
+            else if (varId == snowfloorCache.snowy) flakes[fIdx].syv = &inst->selfArrayMap[i].value;
+            else if (varId == snowfloorCache.moveme) flakes[fIdx].mmv = &inst->selfArrayMap[i].value;
+            else if (varId == snowfloorCache.dodraw) flakes[fIdx].ddv = &inst->selfArrayMap[i].value;
+        }
+    }
 
-            GMLReal snowx  = RValue_toReal(inst->selfArrayMap[sxi].value);
-            GMLReal snowy  = RValue_toReal(inst->selfArrayMap[syi].value);
-            GMLReal moveme = RValue_toReal(inst->selfArrayMap[mmi].value);
+    // ШАГ 2: Обрабатываем снежинки напрямую через быстрые указатели
+    for (int32_t i = 0; i < 25; i++) {
+        if (!flakes[i].sxv || !flakes[i].syv || !flakes[i].mmv) continue;
 
-            // CULLING: Пропускаем снежинки за экраном!
-            bool inView = (snowx >= vL && snowx <= vR && snowy >= vT && snowy <= vB);
+        GMLReal snowx  = (flakes[i].sxv->type == RVALUE_REAL) ? flakes[i].sxv->real : RValue_toReal(*flakes[i].sxv);
+        GMLReal snowy  = (flakes[i].syv->type == RVALUE_REAL) ? flakes[i].syv->real : RValue_toReal(*flakes[i].syv);
+        GMLReal moveme = (flakes[i].mmv->type == RVALUE_REAL) ? flakes[i].mmv->real : RValue_toReal(*flakes[i].mmv);
 
-            if (inView) {
-                ptrdiff_t di = hmgeti(inst->selfArrayMap, dodrawBase | packedIdx);
-                if (di >= 0 && RValue_toReal(inst->selfArrayMap[di].value) == 1.0) {
-                    // ОПТИМИЗАЦИЯ: Отрисовываем квадратик 5x5 вместо сложного круга!
-                    // Это спасает 3DS от тысяч тригонометрических вычислений каждый кадр!
-                    r->vtable->drawRectangle(r, (float)snowx - 2.5f, (float)snowy - 2.5f,
-                                             (float)snowx + 2.5f, (float)snowy + 2.5f,
-                                             0xFFFFFFu, 1.0f, false);
+        // Проверяем, находится ли снежинка в пределах экрана
+        bool inView = (snowx >= vL && snowx <= vR && snowy >= vT && snowy <= vB);
+
+        if (inView && flakes[i].ddv) {
+            GMLReal dodraw = (flakes[i].ddv->type == RVALUE_REAL) ? flakes[i].ddv->real : RValue_toReal(*flakes[i].ddv);
+            if (dodraw == 1.0) {
+                // ИЛЛЮЗИЯ КРУГА ИЗ ДВУХ ПРЯМОУГОЛЬНИКОВ:
+                // Вертикальная часть "крестика" (Ширина 3, Высота 5)
+                r->vtable->drawRectangle(r, (float)snowx - 1.5f, (float)snowy - 2.5f,
+                                         (float)snowx + 1.5f, (float)snowy + 2.5f,
+                                         0xFFFFFFu, 1.0f, false);
+                // Горизонтальная часть "крестика" (Ширина 5, Высота 3)
+                r->vtable->drawRectangle(r, (float)snowx - 2.5f, (float)snowy - 1.5f,
+                                         (float)snowx + 2.5f, (float)snowy + 1.5f,
+                                         0xFFFFFFu, 1.0f, false);
+            }
+        }
+
+        bool collided = false;
+        if (canCollide) {
+            float cx = (float)snowx;
+            float cy = (float)snowy;
+            float clx = (cx < mcBB.left) ? mcBB.left : (cx > mcBB.right ? mcBB.right : cx);
+            float cly = (cy < mcBB.top)  ? mcBB.top  : (cy > mcBB.bottom? mcBB.bottom: cy);
+            float dx = cx - clx;
+            float dy = cy - cly;
+
+            if (dx * dx + dy * dy < 4.0f) collided = true;
+        }
+
+        if (collided) {
+            moveme = floorf(fast_rand_float() * 4.0f) + 2.0f;
+        }
+
+        if (moveme > 1.0) {
+            if (mcIsMoving) {
+                if (roomIs57 && needFlag64Set && snowfloorCache.gFlag >= 0) {
+                    globalArraySet(ctx, snowfloorCache.gFlag, 64, RValue_makeReal(-1.0));
+                    needFlag64Set = false;
                 }
+
+                if (mcBB.left   > snowx) snowx -= moveme;
+                if (mcBB.right  < snowx) snowx += moveme;
+                if (mcBB.top    > snowy) snowy -= moveme;
+                if (mcBB.bottom < snowy) snowy += moveme;
+
+                float rnd1 = fast_rand_float() * (float)moveme;
+                float rnd2 = fast_rand_float() * (float)moveme;
+                snowx += (rnd1 - (float)moveme / 2.0f) / 2.0f;
+                snowy += (rnd2 - (float)moveme / 2.0f) / 2.0f;
+
+                flakes[i].sxv->real = snowx; flakes[i].sxv->type = RVALUE_REAL;
+                flakes[i].syv->real = snowy; flakes[i].syv->type = RVALUE_REAL;
             }
 
-            bool collided = false;
-            if (canCollide) {
-                float cx = (float)snowx;
-                float cy = (float)snowy;
-                float clx = (cx < mcBB.left) ? mcBB.left : (cx > mcBB.right ? mcBB.right : cx);
-                float cly = (cy < mcBB.top)  ? mcBB.top  : (cy > mcBB.bottom? mcBB.bottom: cy);
-                float dx = cx - clx;
-                float dy = cy - cly;
-
-                if (dx * dx + dy * dy < 4.0f) collided = true;
-            }
-
-            if (collided) {
-                moveme = floorf(fast_rand_float() * 4.0f) + 2.0f;
-            }
-
-            if (moveme > 1.0) {
-                if (mcIsMoving) {
-                    if (roomIs57 && needFlag64Set && snowfloorCache.gFlag >= 0) {
-                        globalArraySet(ctx, snowfloorCache.gFlag, 64, RValue_makeReal(-1.0));
-                        needFlag64Set = false;
-                    }
-
-                    if (mcBB.left   > snowx) snowx -= moveme;
-                    if (mcBB.right  < snowx) snowx += moveme;
-                    if (mcBB.top    > snowy) snowy -= moveme;
-                    if (mcBB.bottom < snowy) snowy += moveme;
-
-                    float rnd1 = fast_rand_float() * (float)moveme;
-                    float rnd2 = fast_rand_float() * (float)moveme;
-                    snowx += (rnd1 - (float)moveme / 2.0f) / 2.0f;
-                    snowy += (rnd2 - (float)moveme / 2.0f) / 2.0f;
-
-                    inst->selfArrayMap[sxi].value.real = snowx;
-                    inst->selfArrayMap[sxi].value.type = RVALUE_REAL;
-                    inst->selfArrayMap[syi].value.real = snowy;
-                    inst->selfArrayMap[syi].value.type = RVALUE_REAL;
-                }
-
-                moveme -= 1.0;
-                inst->selfArrayMap[mmi].value.real = moveme;
-                inst->selfArrayMap[mmi].value.type = RVALUE_REAL;
-            } else if (collided) {
-                inst->selfArrayMap[mmi].value.real = moveme;
-                inst->selfArrayMap[mmi].value.type = RVALUE_REAL;
-            }
+            moveme -= 1.0;
+            flakes[i].mmv->real = moveme; flakes[i].mmv->type = RVALUE_REAL;
+        } else if (collided) {
+            flakes[i].mmv->real = moveme; flakes[i].mmv->type = RVALUE_REAL;
         }
     }
 }
