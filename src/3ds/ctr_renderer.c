@@ -351,8 +351,13 @@ static void extract_tpag_from_ram(CtrRenderer* gl, DataWin* dw, uint32_t tId, ui
 // ---------------------------------------------------------
 // Если LINEAR RAM становится мало, выгружаем самые старые НЕ-резидентные
 // tpag'и (не нужные текущей комнате). Перезагрузим лениво, если понадобится.
-#define CTR_LINEAR_LOW_THRESHOLD   (6u * 1024u * 1024u) // ниже 3 МБ — давим
-#define CTR_LINEAR_SAFE_TARGET     (8u * 1024u * 1024u) // освобождаем до 5 МБ
+//
+// Ослабленные пороги (раньше было 6/8 МБ): держим страницы прошлых
+// комнат как можно дольше, чтобы возврат в недавно посещённую комнату
+// не стоил повторного чтения с диска. Эвикшн срабатывает только когда
+// реально упёрлись в стену.
+#define CTR_LINEAR_LOW_THRESHOLD   (3u * 1024u * 1024u)
+#define CTR_LINEAR_SAFE_TARGET     (5u * 1024u * 1024u)
 #define CTR_EVICT_MAX_PER_CALL     32
 
 static void ctrEvictLruIfPressure(CtrRenderer* gl) {
@@ -398,6 +403,28 @@ static void extract_tpag_direct_from_file(CtrRenderer* gl, DataWin* dw, uint32_t
 
     int header_size = sizeof(AtlasHeader);
 
+    // ОПТИМИЗАЦИЯ ЗАГРУЗОК: вместо тысяч мелких fread по одной строке
+    // (каждый из которых может стоить ~10мс на SD) — читаем сразу весь
+    // ряд атласа высотой extH одним большим fread в LINEAR RAM, потом
+    // распаковываем чанки уже из памяти. Это даёт ~10-30x ускорение
+    // загрузки спрайта на реальной 3DS.
+    //
+    // Размер буфера: atlas_w * extH * 2 байт (обычно 100-800 КБ).
+    // Если linearAlloc не даёт памяти (под давлением) — фоллбэк на
+    // построчное чтение, как раньше.
+    size_t strip_rows = (size_t)extH;
+    if ((int)(extY + (int)strip_rows) > atlas_h) strip_rows = (size_t)(atlas_h - extY);
+    size_t strip_bytes = (size_t)atlas_w * strip_rows * 2;
+    uint16_t* strip = (extY >= 0 && strip_rows > 0) ? (uint16_t*) linearAlloc(strip_bytes) : NULL;
+
+    if (strip) {
+        fseek(f, header_size + (size_t)extY * (size_t)atlas_w * 2, SEEK_SET);
+        if (fread(strip, 1, strip_bytes, f) != strip_bytes) {
+            linearFree(strip);
+            strip = NULL;
+        }
+    }
+
     for (int cy = 0; cy < tpag->chunksY; cy++) {
         for (int cx = 0; cx < tpag->chunksX; cx++) {
             CtrTpagChunk* chunk = &tpag->chunks[cx][cy];
@@ -411,12 +438,29 @@ static void extract_tpag_direct_from_file(CtrRenderer* gl, DataWin* dw, uint32_t
             uint16_t* sprite_pixels = (uint16_t*) calloc(chunk->potW * chunk->potH, 2);
             if (!sprite_pixels) continue;
 
-            for (int y = 0; y < chunk->height; y++) {
-                int sy = extY + chunk->srcY + y;
-                if (sy < 0 || sy >= atlas_h) continue;
+            if (strip) {
+                // Быстрый путь — выдираем чанк из уже прочитанного strip'а в RAM.
+                for (int y = 0; y < chunk->height; y++) {
+                    int local_y = chunk->srcY + y;
+                    if (local_y < 0 || (size_t)local_y >= strip_rows) continue;
+                    int src_x = extX + chunk->srcX;
+                    if (src_x < 0) src_x = 0;
+                    int copy_w = chunk->width;
+                    if (src_x + copy_w > atlas_w) copy_w = atlas_w - src_x;
+                    if (copy_w <= 0) continue;
+                    memcpy(&sprite_pixels[y * chunk->potW],
+                           &strip[local_y * atlas_w + src_x],
+                           (size_t)copy_w * 2);
+                }
+            } else {
+                // Медленный фоллбэк (linear RAM кончилась) — построчно с диска.
+                for (int y = 0; y < chunk->height; y++) {
+                    int sy = extY + chunk->srcY + y;
+                    if (sy < 0 || sy >= atlas_h) continue;
 
-                fseek(f, header_size + (sy * atlas_w + extX + chunk->srcX) * 2, SEEK_SET);
-                fread(&sprite_pixels[y * chunk->potW], 2, chunk->width, f);
+                    fseek(f, header_size + (sy * atlas_w + extX + chunk->srcX) * 2, SEEK_SET);
+                    fread(&sprite_pixels[y * chunk->potW], 2, chunk->width, f);
+                }
             }
 
             GLuint tex; glGenTextures(1, &tex); glBindTexture(GL_TEXTURE_2D, tex);
@@ -430,22 +474,52 @@ static void extract_tpag_direct_from_file(CtrRenderer* gl, DataWin* dw, uint32_t
             free(sprite_pixels);
         }
     }
+
+    if (strip) linearFree(strip);
     tpag->isLoaded = true;
 }
+static void ctrSet3DDepthOffset(Renderer* renderer, float gmDepth) {
+    CtrRenderer* gl = (CtrRenderer*)renderer;
 
+    // ВАЖНО: Сбрасываем отрисовку всего, что было на предыдущем слое!
+    ctrFlushBatch(gl);
+
+    // После фикса в NovaGL значения trans измеряются в NDC (clip-space):
+    //   |z3D| = 0.10 ≈ 20 пикселей сдвига глаз на 400-px экране,
+    //   |z3D| = 0.05 ≈ 10 пикселей.
+    // Положительное z3D — объект уходит вглубь экрана.
+    // Отрицательное z3D — объект "выпирает" из экрана (negative parallax).
+    //
+    // GM Depth: 1000000 = задний фон, -1000000 = передний UI.
+    float z3D = 0.0f;
+
+    if (gmDepth >= 1000000.0f) {
+        // Фоны — лёгкое углубление.
+        z3D = 0.025f;
+    } else if (gmDepth <= -100000.0f) {
+        // UI/диалоги/текст — выпирают, но в комфортных пределах.
+        z3D = -0.04f;
+    } else {
+        // Игровые объекты (тайлы, игрок). GM depth обычно [-1000..+1000].
+        z3D = gmDepth / 25000.0f;
+
+        // Жёсткий лимит — на полном слайдере глаза не должны вытекать.
+        if (z3D >  0.025f) z3D =  0.025f;
+        if (z3D < -0.025f) z3D = -0.025f;
+    }
+
+    novaSet3DDepth(z3D);
+}
 // Минимальный порог, при котором выгоднее одним fread'ом прочитать всю
 // страницу атласа целиком, чем делать N "ленточных" fread'ов на отдельные tpag'и.
 #define CTR_PAGE_BATCH_THRESHOLD 4
 
-// Вызывается во время игры, когда нужный tpag ещё не в VRAM.
-// Если на этой же странице атласа маркировано несколько tpag'ов как
-// keepResident — батчим их одной загрузкой целой страницы (один fread,
-// один проход по памяти). Иначе — дешёвый "ленточный" fread только под
-// нужный кусок.
+// Добавь статический буфер (он живет в BSS, не трогает кучу и стек)
+static __attribute__((aligned(8))) char g_dynamic_io_buf[64 * 1024];
+
 static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
     if (tpagIndex < 0 || (uint32_t)tpagIndex >= gl->tpagCount || gl->tpags[tpagIndex].isLoaded) return;
 
-    // Перед любой новой загрузкой проверяем давление на LINEAR RAM.
     ctrEvictLruIfPressure(gl);
 
     uint32_t pageId = dw->tpag.items[tpagIndex].texturePageId;
@@ -461,16 +535,19 @@ static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
 
     FILE* f = fopen(path, "rb");
     if (!f) return;
-    setvbuf(f, NULL, _IOFBF, 64 * 1024);
+
+    // Используем НАШ статический буфер. Больше никаких утечек и фрагментации от libc!
+    setvbuf(f, g_dynamic_io_buf, _IOFBF, sizeof(g_dynamic_io_buf));
 
     AtlasHeader hdr;
     if (fread(&hdr, sizeof(hdr), 1, f) != 1 || hdr.magic != ATLAS_MAGIC) { fclose(f); return; }
 
     if (pendingOnPage >= CTR_PAGE_BATCH_THRESHOLD) {
-        // Один fread всей страницы атласа, далее каждому маркированному tpag'у
-        // выкусываем его кусок из памяти. Сильно дешевле, чем N fseek'ов на SD.
         size_t data_size = (size_t)hdr.width * (size_t)hdr.height * 2;
-        uint16_t* atlas_pixels = (uint16_t*) malloc(data_size);
+
+        // ФИКС КРАША У САНСА: Используем Linear RAM вместо стандартного Heap для гигантского буфера!
+        uint16_t* atlas_pixels = (uint16_t*) linearAlloc(data_size);
+
         if (atlas_pixels) {
             if (fread(atlas_pixels, 1, data_size, f) == data_size) {
                 for (uint32_t tId = 0; tId < gl->tpagCount; tId++) {
@@ -480,9 +557,9 @@ static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
                     extract_tpag_from_ram(gl, dw, tId, atlas_pixels, hdr.width, hdr.height);
                 }
             }
-            free(atlas_pixels);
+            // Освобождаем Linear RAM
+            linearFree(atlas_pixels);
         } else {
-            // Не хватает памяти на полный атлас — fallback на ленточный read.
             extract_tpag_direct_from_file(gl, dw, tpagIndex, f, hdr.width, hdr.height);
         }
     } else {
@@ -1004,7 +1081,8 @@ static RendererVtable ctrVtable = {
     .drawText = ctrDrawText, .drawTextColor = ctrDrawTextColor, .flush = ctrRendererFlush,
     .createSpriteFromSurface = ctrCreateSpriteFromSurface, .deleteSprite = ctrDeleteSprite,
     .drawTile = ctrDrawTile, .drawCircle = ctrDrawCircle, .drawRoundrect = ctrDrawRoundrect,
-    .drawTriangleColor = ctrDrawTriangleColor, .drawEllipse = ctrDrawEllipse, .onRoomChanged = ctrOnRoomChanged
+    .drawTriangleColor = ctrDrawTriangleColor, .drawEllipse = ctrDrawEllipse, .onRoomChanged = ctrOnRoomChanged,
+    .set3DDepthOffset = ctrSet3DDepthOffset
 };
 
 Renderer* CtrRenderer_create(void) {

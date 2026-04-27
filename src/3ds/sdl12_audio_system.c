@@ -22,7 +22,7 @@ static bool use_mixer = true;
 #define STREAMING_SIZE_THRESHOLD (512 * 1024)
 // Подняли до 128: ранее 32 — слишком агрессивный eviction приводил к постоянному
 // re-decode OGG (главный источник статтеров). С linear RAM держать больше дёшево.
-#define MAX_CACHED_CHUNKS 128
+#define MAX_CACHED_CHUNKS 64
 
 // ============================================================================
 // [1] MUSIC STREAMING (RWops)
@@ -262,10 +262,20 @@ static bool ensureSoundLoaded(SdlMixerAudioSystem* sys, int32_t soundIndex) {
         AudioEntry* entry = &sys->base.dataWin->audo.entries[sound->audioFile];
         if (entry->dataSize == 0) return false;
 
-        // Здесь файл распределяется: в BGM или в SFX
         bool isMusic = (entry->dataSize > STREAMING_SIZE_THRESHOLD);
 
         if (isMusic) {
+            for (uint32_t i = 0; i < sys->base.dataWin->sond.count; i++) {
+                if (i != (uint32_t)soundIndex && sys->music[i] != NULL) {
+                    if (sys->currentMusicSoundIndex == (int32_t)i) {
+                        Mix_HaltMusic();
+                        sys->currentMusicSoundIndex = -1;
+                    }
+                    Mix_FreeMusic(sys->music[i]);
+                    sys->music[i] = NULL;
+                }
+            }
+
             SDL_RWops* rw = createMusicRWops(sys->archivePath, entry->dataOffset, entry->dataSize);
             if (rw) sys->music[soundIndex] = Mix_LoadMUS_RW(rw);
         } else {
@@ -274,8 +284,21 @@ static bool ensureSoundLoaded(SdlMixerAudioSystem* sys, int32_t soundIndex) {
     } else {
         char* path = resolveExternalPath(sys, sound);
         if (path) {
-            if (strstr(path, ".wav")) sys->chunks[soundIndex] = Mix_LoadWAV(path);
-            else sys->music[soundIndex] = Mix_LoadMUS(path);
+            if (strstr(path, ".wav")) {
+                sys->chunks[soundIndex] = Mix_LoadWAV(path);
+            } else {
+                for (uint32_t i = 0; i < sys->base.dataWin->sond.count; i++) {
+                    if (i != (uint32_t)soundIndex && sys->music[i] != NULL) {
+                        if (sys->currentMusicSoundIndex == (int32_t)i) {
+                            Mix_HaltMusic();
+                            sys->currentMusicSoundIndex = -1;
+                        }
+                        Mix_FreeMusic(sys->music[i]);
+                        sys->music[i] = NULL;
+                    }
+                }
+                sys->music[soundIndex] = Mix_LoadMUS(path);
+            }
             free(path);
         }
     }

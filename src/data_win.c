@@ -5,9 +5,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <sys/stat.h>
 
 #include "stb_ds.h"
 #include "utils.h"
+
+// Большие read-only блобы (STRG + bytecode CODE) на 3DS пихаем в LINEAR heap
+// в обход обычного malloc-кучи. Кэппится она отдельно, и у homebrew там
+// гораздо больше свободного места, чем в regular heap (24 МБ vs 25 МБ
+// linear-региона). На остальных платформах — обычный malloc/free.
+#ifdef __3DS__
+#  include <3ds.h>
+#  define DW_BIG_ALLOC(sz)  linearAlloc(sz)
+#  define DW_BIG_FREE(p)    do { if (p) linearFree(p); } while (0)
+#else
+#  define DW_BIG_ALLOC(sz)  malloc(sz)
+#  define DW_BIG_FREE(p)    free(p)
+#endif
 
 // ===[ HELPERS ]===
 
@@ -984,32 +998,36 @@ static void parseROOM(BinaryReader* reader, DataWin* dw) {
     free(ptrs);
 }
 
+// Выравниваем буфер по границе 8 байт для оптимизации работы ARM11
+static __attribute__((aligned(8))) char g_room_io_buf[32 * 1024];
+
 void DataWin_loadRoom(DataWin* dw, int32_t roomIndex) {
     if (roomIndex < 0 || (uint32_t)roomIndex >= dw->room.count) return;
     Room* room = &dw->room.rooms[roomIndex];
     if (room->isLoaded) return;
 
-    // Открываем файл на лету для загрузки комнаты
     FILE* file = fopen(dw->filePath, "rb");
     if (!file) return;
 
-    // Узнаем реальный размер файла для BinaryReader
+    // ПРАВИЛЬНО: setvbuf строго ДО fseek и ftell!
+    setvbuf(file, g_room_io_buf, _IOFBF, sizeof(g_room_io_buf));
+
     fseek(file, 0, SEEK_END);
     long fileSize = ftell(file);
     fseek(file, 0, SEEK_SET);
 
-    // Временный буфер на 32КБ — достаточно для быстрого чтения объектов и тайлов
-    setvbuf(file, nullptr, _IOFBF, 32 * 1024);
-
-    // ПЕРЕДАЕМ ПРАВИЛЬНЫЙ РАЗМЕР ФАЙЛА СЮДА
     BinaryReader reader = BinaryReader_create(file, (size_t)fileSize);
 
-    // 1. Загрузка Backgrounds
+    // 1. Загрузка Backgrounds (БЕЗ MALLOC)
     BinaryReader_seek(&reader, room->backgroundsPtr);
-    uint32_t bgCount;
-    uint32_t* bgPtrs = readPointerTable(&reader, &bgCount);
+    uint32_t bgCount = BinaryReader_readUint32(&reader);
+    uint32_t bgListOffset = (uint32_t)BinaryReader_getPosition(&reader);
+
     for (uint32_t j = 0; j < bgCount && j < 8; j++) {
-        BinaryReader_seek(&reader, bgPtrs[j]);
+        BinaryReader_seek(&reader, bgListOffset + j * 4); // Прыгаем к указателю
+        uint32_t ptr = BinaryReader_readUint32(&reader);
+        BinaryReader_seek(&reader, ptr); // Прыгаем к самим данным
+
         RoomBackground* bg = &room->backgrounds[j];
         bg->enabled = BinaryReader_readBool32(&reader);
         bg->foreground = BinaryReader_readBool32(&reader);
@@ -1023,14 +1041,17 @@ void DataWin_loadRoom(DataWin* dw, int32_t roomIndex) {
         bg->stretch = BinaryReader_readBool32(&reader);
     }
     for (uint32_t j = bgCount; j < 8; j++) memset(&room->backgrounds[j], 0, sizeof(RoomBackground));
-    if (bgPtrs) free(bgPtrs);
 
-    // 2. Загрузка Views
+    // 2. Загрузка Views (БЕЗ MALLOC)
     BinaryReader_seek(&reader, room->viewsPtr);
-    uint32_t viewCount;
-    uint32_t* viewPtrsArr = readPointerTable(&reader, &viewCount);
+    uint32_t viewCount = BinaryReader_readUint32(&reader);
+    uint32_t viewListOffset = (uint32_t)BinaryReader_getPosition(&reader);
+
     for (uint32_t j = 0; j < viewCount && j < 8; j++) {
-        BinaryReader_seek(&reader, viewPtrsArr[j]);
+        BinaryReader_seek(&reader, viewListOffset + j * 4);
+        uint32_t ptr = BinaryReader_readUint32(&reader);
+        BinaryReader_seek(&reader, ptr);
+
         RoomView* view = &room->views[j];
         view->enabled = BinaryReader_readBool32(&reader);
         view->viewX = BinaryReader_readInt32(&reader);
@@ -1048,17 +1069,20 @@ void DataWin_loadRoom(DataWin* dw, int32_t roomIndex) {
         view->objectId = BinaryReader_readInt32(&reader);
     }
     for (uint32_t j = viewCount; j < 8; j++) memset(&room->views[j], 0, sizeof(RoomView));
-    if (viewPtrsArr) free(viewPtrsArr);
 
-    // 3. Загрузка GameObjects
+    // 3. Загрузка GameObjects (Прямое чтение)
     BinaryReader_seek(&reader, room->gameObjectsPtr);
-    uint32_t objCount;
-    uint32_t* objPtrs = readPointerTable(&reader, &objCount);
+    uint32_t objCount = BinaryReader_readUint32(&reader);
+    uint32_t objListOffset = (uint32_t)BinaryReader_getPosition(&reader);
     room->gameObjectCount = objCount;
+
     if (objCount > 0) {
         room->gameObjects = safeMalloc(objCount * sizeof(RoomGameObject));
-        repeat(objCount, j) {
-            BinaryReader_seek(&reader, objPtrs[j]);
+        for (uint32_t j = 0; j < objCount; j++) {
+            BinaryReader_seek(&reader, objListOffset + j * 4);
+            uint32_t ptr = BinaryReader_readUint32(&reader);
+            BinaryReader_seek(&reader, ptr);
+
             RoomGameObject* go = &room->gameObjects[j];
             go->x = BinaryReader_readInt32(&reader);
             go->y = BinaryReader_readInt32(&reader);
@@ -1072,19 +1096,22 @@ void DataWin_loadRoom(DataWin* dw, int32_t roomIndex) {
             go->preCreateCode = (dw->gen8.bytecodeVersion >= 16) ? BinaryReader_readInt32(&reader) : -1;
         }
     } else {
-        room->gameObjects = nullptr;
+        room->gameObjects = NULL;
     }
-    if (objPtrs) free(objPtrs);
 
-    // 4. Загрузка Tiles
+    // 4. Загрузка Tiles (Прямое чтение)
     BinaryReader_seek(&reader, room->tilesPtr);
-    uint32_t tileCount;
-    uint32_t* tilePtrs = readPointerTable(&reader, &tileCount);
+    uint32_t tileCount = BinaryReader_readUint32(&reader);
+    uint32_t tileListOffset = (uint32_t)BinaryReader_getPosition(&reader);
     room->tileCount = tileCount;
+
     if (tileCount > 0) {
         room->tiles = safeCalloc(tileCount, sizeof(RoomTile));
-        repeat(tileCount, j) {
-            BinaryReader_seek(&reader, tilePtrs[j]);
+        for (uint32_t j = 0; j < tileCount; j++) {
+            BinaryReader_seek(&reader, tileListOffset + j * 4);
+            uint32_t ptr = BinaryReader_readUint32(&reader);
+            BinaryReader_seek(&reader, ptr);
+
             RoomTile* tile = &room->tiles[j];
             tile->x = BinaryReader_readInt32(&reader);
             tile->y = BinaryReader_readInt32(&reader);
@@ -1101,12 +1128,10 @@ void DataWin_loadRoom(DataWin* dw, int32_t roomIndex) {
             tile->color = BinaryReader_readUint32(&reader);
         }
     } else {
-        room->tiles = nullptr;
+        room->tiles = NULL;
     }
-    if (tilePtrs) free(tilePtrs);
 
-    fclose(file); // Закрываем файл!
-
+    fclose(file);
     room->isLoaded = true;
 }
 
@@ -1160,13 +1185,177 @@ static void parseTPAG(BinaryReader* reader, DataWin* dw) {
     free(ptrs);
 }
 
-static void parseCODE(BinaryReader* reader, DataWin* dw, uint32_t chunkLength, size_t chunkDataStart) {
+// =====================================================================
+// CODE cache: один последовательный read с диска вместо ~6500 мелких
+// seek'ов внутри data.win. На SD-карте 3DS это ускоряет parseCODE
+// в разы. Файл валидируется по размеру и mtime data.win — если
+// исходник изменился, кэш переписывается на следующем парсинге.
+// =====================================================================
+#define CODE_CACHE_MAGIC "CCH1"
+#define CODE_CACHE_VERSION 1u
+
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];     // "CCH1"
+    uint32_t version;      // CODE_CACHE_VERSION
+    uint64_t srcSize;      // size of data.win at write time
+    uint64_t srcMtime;     // mtime of data.win at write time
+    uint32_t codeCount;
+    uint32_t blobBase;     // dw->bytecodeBufferBase
+    uint32_t blobSize;
+    uint32_t reserved;
+} CodeCacheHeader;
+
+typedef struct {
+    uint32_t nameOff;                 // absolute string offset (как в data.win), 0 = NULL
+    uint32_t length;
+    uint16_t localsCount;
+    uint16_t argumentsCount;
+    uint32_t bytecodeAbsoluteOffset;
+    uint32_t offset;
+} CodeCacheEntry;
+#pragma pack(pop)
+
+// Возвращает true если удалось загрузить валидный кэш и заполнить dw->code,
+// dw->bytecodeBuffer, dw->bytecodeBufferBase. На любой ошибке — false и
+// никаких побочных эффектов (всё освобождается).
+static bool tryLoadCodeCache(DataWin* dw, const char* cachePath) {
+    if (!cachePath || !dw->filePath) return false;
+
+    struct stat srcSt;
+    if (stat(dw->filePath, &srcSt) != 0) return false;
+
+    FILE* f = fopen(cachePath, "rb");
+    if (!f) return false;
+
+    setvbuf(f, NULL, _IOFBF, 64 * 1024);
+
+    CodeCacheHeader hdr;
+    if (fread(&hdr, sizeof(hdr), 1, f) != 1) { fclose(f); return false; }
+
+    if (memcmp(hdr.magic, CODE_CACHE_MAGIC, 4) != 0 ||
+        hdr.version != CODE_CACHE_VERSION ||
+        hdr.srcSize != (uint64_t) srcSt.st_size ||
+        hdr.srcMtime != (uint64_t) srcSt.st_mtime) {
+        fclose(f);
+        return false;
+    }
+
+    if (hdr.codeCount == 0) {
+        fclose(f);
+        dw->code.count = 0;
+        dw->code.entries = NULL;
+        dw->bytecodeBuffer = NULL;
+        dw->bytecodeBufferBase = 0;
+        return true;
+    }
+
+    CodeEntry* entries = (CodeEntry*) safeMalloc(hdr.codeCount * sizeof(CodeEntry));
+    CodeCacheEntry* raw = (CodeCacheEntry*) safeMalloc(hdr.codeCount * sizeof(CodeCacheEntry));
+
+    if (fread(raw, sizeof(CodeCacheEntry), hdr.codeCount, f) != hdr.codeCount) {
+        free(entries); free(raw); fclose(f);
+        return false;
+    }
+
+    repeat(hdr.codeCount, i) {
+        entries[i].name = (raw[i].nameOff == 0)
+            ? NULL
+            : (const char*) (dw->strgBuffer + (raw[i].nameOff - dw->strgBufferBase));
+        entries[i].length = raw[i].length;
+        entries[i].localsCount = raw[i].localsCount;
+        entries[i].argumentsCount = raw[i].argumentsCount;
+        entries[i].bytecodeAbsoluteOffset = raw[i].bytecodeAbsoluteOffset;
+        entries[i].offset = raw[i].offset;
+    }
+    free(raw);
+
+    uint8_t* blob = (uint8_t*) DW_BIG_ALLOC(hdr.blobSize);
+    if (!blob) {
+        free(entries); fclose(f);
+        return false;
+    }
+    if (fread(blob, 1, hdr.blobSize, f) != hdr.blobSize) {
+        DW_BIG_FREE(blob);
+        free(entries); fclose(f);
+        return false;
+    }
+
+    fclose(f);
+
+    dw->code.count = hdr.codeCount;
+    dw->code.entries = entries;
+    dw->bytecodeBuffer = blob;
+    dw->bytecodeBufferBase = hdr.blobBase;
+    fprintf(stderr, "[mem] CODE bytecode: %.2f MB (LINEAR, from cache)\n",
+            (float) hdr.blobSize / (1024.0f * 1024.0f));
+    return true;
+}
+
+static void writeCodeCache(DataWin* dw, const char* cachePath, size_t blobSize) {
+    if (!cachePath || !dw->filePath) return;
+
+    struct stat srcSt;
+    if (stat(dw->filePath, &srcSt) != 0) return;
+
+    FILE* f = fopen(cachePath, "wb");
+    if (!f) {
+        fprintf(stderr, "[code-cache] WARN: failed to open %s for write\n", cachePath);
+        return;
+    }
+    setvbuf(f, NULL, _IOFBF, 256 * 1024);
+
+    CodeCacheHeader hdr = {0};
+    memcpy(hdr.magic, CODE_CACHE_MAGIC, 4);
+    hdr.version = CODE_CACHE_VERSION;
+    hdr.srcSize = (uint64_t) srcSt.st_size;
+    hdr.srcMtime = (uint64_t) srcSt.st_mtime;
+    hdr.codeCount = dw->code.count;
+    hdr.blobBase = dw->bytecodeBufferBase;
+    hdr.blobSize = (uint32_t) blobSize;
+
+    if (fwrite(&hdr, sizeof(hdr), 1, f) != 1) { fclose(f); return; }
+
+    if (dw->code.count > 0) {
+        CodeCacheEntry* raw = (CodeCacheEntry*) safeMalloc(dw->code.count * sizeof(CodeCacheEntry));
+        repeat(dw->code.count, i) {
+            const CodeEntry* e = &dw->code.entries[i];
+            // Восстанавливаем абсолютный nameOff из указателя в strgBuffer.
+            raw[i].nameOff = (e->name == NULL)
+                ? 0
+                : (uint32_t) ((const uint8_t*) e->name - dw->strgBuffer + dw->strgBufferBase);
+            raw[i].length = e->length;
+            raw[i].localsCount = e->localsCount;
+            raw[i].argumentsCount = e->argumentsCount;
+            raw[i].bytecodeAbsoluteOffset = e->bytecodeAbsoluteOffset;
+            raw[i].offset = e->offset;
+        }
+        size_t wrote = fwrite(raw, sizeof(CodeCacheEntry), dw->code.count, f);
+        free(raw);
+        if (wrote != dw->code.count) { fclose(f); return; }
+    }
+
+    if (blobSize > 0 && dw->bytecodeBuffer) {
+        if (fwrite(dw->bytecodeBuffer, 1, blobSize, f) != blobSize) { fclose(f); return; }
+    }
+
+    fclose(f);
+    fprintf(stderr, "[code-cache] wrote %s (%.2f MB)\n",
+            cachePath, (float) blobSize / (1024.0f * 1024.0f));
+}
+
+static void parseCODE(BinaryReader* reader, DataWin* dw, uint32_t chunkLength, size_t chunkDataStart, DataWinParserOptions options) {
     Code* c = &dw->code;
 
     if (chunkLength == 0) {
         // YYC-compiled game, no bytecode
         c->count = 0;
         c->entries = nullptr;
+        return;
+    }
+
+    // Быстрый путь: пробуем кэш. Валидируется по size+mtime data.win.
+    if (tryLoadCodeCache(dw, options.codeCachePath)) {
         return;
     }
 
@@ -1177,7 +1366,13 @@ static void parseCODE(BinaryReader* reader, DataWin* dw, uint32_t chunkLength, s
     uint32_t* codePtrs = readPointerTable(reader, &codeCount);
     c->count = codeCount;
 
-    if (codeCount == 0) { free(codePtrs); c->entries = nullptr; return; }
+    if (codeCount == 0) {
+        free(codePtrs);
+        c->entries = nullptr;
+        // Запишем "пустой" кэш, чтобы в следующий раз тоже мгновенно выйти.
+        writeCodeCache(dw, options.codeCachePath, 0);
+        return;
+    }
 
     c->entries = safeMalloc(codeCount * sizeof(CodeEntry));
     repeat(codeCount, i) {
@@ -1210,7 +1405,22 @@ static void parseCODE(BinaryReader* reader, DataWin* dw, uint32_t chunkLength, s
     size_t blobSize = chunkEnd - blobStart;
 
     dw->bytecodeBufferBase = blobStart;
-    dw->bytecodeBuffer = BinaryReader_readBytesAt(reader, blobStart, blobSize);
+    // Большой read-only блоб → в LINEAR heap (3DS), чтобы не съедать regular heap.
+    dw->bytecodeBuffer = DW_BIG_ALLOC(blobSize);
+    if (!dw->bytecodeBuffer) {
+        fprintf(stderr, "FATAL: big-alloc(%zu) for bytecodeBuffer failed\n", blobSize);
+        exit(1);
+    }
+    fprintf(stderr, "[mem] CODE bytecode: %.2f MB (LINEAR on 3DS)\n", (float) blobSize / (1024.0f * 1024.0f));
+    {
+        size_t savedPos = BinaryReader_getPosition(reader);
+        BinaryReader_seek(reader, blobStart);
+        BinaryReader_readBytes(reader, dw->bytecodeBuffer, blobSize);
+        BinaryReader_seek(reader, savedPos);
+    }
+
+    // Промах кэша → пишем рядом, чтобы следующий бут был быстрым.
+    writeCodeCache(dw, options.codeCachePath, blobSize);
 }
 
 static void parseVARI(BinaryReader* reader, DataWin* dw, uint32_t chunkLength) {
@@ -1421,7 +1631,17 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
 
             if (memcmp(chunkName, "STRG", 4) == 0) {
                 dw->strgBufferBase = chunkDataStart;
-                dw->strgBuffer = BinaryReader_readBytesAt(&reader, chunkDataStart, chunkLength);
+                // Большой read-only блоб → в LINEAR heap (3DS).
+                dw->strgBuffer = DW_BIG_ALLOC(chunkLength);
+                if (!dw->strgBuffer) {
+                    fprintf(stderr, "FATAL: big-alloc(%u) for strgBuffer failed\n", chunkLength);
+                    exit(1);
+                }
+                fprintf(stderr, "[mem] STRG buffer: %.2f MB (LINEAR on 3DS)\n", (float) chunkLength / (1024.0f * 1024.0f));
+                size_t savedPos = BinaryReader_getPosition(&reader);
+                BinaryReader_seek(&reader, chunkDataStart);
+                BinaryReader_readBytes(&reader, dw->strgBuffer, chunkLength);
+                BinaryReader_seek(&reader, savedPos);
             }
 
             BinaryReader_seek(&reader, chunkDataStart + chunkLength);
@@ -1485,7 +1705,7 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
         } else if (options.parseTpag && memcmp(chunkName, "TPAG", 4) == 0) {
             parseTPAG(&reader, dw);
         } else if (options.parseCode && memcmp(chunkName, "CODE", 4) == 0) {
-            parseCODE(&reader, dw, chunkLength, chunkDataStart);
+            parseCODE(&reader, dw, chunkLength, chunkDataStart, options);
         } else if (options.parseVari && memcmp(chunkName, "VARI", 4) == 0) {
             parseVARI(&reader, dw, chunkLength);
         } else if (options.parseFunc && memcmp(chunkName, "FUNC", 4) == 0) {
@@ -1590,7 +1810,14 @@ void DataWin_free(DataWin* dw) {
 
 
     // BGND
-    free(dw->bgnd.backgrounds);
+    if (dw->bgnd.backgrounds) {
+        repeat(dw->bgnd.count, i) {
+            if (dw->gen8.major >= 2 && dw->bgnd.backgrounds[i].gms2TileIds) {
+                free(dw->bgnd.backgrounds[i].gms2TileIds);
+            }
+        }
+        free(dw->bgnd.backgrounds);
+    }
 
     // PATH
     if (dw->path.paths) {
@@ -1720,8 +1947,8 @@ void DataWin_free(DataWin* dw) {
     }
 
     // Owned buffers
-    free(dw->strgBuffer);
-    free(dw->bytecodeBuffer);
+    DW_BIG_FREE(dw->strgBuffer);
+    DW_BIG_FREE(dw->bytecodeBuffer);
     free(dw->filePath);
     //free(dw->roomBuffer);
     free(dw);

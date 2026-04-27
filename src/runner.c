@@ -14,6 +14,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#ifdef __3DS__
+#define SET_3D_Z(gm_depth) \
+if (runner->renderer->vtable->set3DDepthOffset) { \
+runner->renderer->vtable->set3DDepthOffset(runner->renderer, (float)(gm_depth)); \
+}
+#endif
 
 #ifdef PSP
 #include <psprtc.h>
@@ -886,16 +892,9 @@ void Runner_draw(Runner* runner) {
 
     DRAW_MARK(drawPhaseSortList);
 
-    
+    SET_3D_Z(1000000.0f);
     if(!runner->isGMS2)
         Runner_drawBackgrounds(runner, false);
-
-    
-    
-    
-    
-    
-    
 
     DRAW_MARK(drawPhaseBuildList);
 
@@ -1017,9 +1016,17 @@ void Runner_draw(Runner* runner) {
             runner->drawNrmQsort += (uint32_t)(_profTickUs() - _qsT0);
         }
 
+        int32_t currentGmDepth = INT32_MIN;
         int32_t dCachedDepth = INT32_MIN; float dCachedOffX = 0, dCachedOffY = 0;
+
         repeat(drawableCount, i) {
             Drawable* d = &drawables[i];
+
+            if (d->depth != currentGmDepth) {
+                currentGmDepth = d->depth;
+                SET_3D_Z(currentGmDepth);
+            }
+
             if (d->type == DRAWABLE_TILE) {
                 if (runner->renderer != nullptr) {
                     RoomTile* tile = &room->tiles[d->tileIndex];
@@ -1070,16 +1077,16 @@ void Runner_draw(Runner* runner) {
     
     
 
-    
+    SET_3D_Z(-50000.0f);
     Runner_drawBackgrounds(runner, true);
 
+    SET_3D_Z(-80000.0f);
     fireDrawSubtype(runner, drawList, drawCount, DRAW_POST);  
     
-    
+    SET_3D_Z(-100000.0f);
     fireDrawSubtype(runner, drawList, drawCount, DRAW_GUI);   
     
-    
-
+    SET_3D_Z(0.0f);
     DRAW_MARK(drawPhaseGUI);
     
 }
@@ -2508,14 +2515,26 @@ char* Runner_dumpStateJson(Runner* runner) {
 void Runner_free(Runner* runner) {
     if (runner == nullptr) return;
 
-    
+    // ФИКС УТЕЧКИ: Очищаем кэши объектов (важно при выходе в меню или рестарте)
+    if (runner->instancesByObjInclParent) {
+        for (int32_t i = 0; i < runner->instancesByObjMax; i++) {
+            arrfree(runner->instancesByObjInclParent[i]);
+            arrfree(runner->instancesByObjDirect[i]);
+        }
+        free(runner->instancesByObjInclParent);
+        free(runner->instancesByObjDirect);
+    }
+    arrfree(runner->activeOIsList);
+    free(runner->oiInListBitmap);
+    hmfree(runner->instancesToId); // Освобождаем HashMap
+
     repeat(arrlen(runner->instances), i) {
         hmdel(runner->instancesToId, runner->instances[i]->instanceId);
         Instance_free(runner->instances[i]);
     }
     arrfree(runner->instances);
 
-    
+
     if (runner->savedRoomStates != nullptr) {
         repeat(runner->dataWin->room.count, i) {
             SavedRoomState* state = &runner->savedRoomStates[i];

@@ -28,10 +28,11 @@ u32 __stacksize__ = 64 * 1024;
 
 #define DATA_WIN_PATH "sdmc:/3ds/butterscotch/data.win"
 #define NOVA_TEX_CACHE_PATH "sdmc:/3ds/butterscotch/cache"
-#define BUTTERSCOTCH_NOVA_CMD_BUF_SIZE      (1024 * 1024)
-#define BUTTERSCOTCH_NOVA_CLIENT_BUF_SIZE   (8 * 1024 * 1024)
-#define BUTTERSCOTCH_NOVA_INDEX_BUF_SIZE    (512 * 1024)
-#define BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE  (512 * 1024)
+#define CODE_CACHE_PATH    "sdmc:/3ds/butterscotch/cache/code.cache"
+#define BUTTERSCOTCH_NOVA_CMD_BUF_SIZE      (512 * 1024)
+#define BUTTERSCOTCH_NOVA_CLIENT_BUF_SIZE   (1024 * 1024)
+#define BUTTERSCOTCH_NOVA_INDEX_BUF_SIZE    (256 * 1024)
+#define BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE  (256 * 1024)
 
 static void processCombinedKey(RunnerKeyboardState* kb, u32 kDown, u32 kUp, u32 kHeld, u32 mask, int32_t gmlKey) {
     if (kDown & mask) {
@@ -68,6 +69,7 @@ int main(int argc, char* argv[]) {
     initLogging();
     cfguInit();
     gfxInitDefault();
+    gfxSet3D(true);
 
     APT_SetAppCpuTimeLimit(30);
     osSetSpeedupEnable(true);
@@ -75,7 +77,10 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "Butterscotch 3DS booting...\n");
     fprintf(stderr, "Loading %s\n", DATA_WIN_PATH);
 
-    nova_init();
+    nova_init_ex(BUTTERSCOTCH_NOVA_CMD_BUF_SIZE,
+BUTTERSCOTCH_NOVA_CLIENT_BUF_SIZE,
+BUTTERSCOTCH_NOVA_INDEX_BUF_SIZE,
+BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
     mkdir(NOVA_TEX_CACHE_PATH, 0777);
     nova_texture_cache_set_directory(NOVA_TEX_CACHE_PATH);
 
@@ -154,10 +159,14 @@ int main(int argc, char* argv[]) {
             .skipLoadingPreciseMasksForNonPreciseSprites = true,
             .skipTextureBlobData = isCacheReady,
             .skipAudioBlobData = true,
+
+            // На повторных бутах — читаем CODE одним sequential read из
+            // ~МБ-ового кэш-файла вместо тысяч мелких seek'ов в data.win.
+            .codeCachePath = CODE_CACHE_PATH,
         }
     );
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_AUDIO) != 0) {
+    if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_AUDIO) != 0) {
         fprintf(stderr, "Failed to initialize SDL: %s\n", SDL_GetError());
         if (dataWin) DataWin_free(dataWin);
         return 1;
@@ -252,16 +261,28 @@ int main(int argc, char* argv[]) {
 
         renderer->vtable->beginFrame(renderer, gameW, gameH, NOVA_SCREEN_W, NOVA_SCREEN_H);
 
-        // ===[ НАЧАЛО 3D ЦИКЛА (1 или 2 прохода) ]===
+        // ===[ НАЧАЛО 3D ЦИКЛА ]===
         int eyes = novaGetEyeCount();
+        int current_eye = 0;
 
-        // ФИКС 3D: Сохраняем состояние клавиатуры!
+        // Диагностика 3D: раз в ~30 кадров (≈1 сек) печатаем состояние слайдера
+        // и сколько глаз будем рисовать. Если slider всегда == 0.00, значит на
+        // твоём билде/прошивке osGet3DSliderState не возвращает реальное значение
+        // (часто — из-за того, что MCU/HID не инициализирован под нужным сервисом).
+        if ((frameCounter % 30) == 0) {
+            fprintf(stderr, "[3D] slider=%.2f eyes=%d\n",
+                    osGet3DSliderState(), eyes);
+        }
+
+        // ФИКС 3D: Сохраняем состояние клавиатуры, так как
+        // Draw-ивенты вызываются дважды и могут "съесть" инпуты
         RunnerKeyboardState kb_backup = *(runner->keyboard);
 
-        for (int eye = 0; eye < eyes; eye++) {
-            novaBeginEye(eye);
+        while (current_eye < eyes) {
+            novaBeginEye(current_eye);
 
-            if (eye == 1) {
+            if (current_eye == 1) {
+                // Очищаем триггеры кнопок для правого глаза, чтобы избежать двойных нажатий
                 memset(runner->keyboard->keyPressed, 0, sizeof(runner->keyboard->keyPressed));
                 memset(runner->keyboard->keyReleased, 0, sizeof(runner->keyboard->keyReleased));
             }
@@ -280,9 +301,7 @@ int main(int argc, char* argv[]) {
             bool anyViewRendered = false;
             if (viewsEnabled) {
                 for (int vi = 0; vi < 8; vi++) {
-                    // Даунгрейд: берем вид напрямую из комнаты
                     RoomView* view = &activeRoom->views[vi];
-
                     if (!view->enabled) continue;
 
                     int32_t viewX = view->viewX;
@@ -293,7 +312,7 @@ int main(int argc, char* argv[]) {
                     int32_t portY = view->portY;
                     int32_t portW = view->portWidth;
                     int32_t portH = view->portHeight;
-                    float viewAngle = runner->viewAngles[vi]; // Углы брались из самого runner'а
+                    float viewAngle = runner->viewAngles[vi];
 
                     runner->viewCurrent = vi;
 
@@ -301,30 +320,29 @@ int main(int argc, char* argv[]) {
                     renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH, portX, portY, portW, portH, viewAngle);
                     Runner_draw(runner);
                     renderer->vtable->endView(renderer);
+                    renderer->vtable->flush(renderer);
 
-                    novaSet3DDepth(0.0f);
                     anyViewRendered = true;
                 }
             }
 
             if (!anyViewRendered) {
                 runner->viewCurrent = 0;
-
                 novaSet3DDepth(0.05f);
                 renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, 0, 0, gameW, gameH, 0.0f);
                 Runner_draw(runner);
                 renderer->vtable->endView(renderer);
-
-                novaSet3DDepth(0.0f);
+                renderer->vtable->flush(renderer);
             }
 
             runner->viewCurrent = 0;
             renderer->vtable->flush(renderer);
+
+            current_eye++;
         }
 
         // ФИКС 3D: Возвращаем состояние клавиш обратно
         *(runner->keyboard) = kb_backup;
-
         // ===[ КОНЕЦ 3D ЦИКЛА ]===
 
         renderer->vtable->endFrame(renderer);

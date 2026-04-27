@@ -44,6 +44,10 @@ typedef struct {
     // Filled = triangle fan (center + N+1 perimeter), outlined = line strip.
     void (*drawEllipse)(Renderer* renderer, float cx, float cy, float rx, float ry, uint32_t color, float alpha, bool outline, int32_t precision);
     void (*onRoomChanged)(Renderer* renderer, int32_t roomIndex);
+
+    #ifdef __3DS__
+    void (*set3DDepthOffset)(Renderer* renderer, float depth);
+    #endif
 } RendererVtable;
 
 // ===[ Renderer Base Struct ]===
