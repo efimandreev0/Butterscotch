@@ -1768,6 +1768,150 @@ static const char* opcodeName(uint8_t opcode) {
 // Forward declaration for formatInstruction (defined in disassembler section, used by trace-opcodes)
 static void formatInstruction(VMContext* ctx, const uint8_t* bytecodeBase, uint32_t instrAddr, uint32_t instr, const uint8_t* extraData, char* opcodeStr, size_t opcodeSize, char* operandStr, size_t operandSize, char* commentStr, size_t commentSize);
 
+#ifdef __3DS__
+#if defined(__GNUC__)
+__attribute__((hot))
+#endif
+static RValue executeLoop(VMContext* ctx) {
+    uint8_t*  bcBase     = ctx->bytecodeBase;
+    RValue*   stackSlots = ctx->stack.slots;
+    uint32_t  ip         = ctx->ip;
+    uint32_t  codeEnd    = ctx->codeEnd;
+    int32_t   sp         = ctx->stack.top;
+
+    #define VM_SYNC() do { ctx->ip = ip; ctx->stack.top = sp; } while (0)
+    #define VM_LOAD() do { ip = ctx->ip; sp = ctx->stack.top; bcBase = ctx->bytecodeBase; codeEnd = ctx->codeEnd; } while (0)
+    #define VM_PUSH(v) do { stackSlots[sp++] = (v); } while (0)
+    #define VM_POP()   (stackSlots[--sp])
+    #define VM_PEEK()  (&stackSlots[sp - 1])
+
+    while (codeEnd > ip) {
+        uint32_t instrAddr = ip;
+        uint32_t instr = *(uint32_t*)(bcBase + ip);
+        ip += 4;
+
+        const uint8_t* extraData = bcBase + ip;
+
+        if (instr & 0x40000000u) {
+            ip += extraDataSize((instr >> 16) & 0xF);
+        }
+
+        uint8_t opcode = instr >> 24;
+
+#if defined(__GNUC__) && !defined(USE_SWITCH_DISPATCH)
+        #define OP_LABEL(op) [op] = &&lbl_##op
+        static const void* dispatchTable[256] = {
+            [0 ... 255] = &&lbl_default,
+            OP_LABEL(OP_CONV), OP_LABEL(OP_MUL), OP_LABEL(OP_DIV),
+            OP_LABEL(OP_REM), OP_LABEL(OP_MOD), OP_LABEL(OP_ADD),
+            OP_LABEL(OP_SUB), OP_LABEL(OP_AND), OP_LABEL(OP_OR),
+            OP_LABEL(OP_XOR), OP_LABEL(OP_NEG), OP_LABEL(OP_NOT),
+            OP_LABEL(OP_SHL), OP_LABEL(OP_SHR), OP_LABEL(OP_CMP),
+            OP_LABEL(OP_POP), OP_LABEL(OP_PUSHI), OP_LABEL(OP_DUP),
+            OP_LABEL(OP_RET), OP_LABEL(OP_EXIT), OP_LABEL(OP_POPZ),
+            OP_LABEL(OP_B), OP_LABEL(OP_BT), OP_LABEL(OP_BF),
+            OP_LABEL(OP_PUSHENV), OP_LABEL(OP_POPENV),
+            OP_LABEL(OP_PUSH), OP_LABEL(OP_PUSHLOC), OP_LABEL(OP_PUSHGLB),
+            OP_LABEL(OP_PUSHBLTN), OP_LABEL(OP_CALL), OP_LABEL(OP_BREAK),
+        };
+        #undef OP_LABEL
+
+        goto *dispatchTable[opcode];
+
+        lbl_OP_PUSH:    VM_SYNC(); handlePush(ctx, instr, extraData); VM_LOAD(); continue;
+        lbl_OP_PUSHLOC: VM_SYNC(); handlePushLoc(ctx, extraData); VM_LOAD(); continue;
+        lbl_OP_PUSHGLB: VM_SYNC(); handlePushGlb(ctx, extraData); VM_LOAD(); continue;
+        lbl_OP_PUSHBLTN:VM_SYNC(); handlePushBltn(ctx, instr, extraData); VM_LOAD(); continue;
+        lbl_OP_PUSHI:   { VM_PUSH(RValue_makeInt32((int16_t)(instr & 0xFFFF))); continue; }
+        lbl_OP_POP:     VM_SYNC(); handlePop(ctx, instr, extraData); VM_LOAD(); continue;
+        lbl_OP_POPZ:    { RValue _pz = VM_POP(); RValue_free(&_pz); continue; }
+
+        lbl_OP_ADD:     VM_SYNC(); handleAdd(ctx); VM_LOAD(); continue;
+        lbl_OP_SUB: {
+            RValue _b = VM_POP(), _a = VM_POP();
+            if (_a.type == RVALUE_INT32 && _b.type == RVALUE_INT32)
+                VM_PUSH(RValue_makeInt32(_a.int32 - _b.int32));
+            else { VM_PUSH(RValue_makeReal(RValue_toReal(_a) - RValue_toReal(_b))); RValue_free(&_a); RValue_free(&_b); }
+            continue;
+        }
+        lbl_OP_MUL:     VM_SYNC(); handleMul(ctx); VM_LOAD(); continue;
+        lbl_OP_DIV:     VM_SYNC(); handleDiv(ctx); VM_LOAD(); continue;
+        lbl_OP_REM:     VM_SYNC(); handleRem(ctx); VM_LOAD(); continue;
+        lbl_OP_MOD:     VM_SYNC(); handleMod(ctx); VM_LOAD(); continue;
+        lbl_OP_AND: { RValue _b = VM_POP(), _a = VM_POP(); VM_PUSH(RValue_makeInt32(RValue_toInt32(_a) & RValue_toInt32(_b))); continue; }
+        lbl_OP_OR:  { RValue _b = VM_POP(), _a = VM_POP(); VM_PUSH(RValue_makeInt32(RValue_toInt32(_a) | RValue_toInt32(_b))); continue; }
+        lbl_OP_XOR: { RValue _b = VM_POP(), _a = VM_POP(); VM_PUSH(RValue_makeInt32(RValue_toInt32(_a) ^ RValue_toInt32(_b))); continue; }
+        lbl_OP_SHL: { RValue _b = VM_POP(), _a = VM_POP(); VM_PUSH(RValue_makeInt32(RValue_toInt32(_a) << RValue_toInt32(_b))); continue; }
+        lbl_OP_SHR: { RValue _b = VM_POP(), _a = VM_POP(); VM_PUSH(RValue_makeInt32(RValue_toInt32(_a) >> RValue_toInt32(_b))); continue; }
+        lbl_OP_NEG: { RValue* _p = VM_PEEK(); GMLReal _v = -RValue_toReal(*_p); RValue_free(_p); *_p = RValue_makeReal(_v); continue; }
+        lbl_OP_NOT:     VM_SYNC(); handleNot(ctx, instr); VM_LOAD(); continue;
+        lbl_OP_CONV:    VM_SYNC(); handleConv(ctx, instr); VM_LOAD(); continue;
+        lbl_OP_CMP:     VM_SYNC(); handleCmp(ctx, instr); VM_LOAD(); continue;
+        lbl_OP_DUP:     VM_SYNC(); handleDup(ctx, instr); VM_LOAD(); continue;
+
+        lbl_OP_B:   { ip = instrAddr + instrJumpOffset(instr); continue; }
+        lbl_OP_BT:  { RValue _v = VM_POP(); if (RValue_toInt32(_v) != 0) ip = instrAddr + instrJumpOffset(instr); RValue_free(&_v); continue; }
+        lbl_OP_BF:  { RValue _v = VM_POP(); if (RValue_toInt32(_v) == 0) ip = instrAddr + instrJumpOffset(instr); RValue_free(&_v); continue; }
+
+        lbl_OP_CALL:    VM_SYNC(); handleCall(ctx, instr, extraData); VM_LOAD(); continue;
+        lbl_OP_RET:     { RValue retVal = VM_POP(); VM_SYNC(); return retVal; }
+        lbl_OP_EXIT:    { VM_SYNC(); return RValue_makeUndefined(); }
+
+        lbl_OP_PUSHENV: VM_SYNC(); handlePushEnv(ctx, instr, instrAddr); VM_LOAD(); continue;
+        lbl_OP_POPENV:  VM_SYNC(); handlePopEnv(ctx, instr, instrAddr); VM_LOAD(); continue;
+        lbl_OP_BREAK:   continue;
+        lbl_default:    fprintf(stderr, "VM: Unknown opcode 0x%02X at offset %u\n", opcode, instrAddr); abort();
+#else
+        switch (opcode) {
+            case OP_PUSH:    VM_SYNC(); handlePush(ctx, instr, extraData); VM_LOAD(); break;
+            case OP_PUSHLOC: VM_SYNC(); handlePushLoc(ctx, extraData); VM_LOAD(); break;
+            case OP_PUSHGLB: VM_SYNC(); handlePushGlb(ctx, extraData); VM_LOAD(); break;
+            case OP_PUSHBLTN:VM_SYNC(); handlePushBltn(ctx, instr, extraData); VM_LOAD(); break;
+            case OP_PUSHI:   VM_PUSH(RValue_makeInt32((int16_t)(instr & 0xFFFF))); break;
+            case OP_POP:     VM_SYNC(); handlePop(ctx, instr, extraData); VM_LOAD(); break;
+            case OP_POPZ:    { RValue _pz = VM_POP(); RValue_free(&_pz); break; }
+            case OP_ADD:     VM_SYNC(); handleAdd(ctx); VM_LOAD(); break;
+            case OP_SUB:     VM_SYNC(); handleSub(ctx); VM_LOAD(); break;
+            case OP_MUL:     VM_SYNC(); handleMul(ctx); VM_LOAD(); break;
+            case OP_DIV:     VM_SYNC(); handleDiv(ctx); VM_LOAD(); break;
+            case OP_REM:     VM_SYNC(); handleRem(ctx); VM_LOAD(); break;
+            case OP_MOD:     VM_SYNC(); handleMod(ctx); VM_LOAD(); break;
+            case OP_AND:     VM_SYNC(); handleAnd(ctx); VM_LOAD(); break;
+            case OP_OR:      VM_SYNC(); handleOr(ctx);  VM_LOAD(); break;
+            case OP_XOR:     VM_SYNC(); handleXor(ctx); VM_LOAD(); break;
+            case OP_SHL:     VM_SYNC(); handleShl(ctx); VM_LOAD(); break;
+            case OP_SHR:     VM_SYNC(); handleShr(ctx); VM_LOAD(); break;
+            case OP_NEG:     VM_SYNC(); handleNeg(ctx); VM_LOAD(); break;
+            case OP_NOT:     VM_SYNC(); handleNot(ctx, instr); VM_LOAD(); break;
+            case OP_CONV:    VM_SYNC(); handleConv(ctx, instr); VM_LOAD(); break;
+            case OP_CMP:     VM_SYNC(); handleCmp(ctx, instr); VM_LOAD(); break;
+            case OP_DUP:     VM_SYNC(); handleDup(ctx, instr); VM_LOAD(); break;
+            case OP_B:       ip = instrAddr + instrJumpOffset(instr); break;
+            case OP_BT:      { RValue _v = VM_POP(); if (RValue_toInt32(_v) != 0) ip = instrAddr + instrJumpOffset(instr); RValue_free(&_v); break; }
+            case OP_BF:      { RValue _v = VM_POP(); if (RValue_toInt32(_v) == 0) ip = instrAddr + instrJumpOffset(instr); RValue_free(&_v); break; }
+            case OP_CALL:    VM_SYNC(); handleCall(ctx, instr, extraData); VM_LOAD(); break;
+            case OP_RET:     { RValue retVal = VM_POP(); VM_SYNC(); return retVal; }
+            case OP_EXIT:    VM_SYNC(); return RValue_makeUndefined();
+            case OP_PUSHENV: VM_SYNC(); handlePushEnv(ctx, instr, instrAddr); VM_LOAD(); break;
+            case OP_POPENV:  VM_SYNC(); handlePopEnv(ctx, instr, instrAddr); VM_LOAD(); break;
+            case OP_BREAK:   break;
+            default:
+                fprintf(stderr, "VM: Unknown opcode 0x%02X at offset %u\n", opcode, instrAddr);
+                abort();
+        }
+#endif
+    }
+
+    VM_SYNC();
+    return RValue_makeUndefined();
+
+    #undef VM_SYNC
+    #undef VM_LOAD
+    #undef VM_PUSH
+    #undef VM_POP
+    #undef VM_PEEK
+}
+#else
 static RValue executeLoop(VMContext* ctx) {
     // Cache frequently accessed pointers in local vars for better register allocation on MIPS
     uint8_t* bcBase = ctx->bytecodeBase;
@@ -1934,6 +2078,7 @@ static RValue executeLoop(VMContext* ctx) {
 
     return RValue_makeUndefined();
 }
+#endif // __3DS__
 
 // ===[ Public API ]===
 
