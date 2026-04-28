@@ -277,11 +277,11 @@ elseif(PLATFORM STREQUAL "3ds")
 
     if(DEFINED ENV{DEVKITPRO})
         target_include_directories(butterscotch PRIVATE
-            $ENV{DEVKITPRO}/libctru/include
-            $ENV{DEVKITPRO}/portlibs/3ds/include)
+                $ENV{DEVKITPRO}/libctru/include
+                $ENV{DEVKITPRO}/portlibs/3ds/include)
         target_link_directories(butterscotch PRIVATE
-            $ENV{DEVKITPRO}/libctru/lib
-            $ENV{DEVKITPRO}/portlibs/3ds/lib)
+                $ENV{DEVKITPRO}/libctru/lib
+                $ENV{DEVKITPRO}/portlibs/3ds/lib)
     endif()
 
     # libctru defines __3DS__ via toolchain; we don't need to add it manually.
@@ -297,18 +297,21 @@ elseif(PLATFORM STREQUAL "3ds")
             ctru m)
 
     # Aggressive optimization for the VM interpreter hot path (big rooms, battles).
-    # -ffunction-sections/-fdata-sections + --gc-sections strips dead code, shrinking
-    # the 3dsx and reducing ITCM pressure. -ffast-math is safe for game math (no NaN
-    # handling needed). -fomit-frame-pointer frees r11 as a general-purpose register
-    # on ARM — meaningful on the 3DS' register-starved A9.
+    # -flto and -marm are CRITICAL here to ensure the VM executeLoop keeps its
+    # instruction pointer (IP) and stack pointer (SP) in hardware CPU registers.
     target_compile_options(butterscotch PRIVATE
-        -O3
-        -ffast-math
-        -funroll-loops
-        -fomit-frame-pointer
-        -ffunction-sections
-        -fdata-sections)
-    target_link_options(butterscotch PRIVATE -Wl,--gc-sections)
+            -O3
+            -flto
+            -marm
+            -ffast-math
+            -funroll-loops
+            -fomit-frame-pointer
+            -ffunction-sections
+            -fdata-sections)
+
+    target_link_options(butterscotch PRIVATE
+            -flto
+            -Wl,--gc-sections)
 
     ctr_create_3dsx(butterscotch)
 else()

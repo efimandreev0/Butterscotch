@@ -342,21 +342,18 @@ static Variable* resolveVarDef(VMContext* ctx, uint32_t varRef) {
 // target >= 0 && target < 100000: object index (find first instance of that object, checking parent chains)
 static Instance* findInstanceByTarget(VMContext* ctx, int32_t target) {
     Runner* runner = (Runner*) ctx->runner;
-    int32_t instanceCount = (int32_t) arrlen(runner->instances);
 
     if (target >= 100000) {
-        // Instance ID - find specific instance
-        for (int32_t i = 0; instanceCount > i; i++) {
-            Instance* inst = runner->instances[i];
-            if (inst->active && (int32_t) inst->instanceId == target) return inst;
-        }
+        ptrdiff_t idx = hmgeti(runner->instancesToId, target);
+        if (idx >= 0) return runner->instancesToId[idx].value;
         return nullptr;
     }
 
-    // Object index - find first matching instance, checking parent chains
-    for (int32_t i = 0; instanceCount > i; i++) {
-        Instance* inst = runner->instances[i];
-        if (inst->active && VM_isObjectOrDescendant(ctx->dataWin, inst->objectIndex, target)) return inst;
+    if (target >= 0 && target < runner->instancesByObjMax) {
+        Instance** list = runner->instancesByObjInclParent[target];
+        if (list != nullptr && arrlen(list) > 0) {
+            return list[0];
+        }
     }
     return nullptr;
 }
@@ -1768,6 +1765,281 @@ static const char* opcodeName(uint8_t opcode) {
 // Forward declaration for formatInstruction (defined in disassembler section, used by trace-opcodes)
 static void formatInstruction(VMContext* ctx, const uint8_t* bytecodeBase, uint32_t instrAddr, uint32_t instr, const uint8_t* extraData, char* opcodeStr, size_t opcodeSize, char* operandStr, size_t operandSize, char* commentStr, size_t commentSize);
 
+#ifdef __3DS__
+// ===[ Execution Loop ]===
+
+#if defined(__GNUC__)
+__attribute__((hot, flatten))
+#endif
+static RValue executeLoop(VMContext* ctx) {
+    uint8_t* bcBase = ctx->bytecodeBase;
+    RValue* stackSlots = ctx->stack.slots;
+
+    register uint32_t ip = ctx->ip;
+    register int32_t sp = ctx->stack.top;
+    #define SYNC_STATE()   do { ctx->ip = ip; ctx->stack.top = sp; } while(0)
+    #define UPDATE_STATE() do { ip = ctx->ip; sp = ctx->stack.top; bcBase = ctx->bytecodeBase; } while(0)
+
+#ifdef DISABLE_VM_TRACING
+    #define FAST_PUSH(val) do { stackSlots[sp++] = (val); } while(0)
+    #define FAST_POP()     (stackSlots[--sp])
+#else
+    #define FAST_PUSH(val) do { SYNC_STATE(); stackPush(ctx, val); UPDATE_STATE(); } while(0)
+    #define FAST_POP()     ({ SYNC_STATE(); RValue _v = stackPop(ctx); UPDATE_STATE(); _v; })
+#endif
+    #define FAST_PEEK()    (&stackSlots[sp - 1])
+
+    while (ctx->codeEnd > ip) {
+        uint32_t instrAddr = ip;
+        uint32_t instr = *(uint32_t*)(bcBase + ip);
+        ip += 4;
+
+        const uint8_t* extraData = bcBase + ip;
+
+        if (instr & 0x40000000u) {
+            ip += extraDataSize((instr >> 16) & 0xF);
+        }
+
+        uint8_t opcode = instr >> 24;
+
+#ifdef VM_PSP_TRACE
+        {
+            Runner* _traceRunner = (Runner*)ctx->runner;
+            if (_traceRunner && _traceRunner->traceEnabled &&
+                _traceRunner->traceFile && _traceRunner->tracePath &&
+                ctx->currentCodeName) {
+                fprintf(_traceRunner->traceFile, "%s+0x%04x op=0x%02x sp=%d\n",
+                        ctx->currentCodeName, instrAddr, opcode, sp);
+                fclose(_traceRunner->traceFile);
+                _traceRunner->traceFile = fopen(_traceRunner->tracePath, "a");
+            }
+        }
+#endif
+
+#ifndef DISABLE_VM_TRACING
+        if (shlen(ctx->opcodesToBeTraced) > 0) {
+            if (shgeti(ctx->opcodesToBeTraced, "*") != -1 || shgeti(ctx->opcodesToBeTraced, ctx->currentCodeName) != -1) {
+                char opcodeStr[32], operandStr[256] = "", commentStr[128] = "";
+                formatInstruction(ctx, bcBase, instrAddr, instr, extraData, opcodeStr, sizeof(opcodeStr), operandStr, sizeof(operandStr), commentStr, sizeof(commentStr));
+                if (operandStr[0] != '\0') {
+                    fprintf(stderr, "VM: [%s] @%04X [0x%08X] %s %s [stack=%d]\n", ctx->currentCodeName, instrAddr, instr, opcodeStr, operandStr, sp);
+                } else {
+                    fprintf(stderr, "VM: [%s] @%04X [0x%08X] %s [stack=%d]\n", ctx->currentCodeName, instrAddr, instr, opcodeStr, sp);
+                }
+            }
+        }
+#endif
+
+#if defined(__GNUC__) && !defined(USE_SWITCH_DISPATCH)
+        #define OP_LABEL(op) [op] = &&lbl_##op
+        static const void* dispatchTable[256] = {
+            [0 ... 255] = &&lbl_default,
+            OP_LABEL(OP_CONV), OP_LABEL(OP_MUL), OP_LABEL(OP_DIV),
+            OP_LABEL(OP_REM), OP_LABEL(OP_MOD), OP_LABEL(OP_ADD),
+            OP_LABEL(OP_SUB), OP_LABEL(OP_AND), OP_LABEL(OP_OR),
+            OP_LABEL(OP_XOR), OP_LABEL(OP_NEG), OP_LABEL(OP_NOT),
+            OP_LABEL(OP_SHL), OP_LABEL(OP_SHR), OP_LABEL(OP_CMP),
+            OP_LABEL(OP_POP), OP_LABEL(OP_PUSHI), OP_LABEL(OP_DUP),
+            OP_LABEL(OP_RET), OP_LABEL(OP_EXIT), OP_LABEL(OP_POPZ),
+            OP_LABEL(OP_B), OP_LABEL(OP_BT), OP_LABEL(OP_BF),
+            OP_LABEL(OP_PUSHENV), OP_LABEL(OP_POPENV),
+            OP_LABEL(OP_PUSH), OP_LABEL(OP_PUSHLOC), OP_LABEL(OP_PUSHGLB),
+            OP_LABEL(OP_PUSHBLTN), OP_LABEL(OP_CALL), OP_LABEL(OP_BREAK),
+        };
+        #undef OP_LABEL
+
+        goto *dispatchTable[opcode];
+
+        lbl_OP_PUSH:    { SYNC_STATE(); handlePush(ctx, instr, extraData); UPDATE_STATE(); continue; }
+        lbl_OP_PUSHLOC: { SYNC_STATE(); handlePushLoc(ctx, extraData); UPDATE_STATE(); continue; }
+        lbl_OP_PUSHGLB: { SYNC_STATE(); handlePushGlb(ctx, extraData); UPDATE_STATE(); continue; }
+        lbl_OP_PUSHBLTN:{ SYNC_STATE(); handlePushBltn(ctx, instr, extraData); UPDATE_STATE(); continue; }
+        lbl_OP_POP:     { SYNC_STATE(); handlePop(ctx, instr, extraData); UPDATE_STATE(); continue; }
+
+        lbl_OP_PUSHI:   { FAST_PUSH(RValue_makeInt32((int16_t)(instr & 0xFFFF))); continue; }
+        lbl_OP_POPZ:    { RValue _pz = FAST_POP(); RValue_free(&_pz); continue; }
+
+        lbl_OP_ADD: {
+            RValue _b = FAST_POP();
+            RValue _a = FAST_POP();
+            if (_a.type == RVALUE_INT32 && _b.type == RVALUE_INT32) {
+                FAST_PUSH(RValue_makeInt32(_a.int32 + _b.int32));
+            } else if (_a.type == RVALUE_STRING || _b.type == RVALUE_STRING) {
+                FAST_PUSH(_a); FAST_PUSH(_b);
+                SYNC_STATE(); handleAdd(ctx); UPDATE_STATE();
+            } else {
+                FAST_PUSH(RValue_makeReal(RValue_toReal(_a) + RValue_toReal(_b)));
+                RValue_free(&_a); RValue_free(&_b);
+            }
+            continue;
+        }
+        lbl_OP_SUB: {
+            RValue _b = FAST_POP(), _a = FAST_POP();
+            if (_a.type == RVALUE_INT32 && _b.type == RVALUE_INT32) {
+                FAST_PUSH(RValue_makeInt32(_a.int32 - _b.int32));
+            }
+#ifndef NO_RVALUE_INT64
+            else if (_a.type == RVALUE_INT64 && _b.type == RVALUE_INT64) {
+                FAST_PUSH(RValue_makeInt64(_a.int64 - _b.int64));
+            }
+#endif
+            else {
+                FAST_PUSH(RValue_makeReal(RValue_toReal(_a) - RValue_toReal(_b)));
+                RValue_free(&_a); RValue_free(&_b);
+            }
+            continue;
+        }
+        lbl_OP_MUL: {
+            RValue _b = FAST_POP(), _a = FAST_POP();
+            if (_a.type == RVALUE_INT32 && _b.type == RVALUE_INT32) {
+                FAST_PUSH(RValue_makeInt32(_a.int32 * _b.int32));
+            } else if (_a.type == RVALUE_STRING) {
+                FAST_PUSH(_a); FAST_PUSH(_b);
+                SYNC_STATE(); handleMul(ctx); UPDATE_STATE();
+            } else {
+                FAST_PUSH(RValue_makeReal(RValue_toReal(_a) * RValue_toReal(_b)));
+                RValue_free(&_a); RValue_free(&_b);
+            }
+            continue;
+        }
+        lbl_OP_DIV: {
+            RValue _b = FAST_POP(), _a = FAST_POP();
+            GMLReal divisor = RValue_toReal(_b);
+            if (divisor != 0.0) {
+                FAST_PUSH(RValue_makeReal(RValue_toReal(_a) / divisor));
+                RValue_free(&_a); RValue_free(&_b);
+            } else {
+                FAST_PUSH(_a); FAST_PUSH(_b);
+                SYNC_STATE(); handleDiv(ctx); UPDATE_STATE();
+            }
+            continue;
+        }
+        lbl_OP_REM:     { SYNC_STATE(); handleRem(ctx); UPDATE_STATE(); continue; }
+        lbl_OP_MOD:     { SYNC_STATE(); handleMod(ctx); UPDATE_STATE(); continue; }
+        lbl_OP_AND:     { RValue _b = FAST_POP(), _a = FAST_POP(); FAST_PUSH(RValue_makeInt32(RValue_toInt32(_a) & RValue_toInt32(_b))); continue; }
+        lbl_OP_OR:      { RValue _b = FAST_POP(), _a = FAST_POP(); FAST_PUSH(RValue_makeInt32(RValue_toInt32(_a) | RValue_toInt32(_b))); continue; }
+        lbl_OP_XOR:     { RValue _b = FAST_POP(), _a = FAST_POP(); FAST_PUSH(RValue_makeInt32(RValue_toInt32(_a) ^ RValue_toInt32(_b))); continue; }
+        lbl_OP_SHL:     { RValue _b = FAST_POP(), _a = FAST_POP(); FAST_PUSH(RValue_makeInt32(RValue_toInt32(_a) << RValue_toInt32(_b))); continue; }
+        lbl_OP_SHR:     { RValue _b = FAST_POP(), _a = FAST_POP(); FAST_PUSH(RValue_makeInt32(RValue_toInt32(_a) >> RValue_toInt32(_b))); continue; }
+        lbl_OP_NEG:     { RValue* _p = FAST_PEEK(); GMLReal _v = -RValue_toReal(*_p); RValue_free(_p); *_p = RValue_makeReal(_v); continue; }
+        lbl_OP_NOT:     { SYNC_STATE(); handleNot(ctx, instr); UPDATE_STATE(); continue; }
+        lbl_OP_CONV:    { SYNC_STATE(); handleConv(ctx, instr); UPDATE_STATE(); continue; }
+        lbl_OP_CMP:     { SYNC_STATE(); handleCmp(ctx, instr); UPDATE_STATE(); continue; }
+        lbl_OP_DUP:     { SYNC_STATE(); handleDup(ctx, instr); UPDATE_STATE(); continue; }
+
+        lbl_OP_B:   { ip = instrAddr + instrJumpOffset(instr); continue; }
+        lbl_OP_BT:  { RValue _v = FAST_POP(); if (RValue_toInt32(_v) != 0) ip = instrAddr + instrJumpOffset(instr); RValue_free(&_v); continue; }
+        lbl_OP_BF:  { RValue _v = FAST_POP(); if (RValue_toInt32(_v) == 0) ip = instrAddr + instrJumpOffset(instr); RValue_free(&_v); continue; }
+
+        lbl_OP_CALL:    { SYNC_STATE(); handleCall(ctx, instr, extraData); UPDATE_STATE(); continue; }
+        lbl_OP_RET:     { RValue retVal = FAST_POP(); SYNC_STATE(); return retVal; }
+        lbl_OP_EXIT:    { SYNC_STATE(); return RValue_makeUndefined(); }
+        lbl_OP_PUSHENV: { SYNC_STATE(); handlePushEnv(ctx, instr, instrAddr); UPDATE_STATE(); continue; }
+        lbl_OP_POPENV:  { SYNC_STATE(); handlePopEnv(ctx, instr, instrAddr); UPDATE_STATE(); continue; }
+        lbl_OP_BREAK:   continue;
+        lbl_default:    fprintf(stderr, "VM: Unknown opcode 0x%02X at offset %u\n", opcode, instrAddr); abort();
+
+#else
+        switch (opcode) {
+            case OP_PUSH:    { SYNC_STATE(); handlePush(ctx, instr, extraData); UPDATE_STATE(); break; }
+            case OP_PUSHLOC: { SYNC_STATE(); handlePushLoc(ctx, extraData); UPDATE_STATE(); break; }
+            case OP_PUSHGLB: { SYNC_STATE(); handlePushGlb(ctx, extraData); UPDATE_STATE(); break; }
+            case OP_PUSHBLTN:{ SYNC_STATE(); handlePushBltn(ctx, instr, extraData); UPDATE_STATE(); break; }
+            case OP_PUSHI:   { FAST_PUSH(RValue_makeInt32((int16_t)(instr & 0xFFFF))); break; }
+            case OP_POP:     { SYNC_STATE(); handlePop(ctx, instr, extraData); UPDATE_STATE(); break; }
+            case OP_POPZ:    { RValue _pz = FAST_POP(); RValue_free(&_pz); break; }
+            case OP_ADD: {
+                RValue _b = FAST_POP(), _a = FAST_POP();
+                if (_a.type == RVALUE_INT32 && _b.type == RVALUE_INT32) {
+                    FAST_PUSH(RValue_makeInt32(_a.int32 + _b.int32));
+                } else if (_a.type == RVALUE_STRING || _b.type == RVALUE_STRING) {
+                    FAST_PUSH(_a); FAST_PUSH(_b);
+                    SYNC_STATE(); handleAdd(ctx); UPDATE_STATE();
+                } else {
+                    FAST_PUSH(RValue_makeReal(RValue_toReal(_a) + RValue_toReal(_b)));
+                    RValue_free(&_a); RValue_free(&_b);
+                }
+                break;
+            }
+            case OP_SUB: {
+                RValue _b = FAST_POP(), _a = FAST_POP();
+                if (_a.type == RVALUE_INT32 && _b.type == RVALUE_INT32) {
+                    FAST_PUSH(RValue_makeInt32(_a.int32 - _b.int32));
+                }
+#ifndef NO_RVALUE_INT64
+                else if (_a.type == RVALUE_INT64 && _b.type == RVALUE_INT64) {
+                    FAST_PUSH(RValue_makeInt64(_a.int64 - _b.int64));
+                }
+#endif
+                else {
+                    FAST_PUSH(RValue_makeReal(RValue_toReal(_a) - RValue_toReal(_b)));
+                    RValue_free(&_a); RValue_free(&_b);
+                }
+                break;
+            }
+            case OP_MUL: {
+                RValue _b = FAST_POP(), _a = FAST_POP();
+                if (_a.type == RVALUE_INT32 && _b.type == RVALUE_INT32) {
+                    FAST_PUSH(RValue_makeInt32(_a.int32 * _b.int32));
+                } else if (_a.type == RVALUE_STRING) {
+                    FAST_PUSH(_a); FAST_PUSH(_b);
+                    SYNC_STATE(); handleMul(ctx); UPDATE_STATE();
+                } else {
+                    FAST_PUSH(RValue_makeReal(RValue_toReal(_a) * RValue_toReal(_b)));
+                    RValue_free(&_a); RValue_free(&_b);
+                }
+                break;
+            }
+            case OP_DIV: {
+                RValue _b = FAST_POP(), _a = FAST_POP();
+                GMLReal divisor = RValue_toReal(_b);
+                if (divisor != 0.0) {
+                    FAST_PUSH(RValue_makeReal(RValue_toReal(_a) / divisor));
+                    RValue_free(&_a); RValue_free(&_b);
+                } else {
+                    FAST_PUSH(_a); FAST_PUSH(_b);
+                    SYNC_STATE(); handleDiv(ctx); UPDATE_STATE();
+                }
+                break;
+            }
+            case OP_REM:     { SYNC_STATE(); handleRem(ctx); UPDATE_STATE(); break; }
+            case OP_MOD:     { SYNC_STATE(); handleMod(ctx); UPDATE_STATE(); break; }
+            case OP_AND:     { RValue _b = FAST_POP(), _a = FAST_POP(); FAST_PUSH(RValue_makeInt32(RValue_toInt32(_a) & RValue_toInt32(_b))); break; }
+            case OP_OR:      { RValue _b = FAST_POP(), _a = FAST_POP(); FAST_PUSH(RValue_makeInt32(RValue_toInt32(_a) | RValue_toInt32(_b))); break; }
+            case OP_XOR:     { RValue _b = FAST_POP(), _a = FAST_POP(); FAST_PUSH(RValue_makeInt32(RValue_toInt32(_a) ^ RValue_toInt32(_b))); break; }
+            case OP_SHL:     { RValue _b = FAST_POP(), _a = FAST_POP(); FAST_PUSH(RValue_makeInt32(RValue_toInt32(_a) << RValue_toInt32(_b))); break; }
+            case OP_SHR:     { RValue _b = FAST_POP(), _a = FAST_POP(); FAST_PUSH(RValue_makeInt32(RValue_toInt32(_a) >> RValue_toInt32(_b))); break; }
+            case OP_NEG:     { RValue* _p = FAST_PEEK(); GMLReal _v = -RValue_toReal(*_p); RValue_free(_p); *_p = RValue_makeReal(_v); break; }
+            case OP_NOT:     { SYNC_STATE(); handleNot(ctx, instr); UPDATE_STATE(); break; }
+            case OP_CONV:    { SYNC_STATE(); handleConv(ctx, instr); UPDATE_STATE(); break; }
+            case OP_CMP:     { SYNC_STATE(); handleCmp(ctx, instr); UPDATE_STATE(); break; }
+            case OP_DUP:     { SYNC_STATE(); handleDup(ctx, instr); UPDATE_STATE(); break; }
+            case OP_B:       { ip = instrAddr + instrJumpOffset(instr); break; }
+            case OP_BT:      { RValue _v = FAST_POP(); if (RValue_toInt32(_v) != 0) ip = instrAddr + instrJumpOffset(instr); RValue_free(&_v); break; }
+            case OP_BF:      { RValue _v = FAST_POP(); if (RValue_toInt32(_v) == 0) ip = instrAddr + instrJumpOffset(instr); RValue_free(&_v); break; }
+            case OP_CALL:    { SYNC_STATE(); handleCall(ctx, instr, extraData); UPDATE_STATE(); break; }
+            case OP_RET:     { RValue retVal = FAST_POP(); SYNC_STATE(); return retVal; }
+            case OP_EXIT:    { SYNC_STATE(); return RValue_makeUndefined(); }
+            case OP_PUSHENV: { SYNC_STATE(); handlePushEnv(ctx, instr, instrAddr); UPDATE_STATE(); break; }
+            case OP_POPENV:  { SYNC_STATE(); handlePopEnv(ctx, instr, instrAddr); UPDATE_STATE(); break; }
+            case OP_BREAK:   break;
+            default:
+                fprintf(stderr, "VM: Unknown opcode 0x%02X at offset %u\n", opcode, instrAddr);
+                abort();
+        }
+#endif
+    }
+
+    SYNC_STATE();
+    return RValue_makeUndefined();
+
+    #undef SYNC_STATE
+    #undef UPDATE_STATE
+    #undef FAST_PUSH
+    #undef FAST_POP
+    #undef FAST_PEEK
+}
+#else
 static RValue executeLoop(VMContext* ctx) {
     // Cache frequently accessed pointers in local vars for better register allocation on MIPS
     uint8_t* bcBase = ctx->bytecodeBase;
@@ -1934,7 +2206,7 @@ static RValue executeLoop(VMContext* ctx) {
 
     return RValue_makeUndefined();
 }
-
+#endif
 // ===[ Public API ]===
 
 VMContext* VM_create(DataWin* dataWin) {

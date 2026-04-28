@@ -75,7 +75,8 @@ int main(int argc, char* argv[]) {
     gfxSet3D(true);
 
     APT_SetAppCpuTimeLimit(30);
-    osSetSpeedupEnable(true);
+    //osSetSpeedupEnable(true);
+    //TODO: Uncomment in release
 
     fprintf(stderr, "Butterscotch 3DS booting...\n");
     fprintf(stderr, "Loading %s\n", DATA_WIN_PATH);
