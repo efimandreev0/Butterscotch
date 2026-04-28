@@ -328,7 +328,7 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
         renderer->vtable->endFrame(renderer);
         novaSwapBuffers();
         u64 frameDuration = osGetTime() - frameStart;
-        if (frameDuration > 34) {
+        if (frameDuration > 200) {
             fprintf(stderr, "statter WARNING NAHUY: Frame took %llu ms!\n", frameDuration);
         }
         if (frameCounter % 300 == 0) {

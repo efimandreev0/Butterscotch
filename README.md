@@ -6,7 +6,7 @@
 </p>
 
 > [!IMPORTANT]  
-> This was created using Generative AI.
+> This was created with Generative AI usage like butterscotch and cinnamon.
 
 > [!IMPORTANT]  
 > Butterscotch is still VERY early in development and it is NOT that good yet.
