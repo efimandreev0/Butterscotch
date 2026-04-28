@@ -1,12 +1,10 @@
 #include "ctr_file_system.h"
-#include "utils.h" // safeMalloc, safeCalloc, safeStrdup и т.д.
+#include "utils.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-
-// ===[ Helpers ]===
 
 static char* buildFullPath(N3dsFileSystem* fs, const char* relativePath) {
     if(strncmp(relativePath, fs->basePath, strlen(fs->basePath)) == 0) {
@@ -23,8 +21,6 @@ static char* buildFullPath(N3dsFileSystem* fs, const char* relativePath) {
 
     return fullPath;
 }
-
-// ===[ Vtable Implementations ]===
 
 static char* n3dsResolvePath(FileSystem* fs, const char* relativePath) {
     return buildFullPath((N3dsFileSystem*) fs, relativePath);
@@ -78,8 +74,6 @@ static bool n3dsDeleteFile(FileSystem* fs, const char* relativePath) {
     return result == 0;
 }
 
-// ===[ Vtable ]===
-
 static FileSystemVtable n3dsFileSystemVtable = {
     .resolvePath = n3dsResolvePath,
     .fileExists = n3dsFileExists,
@@ -87,8 +81,6 @@ static FileSystemVtable n3dsFileSystemVtable = {
     .writeFileText = n3dsWriteFileText,
     .deleteFile = n3dsDeleteFile,
 };
-
-// ===[ Lifecycle ]===
 
 N3dsFileSystem* N3dsFileSystem_create(const char* dataWinPath) {
     N3dsFileSystem* fs = safeCalloc(1, sizeof(N3dsFileSystem));

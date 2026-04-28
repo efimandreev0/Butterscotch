@@ -1,4 +1,3 @@
-// --- START OF FILE ctr_renderer.h ---
 #pragma once
 
 #include "renderer.h"
@@ -6,8 +5,6 @@
 
 #define CTR_MAX_CHUNKS_X 4
 #define CTR_MAX_CHUNKS_Y 4
-
-// Данные отдельного куска текстуры (чанка)
 typedef struct {
     GLuint tex;
     int srcX;
@@ -28,8 +25,6 @@ typedef struct {
     int chunksY;
 
     CtrTpagChunk chunks[CTR_MAX_CHUNKS_X][CTR_MAX_CHUNKS_Y];
-
-    // For LRU memory-pressure eviction
     uint32_t lastFrameUsed;
 } CtrTpagData;
 
@@ -54,4 +49,3 @@ typedef struct {
 
 Renderer* CtrRenderer_create(void);
 void CtrRenderer_prefetchSprite(Renderer* renderer, int32_t spriteIndex);
-// --- END OF FILE ctr_renderer.h ---

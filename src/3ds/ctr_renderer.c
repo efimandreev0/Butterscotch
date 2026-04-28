@@ -1,4 +1,3 @@
-// --- START OF FILE ctr_renderer.c ---
 #include "ctr_renderer.h"
 #include "matrix_math.h"
 #include "text_utils.h"
@@ -16,7 +15,7 @@
 #define CTR_MAX_CIRCLE_SEGMENTS 128
 #define CTR_MAX_ROUNDRECT_CORNER_SEGMENTS 64
 #define CTR_MAX_ROUNDRECT_POINTS (CTR_MAX_ROUNDRECT_CORNER_SEGMENTS * 4 + 1)
-#define ATLAS_MAGIC 0x534C5441 // 'ATLS'
+#define ATLAS_MAGIC 0x534C5441
 
 typedef struct {
     uint32_t magic;
@@ -116,10 +115,6 @@ static void ctrBuildFullTextureCache(CtrRenderer* gl) {
     FILE* outFlag = fopen(flagPath, "w");
     if (outFlag) { fputs("READY", outFlag); fclose(outFlag); }
 }
-
-// ---------------------------------------------------------
-// БАТЧИНГ И ОТРИСОВКА ПРИМИТИВОВ
-// ---------------------------------------------------------
 static void ctrFlushBatch(CtrRenderer* gl) {
     if (gl->quadBatchCount == 0 || gl->quadBatchTexture == 0) return;
     glBindTexture(GL_TEXTURE_2D, gl->quadBatchTexture);
@@ -175,10 +170,6 @@ static void ctrAppendArcPoints(float* outX, float* outY, int32_t* count, float c
         (*count)++;
     }
 }
-
-// ---------------------------------------------------------
-// ЖИЗНЕННЫЙ ЦИКЛ РЕНДЕРЕРА
-// ---------------------------------------------------------
 static void ctrInit(Renderer* renderer, DataWin* dataWin) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
     renderer->dataWin = dataWin;
@@ -244,27 +235,18 @@ static void ctrBeginView(Renderer* renderer, int32_t viewX, int32_t viewY, int32
     CtrRenderer* gl = (CtrRenderer*) renderer;
     ctrFlushBatch(gl);
     glBindTexture(GL_TEXTURE_2D, 0);
-
-    // 1. Высчитываем честный масштаб без растягивания (Letterboxing)
     float scaleX = (float)gl->windowW / (float)gl->gameW;
     float scaleY = (float)gl->windowH / (float)gl->gameH;
     float scale = fminf(scaleX, scaleY);
 
     int32_t vpW = (int32_t)(gl->gameW * scale);
     int32_t vpH = (int32_t)(gl->gameH * scale);
-
-    // 2. Центрируем по экрану (добавляем черные полосы)
     int32_t vpX = (gl->windowW - vpW) / 2;
     int32_t vpY = (gl->windowH - vpH) / 2;
-
-    // ФИКС СЕТКИ: Игнорируем portX/portY. Разрешаем View рисоваться
-    // на всей доступной площади игры, чтобы ничего не обрезалось!
     glViewport(vpX, vpY, vpW, vpH);
 
     Matrix4f projection;
     Matrix4f_identity(&projection);
-
-    // Маппим координаты камеры на наш экран
     Matrix4f_ortho(&projection, (float)viewX, (float)(viewX + viewW), (float)(viewY + viewH), (float)viewY, -1.0f, 1.0f);
 
     if (viewAngle != 0.0f) {
@@ -289,10 +271,6 @@ static void ctrBeginView(Renderer* renderer, int32_t viewX, int32_t viewY, int32
 static void ctrEndView(Renderer* renderer) {}
 static void ctrEndFrame(Renderer* renderer) { ctrFlushBatch((CtrRenderer*) renderer); g_frameCounter++; }
 static void ctrRendererFlush(Renderer* renderer) { ctrFlushBatch((CtrRenderer*) renderer); }
-
-// ---------------------------------------------------------
-// УПРАВЛЕНИЕ РЕСУРСАМИ (БЫСТРАЯ НАРЕЗКА ИЗ ОЗУ И ПРЯМО С ДИСКА)
-// ---------------------------------------------------------
 
 static void extract_tpag_from_ram(CtrRenderer* gl, DataWin* dw, uint32_t tId, uint16_t* atlas_pixels, int atlas_w, int atlas_h) {
     TexturePageItem* item = &dw->tpag.items[tId];
@@ -392,24 +370,17 @@ static void extract_tpag_direct_from_file(CtrRenderer* gl, DataWin* dw, uint32_t
     if (tpag->chunksY > CTR_MAX_CHUNKS_Y) tpag->chunksY = CTR_MAX_CHUNKS_Y;
 
     int header_size = sizeof(AtlasHeader);
-
-    // ОПТИМИЗАЦИЯ ЗАГРУЗОК
     size_t strip_rows = (size_t)extH;
     if ((int)(extY + (int)strip_rows) > atlas_h) strip_rows = (size_t)(atlas_h - extY);
     size_t strip_bytes = (size_t)atlas_w * strip_rows * 2;
-
-    // === [ ИЗМЕНЕННЫЙ БЛОК: УМНОЕ ВЫДЕЛЕНИЕ ПАМЯТИ ] ===
     uint16_t* strip = NULL;
     bool strip_is_linear = false;
 
     if (extY >= 0 && strip_rows > 0) {
-        // 1. Пробуем взять из быстрой LINEAR RAM
         strip = (uint16_t*) linearAlloc(strip_bytes);
         if (strip) {
             strip_is_linear = true;
         }
-        // 2. Если LINEAR забита (фоллбэк), временно берем из обычного HEAP!
-        // Ограничиваем 2.5 МБ, чтобы случайно не выйти за лимит в 15МБ.
         else if (strip_bytes <= 2500 * 1024) {
             strip = (uint16_t*) malloc(strip_bytes);
             strip_is_linear = false;
@@ -424,7 +395,6 @@ static void extract_tpag_direct_from_file(CtrRenderer* gl, DataWin* dw, uint32_t
             strip = NULL;
         }
     }
-    // ===================================================
 
     for (int cy = 0; cy < tpag->chunksY; cy++) {
         for (int cx = 0; cx < tpag->chunksX; cx++) {
@@ -440,7 +410,6 @@ static void extract_tpag_direct_from_file(CtrRenderer* gl, DataWin* dw, uint32_t
             if (!sprite_pixels) continue;
 
             if (strip) {
-                // Быстрый путь — выдираем чанк из уже прочитанного strip'а в RAM.
                 for (int y = 0; y < chunk->height; y++) {
                     int local_y = chunk->srcY + y;
                     if (local_y < 0 || (size_t)local_y >= strip_rows) continue;
@@ -454,7 +423,6 @@ static void extract_tpag_direct_from_file(CtrRenderer* gl, DataWin* dw, uint32_t
                            (size_t)copy_w * 2);
                 }
             } else {
-                // Очень медленный фоллбэк (если и Heap кончился) — построчно с диска.
                 for (int y = 0; y < chunk->height; y++) {
                     int sy = extY + chunk->srcY + y;
                     if (sy < 0 || sy >= atlas_h) continue;
@@ -475,52 +443,30 @@ static void extract_tpag_direct_from_file(CtrRenderer* gl, DataWin* dw, uint32_t
             free(sprite_pixels);
         }
     }
-
-    // === [ ИЗМЕНЕННЫЙ БЛОК: ПРАВИЛЬНОЕ ОСВОБОЖДЕНИЕ ] ===
     if (strip) {
         if (strip_is_linear) linearFree(strip);
         else free(strip);
     }
-    // ====================================================
     tpag->isLoaded = true;
 }
 static void ctrSet3DDepthOffset(Renderer* renderer, float gmDepth) {
     CtrRenderer* gl = (CtrRenderer*)renderer;
-
-    // ВАЖНО: Сбрасываем отрисовку всего, что было на предыдущем слое!
     ctrFlushBatch(gl);
-
-    // После фикса в NovaGL значения trans измеряются в NDC (clip-space):
-    //   |z3D| = 0.10 ≈ 20 пикселей сдвига глаз на 400-px экране,
-    //   |z3D| = 0.05 ≈ 10 пикселей.
-    // Положительное z3D — объект уходит вглубь экрана.
-    // Отрицательное z3D — объект "выпирает" из экрана (negative parallax).
-    //
-    // GM Depth: 1000000 = задний фон, -1000000 = передний UI.
     float z3D = 0.0f;
 
     if (gmDepth >= 1000000.0f) {
-        // Фоны — лёгкое углубление.
         z3D = 0.025f;
     } else if (gmDepth <= -100000.0f) {
-        // UI/диалоги/текст — выпирают, но в комфортных пределах.
         z3D = -0.04f;
     } else {
-        // Игровые объекты (тайлы, игрок). GM depth обычно [-1000..+1000].
         z3D = gmDepth / 25000.0f;
-
-        // Жёсткий лимит — на полном слайдере глаза не должны вытекать.
         if (z3D >  0.025f) z3D =  0.025f;
         if (z3D < -0.025f) z3D = -0.025f;
     }
 
     novaSet3DDepth(z3D);
 }
-// Минимальный порог, при котором выгоднее одним fread'ом прочитать всю
-// страницу атласа целиком, чем делать N "ленточных" fread'ов на отдельные tpag'и.
 #define CTR_PAGE_BATCH_THRESHOLD 4
-
-// Добавь статический буфер (он живет в BSS, не трогает кучу и стек)
 static __attribute__((aligned(8))) char g_dynamic_io_buf[64 * 1024];
 
 static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
@@ -541,8 +487,6 @@ static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
 
     FILE* f = fopen(path, "rb");
     if (!f) return;
-
-    // Используем НАШ статический буфер. Больше никаких утечек и фрагментации от libc!
     setvbuf(f, g_dynamic_io_buf, _IOFBF, sizeof(g_dynamic_io_buf));
 
     AtlasHeader hdr;
@@ -550,8 +494,6 @@ static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
 
     if (pendingOnPage >= CTR_PAGE_BATCH_THRESHOLD) {
         size_t data_size = (size_t)hdr.width * (size_t)hdr.height * 2;
-
-        // ФИКС КРАША У САНСА: Используем Linear RAM вместо стандартного Heap для гигантского буфера!
         uint16_t* atlas_pixels = (uint16_t*) linearAlloc(data_size);
 
         if (atlas_pixels) {
@@ -563,7 +505,6 @@ static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
                     extract_tpag_from_ram(gl, dw, tId, atlas_pixels, hdr.width, hdr.height);
                 }
             }
-            // Освобождаем Linear RAM
             linearFree(atlas_pixels);
         } else {
             extract_tpag_direct_from_file(gl, dw, tpagIndex, f, hdr.width, hdr.height);
@@ -590,27 +531,11 @@ static void markSpriteResident(CtrRenderer* gl, DataWin* dw, int32_t spriteIndex
 static void markBackgroundResident(CtrRenderer* gl, DataWin* dw, int32_t bgndIndex) {
     if (bgndIndex >= 0 && (uint32_t) bgndIndex < dw->bgnd.count) markTpagOffsetResident(gl, dw, dw->bgnd.backgrounds[bgndIndex].textureOffset);
 }
-
-// Лёгкий префетч: только метим спрайт как резидентный, реальная загрузка
-// случится лениво на первый ctrDrawTpagRegion. Никаких "соседних ID" —
-// раньше мы превентивно тянули по 25 спрайтов на каждый change, и это
-// и было главной причиной 7-секундных фризов на смене комнаты.
 void CtrRenderer_prefetchSprite(Renderer* renderer, int32_t spriteIndex) {
     if (!renderer || !renderer->dataWin) return;
     CtrRenderer* gl = (CtrRenderer*) renderer;
     markSpriteResident(gl, renderer->dataWin, spriteIndex);
 }
-
-// При смене комнаты НЕ читаем диск и НЕ выгружаем сразу всё подряд.
-// Просто переразмечаем "это нужно держать в VRAM". Реальная загрузка
-// случится лениво в loadDynamicSprite на первый draw, и только для
-// тех tpag'ов, которые комната действительно рисует — а не для всего,
-// что теоретически мог бы заспавнить любой объект из room->gameObjects.
-//
-// Резидентные перетекают между комнатами: если вернулись в уже
-// посещённую комнату — почти всё ещё в VRAM, переход моментальный.
-// Когда LINEAR RAM кончается, ctrEvictLruIfPressure снесёт
-// самые старые НЕ-резидентные tpag'и.
 static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
     DataWin* dw = renderer->dataWin;
@@ -633,9 +558,6 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
         if (room->tiles[i].useSpriteDefinition && bgIdx >= 0) markSpriteResident(gl, dw, bgIdx);
         else if (bgIdx >= 0) markBackgroundResident(gl, dw, bgIdx);
     }
-
-    // Спрайты объектов комнаты — без раздутия "соседей". Если объект реально
-    // зариcуется, его tpag будет лениво подтянут с диска.
     for (uint32_t i = 0; i < room->gameObjectCount; i++) {
         int32_t objIdx = room->gameObjects[i].objectDefinition;
         if (objIdx >= 0 && (uint32_t) objIdx < dw->objt.count) {
@@ -646,8 +568,6 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
             }
         }
     }
-    // === НОВЫЙ БАТЧ-ЛОАДЕР ТЕКСТУР ===
-    // Группируем запросы по страницам (атласам), чтобы открывать каждый файл только ОДИН раз!
     bool pageNeedsLoad[256] = {false};
     for (uint32_t i = 0; i < gl->tpagCount; i++) {
         if (gl->tpags[i].keepResident && !gl->tpags[i].isLoaded) {
@@ -669,18 +589,15 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
 
         AtlasHeader hdr;
         if (fread(&hdr, sizeof(hdr), 1, f) == 1 && hdr.magic == ATLAS_MAGIC) {
-            // Файл открыт. Вытаскиваем из него ВСЕ нужные спрайты разом.
             for (uint32_t tId = 0; tId < gl->tpagCount; tId++) {
                 if (dw->tpag.items[tId].texturePageId == pid && gl->tpags[tId].keepResident && !gl->tpags[tId].isLoaded) {
                     extract_tpag_direct_from_file(gl, dw, tId, f, hdr.width, hdr.height);
                 }
             }
         }
-        fclose(f); // Закрываем один раз на атлас, а не 100 раз
+        fclose(f);
     }
 }
-
-// Математическая интерполяция суб-квадрата
 static void lerp2D_quad(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3, float tx, float ty, float* outX, float* outY) {
     float topX = x0 + (x1 - x0) * tx;
     float topY = y0 + (y1 - y0) * tx;
@@ -689,10 +606,6 @@ static void lerp2D_quad(float x0, float y0, float x1, float y1, float x2, float 
     *outX = topX + (botX - topX) * ty;
     *outY = topY + (botY - topY) * ty;
 }
-
-// ---------------------------------------------------------
-// ФУНКЦИИ ОТРИСОВКИ (2D API)
-// ---------------------------------------------------------
 
 static void ctrDrawTpagRegion(CtrRenderer* gl, uint32_t tpagIndex, float srcOffX, float srcOffY, float srcW, float srcH, float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     if (tpagIndex >= gl->tpagCount) return;
@@ -704,8 +617,6 @@ static void ctrDrawTpagRegion(CtrRenderer* gl, uint32_t tpagIndex, float srcOffX
     CtrTpagData* tpagData = &gl->tpags[tpagIndex];
 
     if (srcW <= 0.0f || srcH <= 0.0f) return;
-
-    // Зона, которую запрашивает GameMaker внутри огромного спрайта
     float reqL = srcOffX;
     float reqT = srcOffY;
     float reqR = srcOffX + srcW;
@@ -719,29 +630,19 @@ static void ctrDrawTpagRegion(CtrRenderer* gl, uint32_t tpagIndex, float srcOffX
             float chunkT = (float)chunk->srcY;
             float chunkR = chunkL + (float)chunk->width;
             float chunkB = chunkT + (float)chunk->height;
-
-            // Находим пересечение запрошенной зоны и этого чанка
             float drawL = fmaxf(reqL, chunkL);
             float drawT = fmaxf(reqT, chunkT);
             float drawR = fminf(reqR, chunkR);
             float drawB = fminf(reqB, chunkB);
-
-            // Если не пересекаются, пропускаем этот чанк
             if (drawL >= drawR || drawT >= drawB) continue;
-
-            // Считаем UV-координаты конкретно для этого чанка (0.0 - 1.0)
             float u0 = (drawL - chunkL) / (float)chunk->potW;
             float v0 = (drawT - chunkT) / (float)chunk->potH;
             float u1 = (drawR - chunkL) / (float)chunk->potW;
             float v1 = (drawB - chunkT) / (float)chunk->potH;
-
-            // Высчитываем проценты [0.0 - 1.0], чтобы понять, где рисовать на экране
             float tL = (drawL - reqL) / srcW;
             float tR = (drawR - reqL) / srcW;
             float tT = (drawT - reqT) / srcH;
             float tB = (drawB - reqT) / srcH;
-
-            // Интерполируем координаты экрана под этот конкретный кусок текстуры
             float px0, py0, px1, py1, px2, py2, px3, py3;
             lerp2D_quad(x0,y0, x1,y1, x2,y2, x3,y3, tL, tT, &px0, &py0);
             lerp2D_quad(x0,y0, x1,y1, x2,y2, x3,y3, tR, tT, &px1, &py1);
@@ -982,10 +883,6 @@ static void ctrDrawRoundrect(Renderer* renderer, float x1, float y1, float x2, f
         ctrPushTriangleSolid(gl, centerX, centerY, pX[i], pY[i], pX[next], pY[next], r, g, b, a);
     }
 }
-
-// ---------------------------------------------------------
-// ОТРИСОВКА ТЕКСТА
-// ---------------------------------------------------------
 typedef struct { Font* font; uint32_t tpagIndex; } CtrFontState;
 static bool ctrResolveFontState(CtrRenderer* gl, DataWin* dw, Font* font, CtrFontState* state) {
     state->font = font; state->tpagIndex = 0;
@@ -1021,8 +918,6 @@ static void ctrDrawText(Renderer* renderer, const char* text, float x, float y, 
     char* processed = TextUtils_preprocessGmlText(text);
     int32_t textLen = (int32_t) strlen(processed);
     if (textLen == 0) { free(processed); return; }
-
-    // ФИКС: Округляем стартовую позицию, чтобы текст не мылился при дрожании
     x = roundf(x);
     y = roundf(y);
 
@@ -1079,8 +974,6 @@ static void ctrDrawText(Renderer* renderer, const char* text, float x, float y, 
             Matrix4f_transformPoint(&transform, localX1, localY0, &px1, &py1);
             Matrix4f_transformPoint(&transform, localX1, localY1, &px2, &py2);
             Matrix4f_transformPoint(&transform, localX0, localY1, &px3, &py3);
-
-            // ФИКС: Вернули просто srcX и srcY, потому что текстуры шрифтов на 3DS нарезаны локально!
             ctrDrawTpagRegion(gl, tpagIndex,
                 srcX,
                 srcY,
@@ -1129,4 +1022,3 @@ Renderer* CtrRenderer_create(void) {
     gl->base.drawColor = 0xFFFFFF; gl->base.drawAlpha = 1.0f; gl->base.drawFont = -1;
     return (Renderer*) gl;
 }
-// --- END OF FILE ctr_renderer.c ---

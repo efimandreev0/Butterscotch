@@ -1,6 +1,3 @@
-// 3DS entry point for Butterscotch running on NovaGL (OpenGL ES 1.1 -> Citro3D).
-// Renders to the top screen (400x240). Bottom screen is cleared.
-// data.win is loaded from sdmc:/3ds/butterscotch/data.win.
 
 #include <3ds.h>
 #include <malloc.h>
@@ -101,23 +98,19 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
                 .parseGen8 = true,
                 .parseTpag = true,
                 .parseTxtr = true,
-                // PNG-блобы читаем стримингом с диска при декоде — не держим
-                // все PNG в ОЗУ одновременно (большой пик на 3DS).
                 .skipTextureBlobData = true,
             }
         );
 
         if (cacheWin != NULL) {
             Renderer* tempRenderer = CtrRenderer_create();
-            tempRenderer->vtable->init(tempRenderer, cacheWin); // Триггерит создание кэша
+            tempRenderer->vtable->init(tempRenderer, cacheWin);
             tempRenderer->vtable->destroy(tempRenderer);
             DataWin_free(cacheWin);
             fprintf(stderr, "=== STAGE 1 COMPLETE ===\n");
         } else {
             fprintf(stderr, "WARNING: Stage 1 Cache pass failed to parse data.win!\n");
         }
-
-        // После Stage 1 флаг уже должен существовать.
         FILE* cacheFlagFile = fopen(NOVA_TEX_CACHE_PATH "/cache_ready.flag", "r");
         if (cacheFlagFile) {
             isCacheReady = true;
@@ -159,9 +152,6 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
             .skipLoadingPreciseMasksForNonPreciseSprites = true,
             .skipTextureBlobData = isCacheReady,
             .skipAudioBlobData = true,
-
-            // На повторных бутах — читаем CODE одним sequential read из
-            // ~МБ-ового кэш-файла вместо тысяч мелких seek'ов в data.win.
             .codeCachePath = CODE_CACHE_PATH,
         }
     );
@@ -233,7 +223,6 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
         processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_SELECT, VK_ESCAPE);
 
         Runner_step(runner);
-        // 🔥 ФИКС 2: Проверка на NULL, если SdlMixer не завёлся
         if (runner->audioSystem) {
             runner->audioSystem->vtable->update(runner->audioSystem, (float) targetFrameSec);
         }
@@ -260,29 +249,16 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
         }
 
         renderer->vtable->beginFrame(renderer, gameW, gameH, NOVA_SCREEN_W, NOVA_SCREEN_H);
-
-        // ===[ НАЧАЛО 3D ЦИКЛА ]===
         int eyes = novaGetEyeCount();
         int current_eye = 0;
-
-        // Диагностика 3D: раз в ~30 кадров (≈1 сек) печатаем состояние слайдера
-        // и сколько глаз будем рисовать. Если slider всегда == 0.00, значит на
-        // твоём билде/прошивке osGet3DSliderState не возвращает реальное значение
-        // (часто — из-за того, что MCU/HID не инициализирован под нужным сервисом).
         if ((frameCounter % 30) == 0) {
-            //fprintf(stderr, "[3D] slider=%.2f eyes=%d\n",
-            //        osGet3DSliderState(), eyes);
         }
-
-        // ФИКС 3D: Сохраняем состояние клавиатуры, так как
-        // Draw-ивенты вызываются дважды и могут "съесть" инпуты
         RunnerKeyboardState kb_backup = *(runner->keyboard);
 
         while (current_eye < eyes) {
             novaBeginEye(current_eye);
 
             if (current_eye == 1) {
-                // Очищаем триггеры кнопок для правого глаза, чтобы избежать двойных нажатий
                 memset(runner->keyboard->keyPressed, 0, sizeof(runner->keyboard->keyPressed));
                 memset(runner->keyboard->keyReleased, 0, sizeof(runner->keyboard->keyReleased));
             }
@@ -340,29 +316,18 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
 
             current_eye++;
         }
-
-        // ФИКС 3D: Возвращаем состояние клавиш обратно
         *(runner->keyboard) = kb_backup;
-        // ===[ КОНЕЦ 3D ЦИКЛА ]===
 
         renderer->vtable->endFrame(renderer);
         novaSwapBuffers();
-
-        // -------------------------------------------------------------
-        // Детектор статтеров (если кадр длился дольше 34 миллисекунд)
-        // -------------------------------------------------------------
         u64 frameDuration = osGetTime() - frameStart;
         if (frameDuration > 34) {
             fprintf(stderr, "statter WARNING NAHUY: Frame took %llu ms!\n", frameDuration);
         }
-
-        // mallinfo() обходит весь heap — не вызываем чаще, чем раз в 5 секунд.
         if (frameCounter % 300 == 0) {
             printMemoryStats();
         }
         frameCounter++;
-
-        // 30 FPS Limiter
         while (osGetTime() - frameStart < 33) {
             gspWaitForVBlank();
         }
