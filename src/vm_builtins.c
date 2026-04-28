@@ -2314,7 +2314,7 @@ static RValue builtinMethod(VMContext* ctx, MAYBE_UNUSED RValue* args, int32_t a
     int32_t rawArg = RValue_toInt32(args[1]);
 
     // In GMS2 BC17+, function references are pushed via `Push.i <funcIdx>` where funcIdx is an index into the FUNC chunk (patched in by patchReferenceOperands). Resolve funcIdx -> codeIndex via function name lookup (same flow as Call.i).
-    int32_t codeIndex = rawArg;
+    int32_t codeIndex = -1;
     if (rawArg >= 0 && (uint32_t) rawArg < ctx->dataWin->func.functionCount) {
         const char* funcName = ctx->dataWin->func.functions[rawArg].name;
         if (funcName != nullptr) {
@@ -7093,7 +7093,7 @@ static RValue builtinNewGMLObject(VMContext* ctx, RValue* args, int32_t argCount
         // Raw funcIdx pushed via "Push.i <funcIdx>; Conv.i.v" (no method() wrapper used when no static binding is needed).
         // Resolve via FUNC chunk name -> funcMap, matching builtinMethod's lookup.
         int32_t rawArg = RValue_toInt32(args[0]);
-        codeIndex = rawArg;
+        codeIndex = -1;
         if (rawArg >= 0 && (uint32_t) rawArg < ctx->dataWin->func.functionCount) {
             const char* funcName = ctx->dataWin->func.functions[rawArg].name;
             if (funcName != nullptr) {

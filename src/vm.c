@@ -2837,7 +2837,20 @@ VMContext* VM_create(DataWin* dataWin) {
         if (0 > existing) {
             shput(ctx->funcMap, (char*) codeName, (int32_t) i);
         }
+        if (strncmp(codeName, "gml_Script_", 11) == 0) {
+            const char* shortName = codeName + 11;
+            if (shgeti(ctx->funcMap, (char*) shortName) < 0) {
+                shput(ctx->funcMap, (char*) shortName, (int32_t) i);
+            }
+        }
+        if (strncmp(codeName, "gml_GlobalScript_", 17) == 0) {
+            const char* shortName = codeName + 17;
+            if (shgeti(ctx->funcMap, (char*) shortName) < 0) {
+                shput(ctx->funcMap, (char*) shortName, (int32_t) i);
+            }
+        }
     }
+
 
     // Build codeName -> CodeLocals* hash map
     ctx->codeLocalsMap = nullptr;

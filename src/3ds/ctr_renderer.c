@@ -62,7 +62,7 @@ static uint8_t* ctrReadPngBlobFromFile(FILE* fp, uint32_t blobOffset, uint32_t b
 
 static void ctrBuildFullTextureCache(CtrRenderer* gl) {
     DataWin* dw = gl->base.dataWin;
-    const char* flagPath = "sdmc:/3ds/butterscotch/cache/cache_ready.flag";
+    const char* flagPath = "sdmc:/3ds/butterscotch/delta/cache/cache_ready.flag";
 
     FILE* flagFile = fopen(flagPath, "r");
     if (flagFile) { fclose(flagFile); return; }
@@ -73,7 +73,7 @@ static void ctrBuildFullTextureCache(CtrRenderer* gl) {
 
     for (uint32_t pId = 0; pId < dw->txtr.count; pId++) {
         char outPath[256];
-        snprintf(outPath, sizeof(outPath), "sdmc:/3ds/butterscotch/cache/page_%u.atlas", pId);
+        snprintf(outPath, sizeof(outPath), "sdmc:/3ds/butterscotch/delta/cache/page_%u.atlas", pId);
 
         FILE* check = fopen(outPath, "r");
         if (check) { fclose(check); continue; }
@@ -523,7 +523,7 @@ static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
     }
 
     char path[256];
-    snprintf(path, sizeof(path), "sdmc:/3ds/butterscotch/cache/page_%u.atlas", pageId);
+    snprintf(path, sizeof(path), "sdmc:/3ds/butterscotch/delta/cache/page_%u.atlas", pageId);
 
     FILE* f = fopen(path, "rb");
     if (!f) return;
@@ -627,7 +627,7 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
         }
 
         char path[256];
-        snprintf(path, sizeof(path), "sdmc:/3ds/butterscotch/cache/page_%d.atlas", pid);
+        snprintf(path, sizeof(path), "sdmc:/3ds/butterscotch/delta/cache/page_%d.atlas", pid);
 
         FILE* f = fopen(path, "rb");
         if (!f) continue;
@@ -798,31 +798,100 @@ static void ctrDrawSpritePos(Renderer* renderer, int32_t tpagIndex, float x1, fl
 
 static void ctrDrawTile(Renderer* renderer, RoomTile* tile, float offsetX, float offsetY) {
     if (tile == NULL) return;
+
     int32_t tpagIndex = Renderer_resolveObjectTPAGIndex(renderer->dataWin, tile);
     if (tpagIndex < 0) return;
 
     TexturePageItem* tpag = &renderer->dataWin->tpag.items[tpagIndex];
-    int32_t srcX = tile->sourceX; int32_t srcY = tile->sourceY;
-    int32_t srcW = (int32_t) tile->width; int32_t srcH = (int32_t) tile->height;
-    float drawX = (float) tile->x + offsetX; float drawY = (float) tile->y + offsetY;
+
+    int32_t srcX = tile->sourceX;
+    int32_t srcY = tile->sourceY;
+    int32_t srcW = (int32_t) tile->width;
+    int32_t srcH = (int32_t) tile->height;
+
+    float drawX = (float) tile->x + offsetX;
+    float drawY = (float) tile->y + offsetY;
 
     if (tpag->targetX > srcX) {
-        int32_t clip = tpag->targetX - srcX; drawX += (float)clip * tile->scaleX; srcW -= clip; srcX = tpag->targetX;
+        int32_t clip = tpag->targetX - srcX;
+        drawX += (float)clip * tile->scaleX;
+        srcW -= clip;
+        srcX = tpag->targetX;
     }
     if (tpag->targetY > srcY) {
-        int32_t clip = tpag->targetY - srcY; drawY += (float)clip * tile->scaleY; srcH -= clip; srcY = tpag->targetY;
+        int32_t clip = tpag->targetY - srcY;
+        drawY += (float)clip * tile->scaleY;
+        srcH -= clip;
+        srcY = tpag->targetY;
     }
 
-    int32_t cR = tpag->targetX + tpag->sourceWidth; int32_t cB = tpag->targetY + tpag->sourceHeight;
+    int32_t cR = tpag->targetX + tpag->sourceWidth;
+    int32_t cB = tpag->targetY + tpag->sourceHeight;
     if (srcX + srcW > cR) srcW = cR - srcX;
     if (srcY + srcH > cB) srcH = cB - srcY;
     if (srcW <= 0 || srcH <= 0) return;
 
-    int32_t atlasOffX = srcX - tpag->targetX; int32_t atlasOffY = srcY - tpag->targetY;
+    int32_t atlasOffX = srcX - tpag->targetX;
+    int32_t atlasOffY = srcY - tpag->targetY;
+
     uint8_t alphaByte = (tile->color >> 24) & 0xFF;
     float alpha = (alphaByte == 0) ? 1.0f : ((float) alphaByte / 255.0f);
+    uint32_t color = tile->color & 0x00FFFFFFu;
 
-    ctrDrawSpritePart(renderer, tpagIndex, atlasOffX, atlasOffY, srcW, srcH, drawX, drawY, tile->scaleX, tile->scaleY, tile->color & 0x00FFFFFFu, alpha);
+    renderer->vtable->drawSpritePart(renderer, tpagIndex, atlasOffX, atlasOffY, srcW, srcH, drawX, drawY, tile->scaleX, tile->scaleY, color, alpha);
+}
+
+static void ctrDrawTiled(Renderer* renderer, int32_t tpagIndex, float originX, float originY, float x, float y, float xscale, float yscale, bool tileX, bool tileY, float roomW, float roomH, uint32_t color, float alpha) {
+    if (tpagIndex < 0) return;
+    DataWin* dw = renderer->dataWin;
+    if ((uint32_t)tpagIndex >= dw->tpag.count) return;
+
+    TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
+
+    float axScale = fabsf(xscale);
+    float ayScale = fabsf(yscale);
+    float tileW = (float)tpag->boundingWidth * axScale;
+    float tileH = (float)tpag->boundingHeight * ayScale;
+
+    if (tileW <= 0.0f || tileH <= 0.0f) return;
+
+    float startX, endX, startY, endY;
+
+    if (tileX) {
+        startX = fmodf(x - originX * axScale, tileW);
+        if (startX > 0.0f) startX -= tileW;
+        endX = roomW;
+    } else {
+        startX = x - originX * axScale;
+        endX = startX + tileW;
+    }
+
+    if (tileY) {
+        startY = fmodf(y - originY * ayScale, tileH);
+        if (startY > 0.0f) startY -= tileH;
+        endY = roomH;
+    } else {
+        startY = y - originY * ayScale;
+        endY = startY + tileH;
+    }
+
+    int32_t countX = tileX ? (int32_t)ceilf((endX - startX) / tileW) : 1;
+    int32_t countY = tileY ? (int32_t)ceilf((endY - startY) / tileH) : 1;
+
+    for (int32_t iy = 0; iy < countY; iy++) {
+        float dy = startY + (float)iy * tileH;
+        if (dy >= endY) break;
+
+        for (int32_t ix = 0; ix < countX; ix++) {
+            float dx = startX + (float)ix * tileW;
+            if (dx >= endX) break;
+
+            float drawX = dx + originX * axScale;
+            float drawY = dy + originY * ayScale;
+
+            renderer->vtable->drawSprite(renderer, tpagIndex, drawX, drawY, originX, originY, xscale, yscale, 0.0f, color, alpha);
+        }
+    }
 }
 
 static void emitColoredQuad(CtrRenderer* gl, float x0, float y0, float x1, float y1, float r, float g, float b, float a) {
@@ -1124,7 +1193,7 @@ static RendererVtable ctrVtable = {
     .drawLine = ctrDrawLine, .drawLineColor = ctrDrawLineColor, .drawTriangle = ctrDrawTriangle,
     .drawText = ctrDrawText, .drawTextColor = ctrDrawTextColor, .flush = ctrRendererFlush,
     .createSpriteFromSurface = ctrCreateSpriteFromSurface, .deleteSprite = ctrDeleteSprite,
-    .drawTile = ctrDrawTile, .drawCircle = ctrDrawCircle, .drawRoundrect = ctrDrawRoundrect,
+    .drawTile = ctrDrawTile, .drawTiled = ctrDrawTiled, .drawCircle = ctrDrawCircle, .drawRoundrect = ctrDrawRoundrect,
     .drawTriangleColor = ctrDrawTriangleColor, .drawEllipse = ctrDrawEllipse, .onRoomChanged = ctrOnRoomChanged,
     .set3DDepthOffset = ctrSet3DDepthOffset
 };
