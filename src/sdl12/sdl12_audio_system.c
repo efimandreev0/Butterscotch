@@ -15,8 +15,6 @@ static bool use_mixer = true;
 #define MUSIC_INSTANCE_ID_BASE 200000
 #define SOUND_INSTANCE_ID_BASE 100000
 
-// КРИТИЧЕСКИ ВАЖНО: 512 КБ. Любой файл меньше 512 КБ загружается в оперативу как эффект (Mix_Chunk).
-// Все файлы больше 512 КБ загружаются как потоковая музыка (Mix_Music).
 #define STREAMING_SIZE_THRESHOLD (512 * 1024)
 #define MAX_CACHED_CHUNKS 32
 
@@ -193,7 +191,6 @@ static bool loadSfxIntoRAM(SdlMixerAudioSystem* sys, int32_t soundIndex, AudioEn
             int build_ret = SDL_BuildAudioCVT(&cvt, AUDIO_S16SYS, ogg_channels, ogg_sample_rate, format, mix_channels, freq);
             int original_len = samples * ogg_channels * sizeof(short);
 
-            // Если формат отличается (например, OGG моно, а микшер стерео), конвертируем аудио "на лету"
             if (build_ret == 1) {
                 cvt.len = original_len;
                 cvt.buf = safeMalloc(cvt.len * cvt.len_mult);
@@ -201,10 +198,9 @@ static bool loadSfxIntoRAM(SdlMixerAudioSystem* sys, int32_t soundIndex, AudioEn
                 SDL_ConvertAudio(&cvt);
 
                 sys->chunks[soundIndex] = Mix_QuickLoad_RAW(cvt.buf, cvt.len_cvt);
-                sys->decodedSfxBufs[soundIndex] = cvt.buf; // Сохраняем конвертированный буфер
-                free(decodedPcm); // Исходный моно-сигнал больше не нужен
+                sys->decodedSfxBufs[soundIndex] = cvt.buf;
+                free(decodedPcm);
             } else {
-                // Если звук уже соответствует настройкам микшера
                 sys->chunks[soundIndex] = Mix_QuickLoad_RAW((uint8_t*)decodedPcm, original_len);
                 sys->decodedSfxBufs[soundIndex] = decodedPcm;
             }
@@ -237,7 +233,6 @@ static bool ensureSoundLoaded(SdlMixerAudioSystem* sys, int32_t soundIndex) {
         AudioEntry* entry = &sys->base.dataWin->audo.entries[sound->audioFile];
         if (entry->dataSize == 0) return false;
 
-        // Здесь файл распределяется: в BGM или в SFX
         bool isMusic = (entry->dataSize > STREAMING_SIZE_THRESHOLD);
 
         if (isMusic) {

@@ -16,10 +16,9 @@ typedef struct {
     Mix_Music** music;
     uint8_t** compressedMusicBuf;
 
-    // Хранение адресов распакованного OGG SFX (чтобы потом сделать free)
     void** decodedSfxBufs;
 
-    char* archivePath; // Хранит путь к data.win или game.unx
+    char* archivePath;
 
     int32_t* channelToSoundIndex;
     int32_t currentMusicSoundIndex;

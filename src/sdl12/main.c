@@ -1,7 +1,6 @@
 #include "data_win.h"
 #include "vm.h"
 
-// Используем SDL 1.2
 #include <SDL/SDL.h>
 #include <getopt.h>
 #include <signal.h>
@@ -20,7 +19,6 @@
 
 #include "utils.h"
 
-// В SDL 1.2 нет SDL_GetPerformanceCounter, используем SDL_GetTicks
 static double get_time_sec(void) {
     return (double)SDL_GetTicks() / 1000.0;
 }
@@ -230,7 +228,6 @@ static void captureScreenshot(SDLRenderer* sdlRenderer, const char* filenamePatt
 
     if (sdlRenderer->fboSurface == nullptr) return;
 
-    // В SDL 1.2 читаем прямо из буфера FBO (переводим в 32 бита для STB)
     SDL_Surface* temp = SDL_CreateRGBSurface(SDL_SWSURFACE, width, height, 32,
                                              0x000000FF, 0x0000FF00, 0x00FF0000, 0xFF000000);
     if (temp) {
@@ -295,8 +292,7 @@ void abort_handler(int sig) {
     fprintf(stderr, "Caught SIGABRT!\n");
     fflush(stderr);
 
-    // можно поставить breakpoint тут
-    __builtin_trap(); // или raise(SIGTRAP);
+    __builtin_trap();
 }
 
 
@@ -350,12 +346,10 @@ int main(int argc, char* argv[]) {
     }
 
     if (args.printRooms) {
-        // Логика печати комнат
         VM_free(vm); DataWin_free(dataWin); return 0;
     }
 
     if (args.printDeclaredFunctions) {
-        // Логика печати функций
         VM_free(vm); DataWin_free(dataWin); return 0;
     }
 
@@ -388,7 +382,6 @@ int main(int argc, char* argv[]) {
     // ===[ INIT SDL 1.2 ]===
     
     if (args.headless) {
-        // Эмуляция headless режима в SDL 1.2
         #ifdef _WIN32
         _putenv("SDL_VIDEODRIVER=dummy");
         #else
@@ -416,7 +409,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Инициализация кастомного рендерера SDL1
     Renderer* renderer = SDLRenderer_create(screen);
     renderer->vtable->init(renderer, dataWin);
     runner->renderer = renderer;
@@ -541,8 +533,6 @@ int main(int argc, char* argv[]) {
         int32_t gameW = (int32_t) gen8->defaultWindowWidth;
         int32_t gameH = (int32_t) gen8->defaultWindowHeight;
 
-        // В SDL 1.2 рендерере beginFrame очищает FBO 
-        // (SDL_SetRenderTarget/RenderClear удалены, так как они специфичны для SDL2)
         renderer->vtable->beginFrame(renderer, gameW, gameH, fbWidth, fbHeight);
 
         if (runner->drawBackgroundColor) {
@@ -551,9 +541,6 @@ int main(int argc, char* argv[]) {
             renderer->vtable->endView(renderer);
         }
 
-        // Если игра требует цвет фона, закрасим fboSurface (это должно быть внутри вашего sdl12_renderer)
-        // В данном случае мы просто полагаемся на drawBackgroundColor внутри Runner_draw
-        
         bool viewsEnabled = (activeRoom->flags & 1) != 0;
         bool anyViewRendered = false;
 

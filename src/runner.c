@@ -1131,12 +1131,10 @@ static Instance* createAndInitInstance(Runner* runner, int32_t instanceId, int32
 
 
 static void initRoom(Runner* runner, int32_t roomIndex) {
-    // ВЫГРУЖАЕМ СТАРУЮ КОМНАТУ ИЗ ОЗУ
     if (runner->currentRoomIndex >= 0 && runner->currentRoomIndex != roomIndex) {
         DataWin_unloadRoom(runner->dataWin, runner->currentRoomIndex);
     }
 
-    // ЗАГРУЖАЕМ НОВУЮ КОМНАТУ С ФЛЕШКИ
     DataWin_loadRoom(runner->dataWin, roomIndex);
 
     runner->cachedInstCount = -1;
@@ -1234,7 +1232,6 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     repeat(room->gameObjectCount, i) {
         RoomGameObject* roomObj = &room->gameObjects[i];
 
-        // Мгновенная проверка O(1) вместо долгого цикла
         if (hmgeti(runner->instancesToId, roomObj->instanceID) >= 0) continue;
         if (isObjectDisabled(runner, roomObj->objectDefinition)) continue;
 
@@ -1247,7 +1244,6 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     repeat(room->gameObjectCount, i) {
         RoomGameObject* roomObj = &room->gameObjects[i];
 
-        // Мгновенный поиск O(1) вместо долгого цикла
         ptrdiff_t idx = hmgeti(runner->instancesToId, roomObj->instanceID);
         if (idx < 0) continue;
         Instance* inst = runner->instancesToId[idx].value;
@@ -2517,7 +2513,6 @@ char* Runner_dumpStateJson(Runner* runner) {
 void Runner_free(Runner* runner) {
     if (runner == nullptr) return;
 
-    // ФИКС УТЕЧКИ: Очищаем кэши объектов (важно при выходе в меню или рестарте)
     if (runner->instancesByObjInclParent) {
         for (int32_t i = 0; i < runner->instancesByObjMax; i++) {
             arrfree(runner->instancesByObjInclParent[i]);
@@ -2528,7 +2523,7 @@ void Runner_free(Runner* runner) {
     }
     arrfree(runner->activeOIsList);
     free(runner->oiInListBitmap);
-    hmfree(runner->instancesToId); // Освобождаем HashMap
+    hmfree(runner->instancesToId);
 
     repeat(arrlen(runner->instances), i) {
         hmdel(runner->instancesToId, runner->instances[i]->instanceId);

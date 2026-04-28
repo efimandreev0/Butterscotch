@@ -21,17 +21,16 @@
 #define GMASK16 0x07E0
 #define BMASK16 0x001F
 #define AMASK16 0
-#define MAGENTA_565 0xF81F // Цвет-ключ для прозрачности
+#define MAGENTA_565 0xF81F
 
 
 #define FORCE_INTERNAL_3DS_RES 0
 #define FORCE_INTERNAL_3DS_W 400
 #define FORCE_INTERNAL_3DS_H 240
 
-#define MAX_CACHED_TEXTURES 26 // В стандартном паке Undertale 26 текстур
+#define MAX_CACHED_TEXTURES 26
 #define MAX_TEXTURE_PAGES 8
 
-// Макрос для помощи компилятору в векторизации циклов (SIMD)
 #if defined(__GNUC__) || defined(__clang__)
 #define RESTRICT __restrict__
 #elif defined(_MSC_VER)
@@ -144,7 +143,6 @@ static void fastDraw_Text(SDL_Surface* src, SDL_Rect* sr, SDL_Surface* dst,
     int draw_w = dx2 - dx1, draw_h = dy2 - dy1;
     if (draw_w <= 0 || draw_h <= 0) return;
 
-    // ВАЖНО: Pitch делим на 2, так как источник и назначение теперь 16-битные
     int src_pitch_hwords = src->pitch / 2;
     int dst_pitch_hwords = dst->pitch / 2;
 
@@ -153,25 +151,21 @@ static void fastDraw_Text(SDL_Surface* src, SDL_Rect* sr, SDL_Surface* dst,
 
     uint32_t tr = tint & 0xFF, tg = (tint >> 8) & 0xFF, tb = (tint >> 16) & 0xFF;
 
-    // ПУТЬ 1: 1:1 Масштаб (шрифты обычно рисуются именно так)
     if (is_1to1) {
         int sx_start = sr->x + (dx1 - dstX);
         int sy_start = sr->y + (dy1 - dstY);
 
         for (int y = 0; y < draw_h; y++) {
-            // Указатели на 16-битные данные
             uint16_t* RESTRICT src_ptr = (uint16_t*)src->pixels + (sy_start + y) * src_pitch_hwords + sx_start;
             uint16_t* RESTRICT dst_ptr = (uint16_t*)dst->pixels + (dy1 + y) * dst_pitch_hwords + dx1;
 
             for (int x = 0; x < draw_w; x++) {
                 uint16_t p = src_ptr[x];
 
-                // Проверка по ColorKey вместо Альфа-канала
                 if (p != MAGENTA_565) {
                     if (!use_tint) {
                         dst_ptr[x] = p;
                     } else {
-                        // Распаковка 565 -> Применение тинта -> Запаковка 565
                         uint32_t r = ((p >> 11) << 3) * tr >> 8;
                         uint32_t g = (((p >> 5) & 0x3F) << 2) * tg >> 8;
                         uint32_t b = ((p & 0x1F) << 3) * tb >> 8;
@@ -181,7 +175,6 @@ static void fastDraw_Text(SDL_Surface* src, SDL_Rect* sr, SDL_Surface* dst,
             }
         }
     }
-    // ПУТЬ 2: Масштабирование текста
     else {
         uint32_t ratio_x_fp = (sr->w << 16) / dstW;
         uint32_t ratio_y_fp = (sr->h << 16) / dstH;
@@ -281,7 +274,6 @@ static inline int shouldDraw(SDLRenderer* sdl, int x, int y, int w, int h) {
             y2 > cr.y - margin && y1 < cr.y + cr.h + margin);
 }
 
-// Коллбэки для прямого чтения STB с диска
 typedef struct { FILE* f; int remaining; } StbiFileContext;
 static int stbi_file_read(void *user, char *data, int size) {
     StbiFileContext *ctx = (StbiFileContext*)user;
@@ -304,19 +296,15 @@ static int stbi_file_eof(void *user) {
 static void ensureTextureLoaded(SDLRenderer* sdl, int16_t pageId) {
     if (pageId < 0 || pageId >= sdl->textureCount) return;
 
-    // Обновляем время последнего использования
     g_texLastUsed[pageId] = g_currentFrame;
 
-    // Если уже загружена — выходим
     if (sdl->sdlSurfaces[pageId]) return;
 
-    // Считаем, сколько текстур сейчас в памяти
     int loadedCount = 0;
     for (int i = 0; i < sdl->originalTexturePageCount; i++) {
         if (sdl->sdlSurfaces[i]) loadedCount++;
     }
 
-    // Если превысили лимит — удаляем самую старую
     if (loadedCount >= MAX_TEXTURE_PAGES) {
         int oldestId = -1;
         uint32_t oldestTime = 0xFFFFFFFF;
@@ -370,7 +358,6 @@ static void ensureTextureLoaded(SDLRenderer* sdl, int16_t pageId) {
     if (px32 && opt16) {
         uint16_t* dst_pixels = (uint16_t*)opt16->pixels;
 
-        // Ручная конвертация 32-бит -> 16-бит с заменой Альфы на Magenta
         for (int i = 0; i < w * h; i++) {
             uint8_t r = px32[i*4 + 0];
             uint8_t g = px32[i*4 + 1];
@@ -378,20 +365,17 @@ static void ensureTextureLoaded(SDLRenderer* sdl, int16_t pageId) {
             uint8_t a = px32[i*4 + 3];
 
             if (a < 128) {
-                // Если пиксель прозрачный — ставим Magenta
                 dst_pixels[i] = MAGENTA_565;
             } else {
-                // Иначе пакуем в 565.
-                // Если цвет вдруг оказался Magenta, чуть сдвигаем его, чтобы не стал дыркой
                 uint16_t color = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-                if (color == MAGENTA_565) color = 0xF81E; // Смещаем синий на 1 бит
+                if (color == MAGENTA_565) color = 0xF81E;
                 dst_pixels[i] = color;
             }
         }
         sdl->sdlSurfaces[pageId] = opt16;
     }
 
-    stbi_image_free(px32); // СРАЗУ удаляем тяжелые 32-битные данные
+    stbi_image_free(px32);
     sdl->textureWidths[pageId] = w;
     sdl->textureHeights[pageId] = h;
 }
@@ -444,13 +428,11 @@ static void sdlBeginFrame(Renderer* r, int32_t gw, int32_t gh, int32_t ww, int32
 
     if (sdl->fboWidth != sdl->gameW || sdl->fboHeight != sdl->gameH || !sdl->fboSurface) {
         if (sdl->fboSurface) SDL_FreeSurface(sdl->fboSurface);
-        // Всегда оставляем FBO в 16 битах!
         sdl->fboSurface = SDL_CreateRGBSurface(SDL_SWSURFACE, sdl->gameW, sdl->gameH, 16, RMASK16, GMASK16, BMASK16, AMASK16);
         sdl->fboWidth  = sdl->gameW;
         sdl->fboHeight = sdl->gameH;
     }
 
-    // Очищаем буфер прозрачным черным
     if (sdl->fboSurface) SDL_FillRect(sdl->fboSurface, NULL, 0);
 }
 
@@ -504,11 +486,9 @@ static void sdlEndFrame(Renderer* r) {
     SDL_FillRect(sdl->screenSurface, NULL, 0);
 
     if (dr.w > 0 && dr.h > 0) {
-        // SDL_SoftStretch требует совпадения битности источника и назначения!
         if (sdl->screenSurface->format->BitsPerPixel == 16) {
             SDL_SoftStretch(sdl->fboSurface, NULL, sdl->screenSurface, &dr);
         } else {
-            // Если экран 32-битный (Windows), растягиваем в 16-битный промежуточный буфер, а затем копируем (SDL сам сконвертирует формат)
             if (!sdl->prevFboSurface || sdl->prevFboSurface->w != dr.w || sdl->prevFboSurface->h != dr.h) {
                 if (sdl->prevFboSurface) SDL_FreeSurface(sdl->prevFboSurface);
                 sdl->prevFboSurface = SDL_CreateRGBSurface(SDL_SWSURFACE, dr.w, dr.h, 16, RMASK16, GMASK16, BMASK16, AMASK16);

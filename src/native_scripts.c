@@ -5779,7 +5779,6 @@ static void native_trueLavawaver_Draw0(VMContext* ctx, Runner* runner, Instance*
     if (b != 0.0 && spriteW > 0 && tpagIndex >= 0) {
         float drawAlpha = r->drawAlpha;
 
-        // ОПТИМИЗАЦИЯ: Математика вынесена из внутреннего цикла!
         for (int32_t i = 0; i < 40; i += 2) {
             a += 1.0;
             float base_xx = (float)(inst->x + GMLReal_sin(a / b) * c);
@@ -16737,8 +16736,6 @@ static void native_snowfloor_Draw0(VMContext* ctx, Runner* runner, Instance* ins
 
     r->drawColor = 0xFFFFFFu;
 
-    // ШАГ 1: Избавляемся от 100 тяжелых хэш-запросов за кадр!
-    // Делаем один единственный линейный проход по памяти объекта.
     SnowFlakeCacheStruct flakes[25];
     memset(flakes, 0, sizeof(flakes));
 
@@ -16760,7 +16757,6 @@ static void native_snowfloor_Draw0(VMContext* ctx, Runner* runner, Instance* ins
         }
     }
 
-    // ШАГ 2: Обрабатываем снежинки напрямую через быстрые указатели
     for (int32_t i = 0; i < 25; i++) {
         if (!flakes[i].sxv || !flakes[i].syv || !flakes[i].mmv) continue;
 
@@ -16768,18 +16764,14 @@ static void native_snowfloor_Draw0(VMContext* ctx, Runner* runner, Instance* ins
         GMLReal snowy  = (flakes[i].syv->type == RVALUE_REAL) ? flakes[i].syv->real : RValue_toReal(*flakes[i].syv);
         GMLReal moveme = (flakes[i].mmv->type == RVALUE_REAL) ? flakes[i].mmv->real : RValue_toReal(*flakes[i].mmv);
 
-        // Проверяем, находится ли снежинка в пределах экрана
         bool inView = (snowx >= vL && snowx <= vR && snowy >= vT && snowy <= vB);
 
         if (inView && flakes[i].ddv) {
             GMLReal dodraw = (flakes[i].ddv->type == RVALUE_REAL) ? flakes[i].ddv->real : RValue_toReal(*flakes[i].ddv);
             if (dodraw == 1.0) {
-                // ИЛЛЮЗИЯ КРУГА ИЗ ДВУХ ПРЯМОУГОЛЬНИКОВ:
-                // Вертикальная часть "крестика" (Ширина 3, Высота 5)
                 r->vtable->drawRectangle(r, (float)snowx - 1.5f, (float)snowy - 2.5f,
                                          (float)snowx + 1.5f, (float)snowy + 2.5f,
                                          0xFFFFFFu, 1.0f, false);
-                // Горизонтальная часть "крестика" (Ширина 5, Высота 3)
                 r->vtable->drawRectangle(r, (float)snowx - 2.5f, (float)snowy - 1.5f,
                                          (float)snowx + 2.5f, (float)snowy + 1.5f,
                                          0xFFFFFFu, 1.0f, false);

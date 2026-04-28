@@ -101,6 +101,28 @@ static SDL_RWops* createMusicRWops(const char* archivePath, uint32_t offset, uin
     return rw;
 }
 
+static SDL_RWops* loadMusicIntoMemory(const char* archivePath, uint32_t offset, uint32_t size, uint8_t** outBuf) {
+    *outBuf = NULL;
+    if (!archivePath || size == 0) return NULL;
+
+    uint8_t* buf = (uint8_t*) malloc(size);
+    if (!buf) return NULL;
+
+    FILE* fp = fopen(archivePath, "rb");
+    if (!fp) { free(buf); return NULL; }
+
+    if (fseek(fp, (long)offset, SEEK_SET) != 0) { fclose(fp); free(buf); return NULL; }
+    size_t got = fread(buf, 1, size, fp);
+    fclose(fp);
+    if (got != size) { free(buf); return NULL; }
+
+    SDL_RWops* rw = SDL_RWFromConstMem(buf, (int)size);
+    if (!rw) { free(buf); return NULL; }
+
+    *outBuf = buf;
+    return rw;
+}
+
 static char* resolveExternalPath(SdlMixerAudioSystem* sys, Sound* sound) {
     if (!sound->file || sound->file[0] == '\0') return NULL;
 
@@ -250,11 +272,24 @@ static bool ensureSoundLoaded(SdlMixerAudioSystem* sys, int32_t soundIndex) {
                     }
                     Mix_FreeMusic(sys->music[i]);
                     sys->music[i] = NULL;
+                    if (sys->compressedMusicBuf && sys->compressedMusicBuf[i]) {
+                        free(sys->compressedMusicBuf[i]);
+                        sys->compressedMusicBuf[i] = NULL;
+                    }
                 }
             }
 
-            SDL_RWops* rw = createMusicRWops(sys->archivePath, entry->dataOffset, entry->dataSize);
-            if (rw) sys->music[soundIndex] = Mix_LoadMUS_RW(rw);
+            uint8_t* musicBuf = NULL;
+            SDL_RWops* rw = loadMusicIntoMemory(sys->archivePath, entry->dataOffset, entry->dataSize, &musicBuf);
+            if (rw) {
+                sys->music[soundIndex] = Mix_LoadMUS_RW(rw);
+                if (sys->music[soundIndex] != NULL) {
+                    sys->compressedMusicBuf[soundIndex] = musicBuf;
+                } else {
+                    fprintf(stderr, "Audio Error: Mix_LoadMUS_RW failed: %s\n", Mix_GetError());
+                    free(musicBuf);
+                }
+            }
         } else {
             loadSfxIntoRAM(sys, soundIndex, entry);
         }
@@ -272,6 +307,10 @@ static bool ensureSoundLoaded(SdlMixerAudioSystem* sys, int32_t soundIndex) {
                         }
                         Mix_FreeMusic(sys->music[i]);
                         sys->music[i] = NULL;
+                        if (sys->compressedMusicBuf && sys->compressedMusicBuf[i]) {
+                            free(sys->compressedMusicBuf[i]);
+                            sys->compressedMusicBuf[i] = NULL;
+                        }
                     }
                 }
                 sys->music[soundIndex] = Mix_LoadMUS(path);
@@ -299,6 +338,7 @@ static void sdlmInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileSyste
         uint32_t soundCount = dataWin->sond.count;
         sys->chunks = safeCalloc(soundCount, sizeof(Mix_Chunk*));
         sys->music = safeCalloc(soundCount, sizeof(Mix_Music*));
+        sys->compressedMusicBuf = safeCalloc(soundCount, sizeof(uint8_t*));
         sys->decodedSfxBufs = safeCalloc(soundCount, sizeof(void*));
         sys->chunkLastUsed = safeCalloc(soundCount, sizeof(uint32_t));
 
@@ -322,12 +362,15 @@ static void sdlmDestroy(AudioSystem* audio) {
         uint32_t soundCount = sys->base.dataWin->sond.count;
         for (uint32_t i = 0; i < soundCount; i++) {
             if (sys->chunks[i]) Mix_FreeChunk(sys->chunks[i]);
+
             if (sys->music[i]) Mix_FreeMusic(sys->music[i]);
+            if (sys->compressedMusicBuf && sys->compressedMusicBuf[i]) free(sys->compressedMusicBuf[i]);
             if (sys->decodedSfxBufs[i]) linearFree(sys->decodedSfxBufs[i]);
         }
 
         free(sys->chunks);
         free(sys->music);
+        free(sys->compressedMusicBuf);
         free(sys->decodedSfxBufs);
         free(sys->chunkLastUsed);
         if (sys->archivePath) free(sys->archivePath);

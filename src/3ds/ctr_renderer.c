@@ -328,8 +328,11 @@ static void extract_tpag_from_ram(CtrRenderer* gl, DataWin* dw, uint32_t tId, ui
 #define CTR_LINEAR_SAFE_TARGET     (2u * 1024u * 1024u)
 #define CTR_EVICT_MAX_PER_CALL     32
 
+
 static void ctrEvictLruIfPressure(CtrRenderer* gl) {
     if (linearSpaceFree() >= CTR_LINEAR_LOW_THRESHOLD) return;
+
+    bool flushedOnce = false;
 
     int evicted = 0;
     while (evicted < CTR_EVICT_MAX_PER_CALL && linearSpaceFree() < CTR_LINEAR_SAFE_TARGET) {
@@ -338,15 +341,23 @@ static void ctrEvictLruIfPressure(CtrRenderer* gl) {
         for (uint32_t i = 0; i < gl->tpagCount; i++) {
             if (!gl->tpags[i].isLoaded) continue;
             if (gl->tpags[i].keepResident) continue;
+            if (gl->tpags[i].lastFrameUsed >= g_frameCounter) continue; // in-use this frame
             if (gl->tpags[i].lastFrameUsed < oldestFrame) {
                 oldestFrame = gl->tpags[i].lastFrameUsed;
                 victim = (int32_t) i;
             }
         }
         if (victim < 0) break;
+
+        if (!flushedOnce) {
+            ctrFlushBatch(gl);
+            flushedOnce = true;
+        }
+
         for (int cx = 0; cx < gl->tpags[victim].chunksX; cx++) {
             for (int cy = 0; cy < gl->tpags[victim].chunksY; cy++) {
                 glDeleteTextures(1, &gl->tpags[victim].chunks[cx][cy].tex);
+                gl->tpags[victim].chunks[cx][cy].tex = 0;
             }
         }
         gl->tpags[victim].isLoaded = false;
@@ -579,6 +590,11 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
     for (int pid = 0; pid < 256; pid++) {
         if (!pageNeedsLoad[pid]) continue;
 
+        int pendingCount = 0;
+        for (uint32_t i = 0; i < gl->tpagCount; i++) {
+            if (dw->tpag.items[i].texturePageId == pid && gl->tpags[i].keepResident && !gl->tpags[i].isLoaded) pendingCount++;
+        }
+
         char path[256];
         snprintf(path, sizeof(path), "sdmc:/3ds/butterscotch/cache/page_%d.atlas", pid);
 
@@ -589,9 +605,27 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
 
         AtlasHeader hdr;
         if (fread(&hdr, sizeof(hdr), 1, f) == 1 && hdr.magic == ATLAS_MAGIC) {
-            for (uint32_t tId = 0; tId < gl->tpagCount; tId++) {
-                if (dw->tpag.items[tId].texturePageId == pid && gl->tpags[tId].keepResident && !gl->tpags[tId].isLoaded) {
-                    extract_tpag_direct_from_file(gl, dw, tId, f, hdr.width, hdr.height);
+            bool batchLoaded = false;
+            if (pendingCount >= 2) {
+                size_t data_size = (size_t)hdr.width * (size_t)hdr.height * 2;
+                uint16_t* atlas_pixels = (uint16_t*) linearAlloc(data_size);
+                if (atlas_pixels) {
+                    if (fread(atlas_pixels, 1, data_size, f) == data_size) {
+                        for (uint32_t tId = 0; tId < gl->tpagCount; tId++) {
+                            if (dw->tpag.items[tId].texturePageId == pid && gl->tpags[tId].keepResident && !gl->tpags[tId].isLoaded) {
+                                extract_tpag_from_ram(gl, dw, tId, atlas_pixels, hdr.width, hdr.height);
+                            }
+                        }
+                        batchLoaded = true;
+                    }
+                    linearFree(atlas_pixels);
+                }
+            }
+            if (!batchLoaded) {
+                for (uint32_t tId = 0; tId < gl->tpagCount; tId++) {
+                    if (dw->tpag.items[tId].texturePageId == pid && gl->tpags[tId].keepResident && !gl->tpags[tId].isLoaded) {
+                        extract_tpag_direct_from_file(gl, dw, tId, f, hdr.width, hdr.height);
+                    }
                 }
             }
         }
@@ -654,6 +688,19 @@ static void ctrDrawTpagRegion(CtrRenderer* gl, uint32_t tpagIndex, float srcOffX
     }
 }
 
+static inline void ctrDrawSpriteFastSingleChunk(CtrRenderer* gl, CtrTpagData* tpagData,
+    float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3,
+    uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+{
+    CtrTpagChunk* chunk = &tpagData->chunks[0][0];
+
+    float u0 = 0.0f;
+    float v0 = 0.0f;
+    float u1 = (float)chunk->width  / (float)chunk->potW;
+    float v1 = (float)chunk->height / (float)chunk->potH;
+    ctrPushQuad(gl, chunk->tex, x0, y0, x1, y1, x2, y2, x3, y3, u0, v0, u1, v1, r, g, b, a);
+}
+
 static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y, float originX, float originY, float xscale, float yscale, float angleDeg, uint32_t color, float alpha) {
     CtrRenderer* gl = (CtrRenderer*) renderer; DataWin* dw = renderer->dataWin;
     if (tpagIndex < 0 || (uint32_t)tpagIndex >= gl->tpagCount) return;
@@ -667,10 +714,19 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
 
     uint8_t a = ctrAlphaToByte(alpha); if (a == 0) return;
 
+    CtrTpagData* tpagData = &gl->tpags[tpagIndex];
+    bool singleChunk = (tpagData->chunksX == 1 && tpagData->chunksY == 1);
+    uint8_t r = BGR_R(color), g = BGR_G(color), b = BGR_B(color);
+
     if (angleDeg == 0.0f) {
         float x0 = roundf(x + lx0); float y0 = roundf(y + ly0);
         float x1 = roundf(x + lx1); float y1 = roundf(y + ly1);
-        ctrDrawTpagRegion(gl, tpagIndex, 0.0f, 0.0f, (float)tpag->sourceWidth, (float)tpag->sourceHeight, x0, y0, x1, y0, x1, y1, x0, y1, BGR_R(color), BGR_G(color), BGR_B(color), a);
+        if (singleChunk) {
+            tpagData->lastFrameUsed = g_frameCounter;
+            ctrDrawSpriteFastSingleChunk(gl, tpagData, x0, y0, x1, y0, x1, y1, x0, y1, r, g, b, a);
+        } else {
+            ctrDrawTpagRegion(gl, tpagIndex, 0.0f, 0.0f, (float)tpag->sourceWidth, (float)tpag->sourceHeight, x0, y0, x1, y0, x1, y1, x0, y1, r, g, b, a);
+        }
     } else {
         float angleRad = -angleDeg * ((float) M_PI / 180.0f);
         float c = cosf(angleRad); float s = sinf(angleRad);
@@ -678,7 +734,12 @@ static void ctrDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float 
         float x1 = lx1 * c - ly0 * s + x; float y1 = lx1 * s + ly0 * c + y;
         float x2 = lx1 * c - ly1 * s + x; float y2 = lx1 * s + ly1 * c + y;
         float x3 = lx0 * c - ly1 * s + x; float y3 = lx0 * s + ly1 * c + y;
-        ctrDrawTpagRegion(gl, tpagIndex, 0.0f, 0.0f, (float)tpag->sourceWidth, (float)tpag->sourceHeight, x0, y0, x1, y1, x2, y2, x3, y3, BGR_R(color), BGR_G(color), BGR_B(color), a);
+        if (singleChunk) {
+            tpagData->lastFrameUsed = g_frameCounter;
+            ctrDrawSpriteFastSingleChunk(gl, tpagData, x0, y0, x1, y1, x2, y2, x3, y3, r, g, b, a);
+        } else {
+            ctrDrawTpagRegion(gl, tpagIndex, 0.0f, 0.0f, (float)tpag->sourceWidth, (float)tpag->sourceHeight, x0, y0, x1, y1, x2, y2, x3, y3, r, g, b, a);
+        }
     }
 }
 

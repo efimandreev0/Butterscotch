@@ -48,12 +48,6 @@ typedef struct {
     bool skipTextureBlobData;
     bool skipAudioBlobData;
 
-    // Опциональный путь до кэша CODE-чанка. Если задан и кэш-файл валиден
-    // (совпадают размер и mtime data.win), парсинг CODE пропускается, и
-    // bytecodeBuffer + entries читаются из кэша (один большой sequential
-    // read вместо ~6500 мелких seek'ов в data.win).
-    // На промахе кэша CODE парсится как обычно, и кэш записывается рядом.
-    // NULL → отключено.
     const char* codeCachePath;
 } DataWinParserOptions;
 
