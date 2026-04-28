@@ -346,18 +346,8 @@ static void extract_tpag_from_ram(CtrRenderer* gl, DataWin* dw, uint32_t tId, ui
     tpag->isLoaded = true;
 }
 
-// ---------------------------------------------------------
-// УПРАВЛЕНИЕ ПАМЯТЬЮ: ЭВИКШН ПОД ДАВЛЕНИЕМ
-// ---------------------------------------------------------
-// Если LINEAR RAM становится мало, выгружаем самые старые НЕ-резидентные
-// tpag'и (не нужные текущей комнате). Перезагрузим лениво, если понадобится.
-//
-// Ослабленные пороги (раньше было 6/8 МБ): держим страницы прошлых
-// комнат как можно дольше, чтобы возврат в недавно посещённую комнату
-// не стоил повторного чтения с диска. Эвикшн срабатывает только когда
-// реально упёрлись в стену.
-#define CTR_LINEAR_LOW_THRESHOLD   (3u * 1024u * 1024u)
-#define CTR_LINEAR_SAFE_TARGET     (5u * 1024u * 1024u)
+#define CTR_LINEAR_LOW_THRESHOLD   (1024u * 1024u)
+#define CTR_LINEAR_SAFE_TARGET     (2u * 1024u * 1024u)
 #define CTR_EVICT_MAX_PER_CALL     32
 
 static void ctrEvictLruIfPressure(CtrRenderer* gl) {
@@ -403,27 +393,38 @@ static void extract_tpag_direct_from_file(CtrRenderer* gl, DataWin* dw, uint32_t
 
     int header_size = sizeof(AtlasHeader);
 
-    // ОПТИМИЗАЦИЯ ЗАГРУЗОК: вместо тысяч мелких fread по одной строке
-    // (каждый из которых может стоить ~10мс на SD) — читаем сразу весь
-    // ряд атласа высотой extH одним большим fread в LINEAR RAM, потом
-    // распаковываем чанки уже из памяти. Это даёт ~10-30x ускорение
-    // загрузки спрайта на реальной 3DS.
-    //
-    // Размер буфера: atlas_w * extH * 2 байт (обычно 100-800 КБ).
-    // Если linearAlloc не даёт памяти (под давлением) — фоллбэк на
-    // построчное чтение, как раньше.
+    // ОПТИМИЗАЦИЯ ЗАГРУЗОК
     size_t strip_rows = (size_t)extH;
     if ((int)(extY + (int)strip_rows) > atlas_h) strip_rows = (size_t)(atlas_h - extY);
     size_t strip_bytes = (size_t)atlas_w * strip_rows * 2;
-    uint16_t* strip = (extY >= 0 && strip_rows > 0) ? (uint16_t*) linearAlloc(strip_bytes) : NULL;
+
+    // === [ ИЗМЕНЕННЫЙ БЛОК: УМНОЕ ВЫДЕЛЕНИЕ ПАМЯТИ ] ===
+    uint16_t* strip = NULL;
+    bool strip_is_linear = false;
+
+    if (extY >= 0 && strip_rows > 0) {
+        // 1. Пробуем взять из быстрой LINEAR RAM
+        strip = (uint16_t*) linearAlloc(strip_bytes);
+        if (strip) {
+            strip_is_linear = true;
+        }
+        // 2. Если LINEAR забита (фоллбэк), временно берем из обычного HEAP!
+        // Ограничиваем 2.5 МБ, чтобы случайно не выйти за лимит в 15МБ.
+        else if (strip_bytes <= 2500 * 1024) {
+            strip = (uint16_t*) malloc(strip_bytes);
+            strip_is_linear = false;
+        }
+    }
 
     if (strip) {
         fseek(f, header_size + (size_t)extY * (size_t)atlas_w * 2, SEEK_SET);
         if (fread(strip, 1, strip_bytes, f) != strip_bytes) {
-            linearFree(strip);
+            if (strip_is_linear) linearFree(strip);
+            else free(strip);
             strip = NULL;
         }
     }
+    // ===================================================
 
     for (int cy = 0; cy < tpag->chunksY; cy++) {
         for (int cx = 0; cx < tpag->chunksX; cx++) {
@@ -453,7 +454,7 @@ static void extract_tpag_direct_from_file(CtrRenderer* gl, DataWin* dw, uint32_t
                            (size_t)copy_w * 2);
                 }
             } else {
-                // Медленный фоллбэк (linear RAM кончилась) — построчно с диска.
+                // Очень медленный фоллбэк (если и Heap кончился) — построчно с диска.
                 for (int y = 0; y < chunk->height; y++) {
                     int sy = extY + chunk->srcY + y;
                     if (sy < 0 || sy >= atlas_h) continue;
@@ -475,7 +476,12 @@ static void extract_tpag_direct_from_file(CtrRenderer* gl, DataWin* dw, uint32_t
         }
     }
 
-    if (strip) linearFree(strip);
+    // === [ ИЗМЕНЕННЫЙ БЛОК: ПРАВИЛЬНОЕ ОСВОБОЖДЕНИЕ ] ===
+    if (strip) {
+        if (strip_is_linear) linearFree(strip);
+        else free(strip);
+    }
+    // ====================================================
     tpag->isLoaded = true;
 }
 static void ctrSet3DDepthOffset(Renderer* renderer, float gmDepth) {
@@ -639,6 +645,38 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
                 markSpriteResident(gl, dw, dw->objt.objects[parent].spriteId);
             }
         }
+    }
+    // === НОВЫЙ БАТЧ-ЛОАДЕР ТЕКСТУР ===
+    // Группируем запросы по страницам (атласам), чтобы открывать каждый файл только ОДИН раз!
+    bool pageNeedsLoad[256] = {false};
+    for (uint32_t i = 0; i < gl->tpagCount; i++) {
+        if (gl->tpags[i].keepResident && !gl->tpags[i].isLoaded) {
+            uint16_t pid = dw->tpag.items[i].texturePageId;
+            if (pid < 256) pageNeedsLoad[pid] = true;
+        }
+    }
+
+    for (int pid = 0; pid < 256; pid++) {
+        if (!pageNeedsLoad[pid]) continue;
+
+        char path[256];
+        snprintf(path, sizeof(path), "sdmc:/3ds/butterscotch/cache/page_%d.atlas", pid);
+
+        FILE* f = fopen(path, "rb");
+        if (!f) continue;
+
+        setvbuf(f, g_dynamic_io_buf, _IOFBF, sizeof(g_dynamic_io_buf));
+
+        AtlasHeader hdr;
+        if (fread(&hdr, sizeof(hdr), 1, f) == 1 && hdr.magic == ATLAS_MAGIC) {
+            // Файл открыт. Вытаскиваем из него ВСЕ нужные спрайты разом.
+            for (uint32_t tId = 0; tId < gl->tpagCount; tId++) {
+                if (dw->tpag.items[tId].texturePageId == pid && gl->tpags[tId].keepResident && !gl->tpags[tId].isLoaded) {
+                    extract_tpag_direct_from_file(gl, dw, tId, f, hdr.width, hdr.height);
+                }
+            }
+        }
+        fclose(f); // Закрываем один раз на атлас, а не 100 раз
     }
 }
 

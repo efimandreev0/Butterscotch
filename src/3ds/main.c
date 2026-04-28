@@ -270,8 +270,8 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
         // твоём билде/прошивке osGet3DSliderState не возвращает реальное значение
         // (часто — из-за того, что MCU/HID не инициализирован под нужным сервисом).
         if ((frameCounter % 30) == 0) {
-            fprintf(stderr, "[3D] slider=%.2f eyes=%d\n",
-                    osGet3DSliderState(), eyes);
+            //fprintf(stderr, "[3D] slider=%.2f eyes=%d\n",
+            //        osGet3DSliderState(), eyes);
         }
 
         // ФИКС 3D: Сохраняем состояние клавиатуры, так как

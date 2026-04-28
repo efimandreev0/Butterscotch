@@ -1070,63 +1070,78 @@ void DataWin_loadRoom(DataWin* dw, int32_t roomIndex) {
     }
     for (uint32_t j = viewCount; j < 8; j++) memset(&room->views[j], 0, sizeof(RoomView));
 
-    // 3. Загрузка GameObjects (Прямое чтение)
+    // 3. Загрузка GameObjects (БЛОЧНОЕ ЧТЕНИЕ)
     BinaryReader_seek(&reader, room->gameObjectsPtr);
     uint32_t objCount = BinaryReader_readUint32(&reader);
-    uint32_t objListOffset = (uint32_t)BinaryReader_getPosition(&reader);
     room->gameObjectCount = objCount;
 
     if (objCount > 0) {
+        // Читаем все указатели одним махом
+        uint32_t* ptrs = safeMalloc(objCount * sizeof(uint32_t));
+        BinaryReader_readBytes(&reader, ptrs, objCount * sizeof(uint32_t));
+
         room->gameObjects = safeMalloc(objCount * sizeof(RoomGameObject));
+        bool hasPreCreate = (dw->gen8.bytecodeVersion >= 16);
+        size_t objDataSize = hasPreCreate ? 40 : 36;
+        uint8_t buf[40];
+
         for (uint32_t j = 0; j < objCount; j++) {
-            BinaryReader_seek(&reader, objListOffset + j * 4);
-            uint32_t ptr = BinaryReader_readUint32(&reader);
-            BinaryReader_seek(&reader, ptr);
+            BinaryReader_seek(&reader, ptrs[j]);
+            // Читаем структуру объекта целиком (1 вызов fread вместо 10!)
+            BinaryReader_readBytes(&reader, buf, objDataSize);
 
             RoomGameObject* go = &room->gameObjects[j];
-            go->x = BinaryReader_readInt32(&reader);
-            go->y = BinaryReader_readInt32(&reader);
-            go->objectDefinition = BinaryReader_readInt32(&reader);
-            go->instanceID = BinaryReader_readUint32(&reader);
-            go->creationCode = BinaryReader_readInt32(&reader);
-            go->scaleX = BinaryReader_readFloat32(&reader);
-            go->scaleY = BinaryReader_readFloat32(&reader);
-            go->color = BinaryReader_readUint32(&reader);
-            go->rotation = BinaryReader_readFloat32(&reader);
-            go->preCreateCode = (dw->gen8.bytecodeVersion >= 16) ? BinaryReader_readInt32(&reader) : -1;
+            memcpy(&go->x, buf + 0, 4);
+            memcpy(&go->y, buf + 4, 4);
+            memcpy(&go->objectDefinition, buf + 8, 4);
+            memcpy(&go->instanceID, buf + 12, 4);
+            memcpy(&go->creationCode, buf + 16, 4);
+            memcpy(&go->scaleX, buf + 20, 4);
+            memcpy(&go->scaleY, buf + 24, 4);
+            memcpy(&go->color, buf + 28, 4);
+            memcpy(&go->rotation, buf + 32, 4);
+            if (hasPreCreate) memcpy(&go->preCreateCode, buf + 36, 4);
+            else go->preCreateCode = -1;
         }
+        free(ptrs);
     } else {
         room->gameObjects = NULL;
     }
 
-    // 4. Загрузка Tiles (Прямое чтение)
+    // 4. Загрузка Tiles (БЛОЧНОЕ ЧТЕНИЕ)
     BinaryReader_seek(&reader, room->tilesPtr);
     uint32_t tileCount = BinaryReader_readUint32(&reader);
-    uint32_t tileListOffset = (uint32_t)BinaryReader_getPosition(&reader);
     room->tileCount = tileCount;
 
     if (tileCount > 0) {
+        // Читаем все указатели одним махом
+        uint32_t* ptrs = safeMalloc(tileCount * sizeof(uint32_t));
+        BinaryReader_readBytes(&reader, ptrs, tileCount * sizeof(uint32_t));
+
         room->tiles = safeCalloc(tileCount, sizeof(RoomTile));
+        uint8_t buf[52];
+
         for (uint32_t j = 0; j < tileCount; j++) {
-            BinaryReader_seek(&reader, tileListOffset + j * 4);
-            uint32_t ptr = BinaryReader_readUint32(&reader);
-            BinaryReader_seek(&reader, ptr);
+            BinaryReader_seek(&reader, ptrs[j]);
+            // Читаем структуру тайла целиком (1 вызов fread вместо 13!)
+            BinaryReader_readBytes(&reader, buf, 52);
 
             RoomTile* tile = &room->tiles[j];
-            tile->x = BinaryReader_readInt32(&reader);
-            tile->y = BinaryReader_readInt32(&reader);
+            memcpy(&tile->x, buf + 0, 4);
+            memcpy(&tile->y, buf + 4, 4);
             tile->useSpriteDefinition = (dw->gen8.major >= 2);
-            tile->backgroundDefinition = BinaryReader_readInt32(&reader);
-            tile->sourceX = BinaryReader_readInt32(&reader);
-            tile->sourceY = BinaryReader_readInt32(&reader);
-            tile->width = BinaryReader_readUint32(&reader);
-            tile->height = BinaryReader_readUint32(&reader);
-            tile->tileDepth = BinaryReader_readInt32(&reader);
-            tile->instanceID = BinaryReader_readUint32(&reader);
-            tile->scaleX = BinaryReader_readFloat32(&reader);
-            tile->scaleY = BinaryReader_readFloat32(&reader);
-            tile->color = BinaryReader_readUint32(&reader);
+            memcpy(&tile->backgroundDefinition, buf + 8, 4);
+            memcpy(&tile->sourceX, buf + 12, 4);
+            memcpy(&tile->sourceY, buf + 16, 4);
+            memcpy(&tile->width, buf + 20, 4);
+            memcpy(&tile->height, buf + 24, 4);
+            memcpy(&tile->tileDepth, buf + 28, 4);
+            memcpy(&tile->instanceID, buf + 32, 4);
+            memcpy(&tile->scaleX, buf + 36, 4);
+            memcpy(&tile->scaleY, buf + 40, 4);
+            memcpy(&tile->color, buf + 44, 4);
         }
+        free(ptrs);
     } else {
         room->tiles = NULL;
     }
@@ -1270,7 +1285,7 @@ static bool tryLoadCodeCache(DataWin* dw, const char* cachePath) {
     }
     free(raw);
 
-    uint8_t* blob = (uint8_t*) DW_BIG_ALLOC(hdr.blobSize);
+    uint8_t* blob = (uint8_t*) safeMalloc(hdr.blobSize);
     if (!blob) {
         free(entries); fclose(f);
         return false;
@@ -1406,7 +1421,7 @@ static void parseCODE(BinaryReader* reader, DataWin* dw, uint32_t chunkLength, s
 
     dw->bytecodeBufferBase = blobStart;
     // Большой read-only блоб → в LINEAR heap (3DS), чтобы не съедать regular heap.
-    dw->bytecodeBuffer = DW_BIG_ALLOC(blobSize);
+    dw->bytecodeBuffer = safeMalloc(blobSize);
     if (!dw->bytecodeBuffer) {
         fprintf(stderr, "FATAL: big-alloc(%zu) for bytecodeBuffer failed\n", blobSize);
         exit(1);
