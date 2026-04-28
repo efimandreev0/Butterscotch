@@ -60,6 +60,30 @@ target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_include_directories(butterscotch PUBLIC vendor/stb/ds)
 
 if(PLATFORM STREQUAL "glfw")
+    # Butterscotch VM/interpreter profiler
+    option(ENABLE_VM_PROFILER "Enable Butterscotch VM/interpreter profiler" ON)
+    if(ENABLE_VM_PROFILER)
+        add_compile_definitions(ENABLE_VM_PROFILER)
+    endif()
+
+    # Butterscotch VM/interpreter tracing
+    option(ENABLE_VM_TRACING "Enable Butterscotch VM/interpreter tracing checks" ON)
+    if(ENABLE_VM_TRACING)
+        add_compile_definitions(ENABLE_VM_TRACING)
+    endif()
+
+    # Spatial grid logs
+    option(ENABLE_SPATIAL_GRID_LOGS "Enable Spatial Grid logs" ON)
+    if(ENABLE_SPATIAL_GRID_LOGS)
+        add_compile_definitions(ENABLE_SPATIAL_GRID_LOGS)
+    endif()
+
+    # VM unknown/stubbed function logs
+    option(ENABLE_VM_STUB_LOGS "Enable VM unknown/stubbed function logs" ON)
+    if(ENABLE_VM_STUB_LOGS)
+        add_compile_definitions(ENABLE_VM_STUB_LOGS)
+    endif()
+
     # GLAD
     add_library(glad STATIC vendor/glad/src/glad.c)
     target_include_directories(glad PUBLIC vendor/glad/include)
@@ -80,20 +104,20 @@ if(PLATFORM STREQUAL "glfw")
         # Target Windows 7+ (avoids referencing newer APIs like MapViewOfFileNuma2 that MinGW import libs don't provide)
         # https://github.com/mirror/mingw-w64/blob/master/mingw-w64-headers/include/sdkddkver.h
         target_compile_definitions(butterscotch PRIVATE _WIN32_WINNT=0x0601 NTDDI_VERSION=0x06010000 WIN32_LEAN_AND_MEAN)
-        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m opengl32 gdi32 winmm)
+        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m opengl32 gdi32 winmm bz2)
         target_link_options(butterscotch PRIVATE -static)
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
         find_package(PkgConfig REQUIRED)
         pkg_check_modules(GLFW3 REQUIRED glfw3)
         target_include_directories(butterscotch PRIVATE ${GLFW3_INCLUDE_DIRS})
         target_link_directories(butterscotch PRIVATE ${GLFW3_LIBRARY_DIRS})
-        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m pthread)
+        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m pthread bz2)
     else()
         find_package(PkgConfig REQUIRED)
         pkg_check_modules(GLFW3 REQUIRED glfw3)
         target_include_directories(butterscotch PRIVATE ${GLFW3_INCLUDE_DIRS})
         target_link_directories(butterscotch PRIVATE ${GLFW3_LIBRARY_DIRS})
-        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m pthread dl)
+        target_link_libraries(butterscotch ${GLFW3_LIBRARIES} glad m pthread dl bz2)
     endif()
 
     # Enable AddressSanitizer by default in Debug builds
@@ -107,24 +131,65 @@ if(PLATFORM STREQUAL "glfw")
         target_compile_options(butterscotch PRIVATE -fsanitize=address -fno-omit-frame-pointer)
         target_link_options(butterscotch PRIVATE -fsanitize=address)
     endif()
+
+    #gamecontrollerdb
+    add_custom_command(TARGET butterscotch POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_SOURCE_DIR}/vendor/gamecontrollerdb.txt
+            $<TARGET_FILE_DIR:butterscotch>/gamecontrollerdb.txt
+    )
 elseif(PLATFORM STREQUAL "ps2")
     # The PS2 EE has a single-precision FPU only, so double is software-emulated
     add_compile_definitions(USE_FLOAT_REALS)
     # By disabling Int64 support, we can fit the entire RValue struct in 8 bytes, improving performance and memory usage
     add_compile_definitions(NO_RVALUE_INT64)
-    # Disable Butterscotch VM/interpreter tracing checks
-    add_compile_definitions(DISABLE_VM_TRACING)
+
+    # Butterscotch VM/interpreter profiler
+    option(ENABLE_VM_PROFILER "Enable Butterscotch VM/interpreter profiler" OFF)
+    if(ENABLE_VM_PROFILER)
+        add_compile_definitions(ENABLE_VM_PROFILER)
+    endif()
+
+    # Butterscotch VM/interpreter tracing
+    option(ENABLE_VM_TRACING "Enable Butterscotch VM/interpreter tracing checks" OFF)
+    if(ENABLE_VM_TRACING)
+        add_compile_definitions(ENABLE_VM_TRACING)
+    endif()
+
+    # Spatial grid logs
+    option(ENABLE_SPATIAL_GRID_LOGS "Enable Spatial Grid logs" OFF)
+    if(ENABLE_SPATIAL_GRID_LOGS)
+        add_compile_definitions(ENABLE_SPATIAL_GRID_LOGS)
+    endif()
+
+    # VM unknown/stubbed function logs
+    option(ENABLE_VM_STUB_LOGS "Enable VM unknown/stubbed function logs" OFF)
+    if(ENABLE_VM_STUB_LOGS)
+        add_compile_definitions(ENABLE_VM_STUB_LOGS)
+    endif()
+
     # Platform identifier for PS2-specific code paths (e.g., scratchpad allocation)
     add_compile_definitions(PLATFORM_PS2)
-    # Disable the PS2 audio system
-    option(DISABLE_PS2_AUDIO "Disable the PS2 audio system" OFF)
-    if(DISABLE_PS2_AUDIO)
-        add_compile_definitions(DISABLE_PS2_AUDIO)
+    
+    # PS2 renderer hot path logs
+    option(ENABLE_PS2_RENDERER_LOGS "Enable hot path logs in the PS2 renderer" OFF)
+    if(ENABLE_PS2_RENDERER_LOGS)
+        add_compile_definitions(ENABLE_PS2_RENDERER_LOGS)
+    endif()
+
+    # PS2 audio system
+    option(ENABLE_PS2_AUDIO "Enable the PS2 audio system" ON)
+    if(ENABLE_PS2_AUDIO)
+        add_compile_definitions(ENABLE_PS2_AUDIO)
+    else()
         list(REMOVE_ITEM PLATFORM_SOURCES ${CMAKE_SOURCE_DIR}/src/ps2/ps2_audio_system.c)
     endif()
-    # Treat unsuffixed float constants as single-precision to avoid accidental
-    # float->double promotions on platforms with no hardware double
-    add_compile_options(-fsingle-precision-constant)
+
+    # -fsingle-precision-constant: Treat unsuffixed float constants as single-precision to avoid accidental  float->double promotions on platforms with no hardware double
+    # -Werror=double-promotion: Warn when something is being promoted to a double
+    # -fomit-frame-pointer: frees a register on a target with tight register pressure
+    # -ffast-math: enables aggressive floating point optimizations
+    target_compile_options(butterscotch PRIVATE -fsingle-precision-constant -Werror=double-promotion -fomit-frame-pointer -ffast-math)
 
     if(PS2)
         # Compiling on the Docker container
@@ -132,17 +197,17 @@ elseif(PLATFORM STREQUAL "ps2")
         target_link_directories(butterscotch PRIVATE $ENV{PS2SDK}/ee/lib $ENV{GSKIT}/lib)
         target_link_libraries(butterscotch gskit dmakit audsrv pad mc kbd patches kernel c m)
 
-        # Embed ps2sdk IRX modules (sio2man, padman) as C arrays via bin2c
+        # Embed ps2sdk IRX modules (freesio2, freepad) as C arrays via bin2c
         # This avoids loading from rom0: which has compatibility issues between fat/slim PS2
         set(IRX_DIR $ENV{PS2SDK}/iop/irx)
         set(IRX_GEN_DIR ${CMAKE_BINARY_DIR}/generated/irx)
         file(MAKE_DIRECTORY ${IRX_GEN_DIR})
 
         add_custom_command(
-            OUTPUT ${IRX_GEN_DIR}/sio2man_irx.c
-            COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/sio2man.irx ${IRX_GEN_DIR}/sio2man_irx.c sio2man_irx
-            DEPENDS ${IRX_DIR}/sio2man.irx
-            COMMENT "Embedding sio2man.irx"
+            OUTPUT ${IRX_GEN_DIR}/freesio2_irx.c
+            COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/freesio2.irx ${IRX_GEN_DIR}/freesio2_irx.c freesio2_irx
+            DEPENDS ${IRX_DIR}/freesio2.irx
+            COMMENT "Embedding freesio2.irx"
         )
         add_custom_command(
             OUTPUT ${IRX_GEN_DIR}/mcman_irx.c
@@ -157,10 +222,10 @@ elseif(PLATFORM STREQUAL "ps2")
             COMMENT "Embedding mcserv.irx"
         )
         add_custom_command(
-            OUTPUT ${IRX_GEN_DIR}/padman_irx.c
-            COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/padman.irx ${IRX_GEN_DIR}/padman_irx.c padman_irx
-            DEPENDS ${IRX_DIR}/padman.irx
-            COMMENT "Embedding padman.irx"
+            OUTPUT ${IRX_GEN_DIR}/freepad_irx.c
+            COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/freepad.irx ${IRX_GEN_DIR}/freepad_irx.c freepad_irx
+            DEPENDS ${IRX_DIR}/freepad.irx
+            COMMENT "Embedding freepad.irx"
         )
         # We need the USB mass storage IRX modules for writing gmon.out when not running from host: and for keyboard support
         add_custom_command(
@@ -175,7 +240,7 @@ elseif(PLATFORM STREQUAL "ps2")
             DEPENDS ${IRX_DIR}/ps2kbd.irx
             COMMENT "Embedding ps2kbd.irx"
         )
-        if(NOT DISABLE_PS2_AUDIO)
+        if(ENABLE_PS2_AUDIO)
             add_custom_command(
                 OUTPUT ${IRX_GEN_DIR}/freesd_irx.c
                 COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/freesd.irx ${IRX_GEN_DIR}/freesd_irx.c freesd_irx
@@ -190,8 +255,8 @@ elseif(PLATFORM STREQUAL "ps2")
             )
         endif()
 
-        target_sources(butterscotch PRIVATE ${IRX_GEN_DIR}/sio2man_irx.c ${IRX_GEN_DIR}/mcman_irx.c ${IRX_GEN_DIR}/mcserv_irx.c ${IRX_GEN_DIR}/padman_irx.c ${IRX_GEN_DIR}/usbd_irx.c ${IRX_GEN_DIR}/ps2kbd_irx.c)
-        if(NOT DISABLE_PS2_AUDIO)
+        target_sources(butterscotch PRIVATE ${IRX_GEN_DIR}/freesio2_irx.c ${IRX_GEN_DIR}/mcman_irx.c ${IRX_GEN_DIR}/mcserv_irx.c ${IRX_GEN_DIR}/freepad_irx.c ${IRX_GEN_DIR}/usbd_irx.c ${IRX_GEN_DIR}/ps2kbd_irx.c)
+        if(ENABLE_PS2_AUDIO)
             target_sources(butterscotch PRIVATE ${IRX_GEN_DIR}/freesd_irx.c ${IRX_GEN_DIR}/audsrv_irx.c)
         endif()
         target_include_directories(butterscotch PRIVATE ${IRX_GEN_DIR})
@@ -254,64 +319,83 @@ elseif(PLATFORM STREQUAL "ps2")
         )
     endif()
 elseif(PLATFORM STREQUAL "3ds")
-    # Nintendo 3DS target via devkitARM + libctru + citro3d + NovaGL (GLES1.1 translation layer).
-    # Recommended to configure with:
-    #   cmake -DPLATFORM=3ds -DCMAKE_TOOLCHAIN_FILE=$ENV{DEVKITPRO}/cmake/3DS.cmake ...
-    # and to have NOVAGL_DIR pointing to the NovaGL source tree (defaults to ../NovaGL).
-
-    # The 3DS EE has double-precision FPU, but float is still ~2x faster — games generally
-    # work fine with float reals and the memory savings on GMReal fit the 3DS' 128MB RAM.
     add_compile_definitions(USE_FLOAT_REALS)
     add_compile_definitions(NO_RVALUE_INT64)
-    add_compile_definitions(DISABLE_VM_TRACING)
     add_compile_definitions(PLATFORM_3DS)
 
-    # stb_image + stb_ds headers
+    option(ENABLE_VM_PROFILER "Enable Butterscotch VM/interpreter profiler" OFF)
+    if(ENABLE_VM_PROFILER)
+        add_compile_definitions(ENABLE_VM_PROFILER)
+    endif()
+
+    option(ENABLE_VM_TRACING "Enable Butterscotch VM/interpreter tracing checks" OFF)
+    if(ENABLE_VM_TRACING)
+        add_compile_definitions(ENABLE_VM_TRACING)
+    endif()
+
+    option(ENABLE_SPATIAL_GRID_LOGS "Enable Spatial Grid logs" OFF)
+    if(ENABLE_SPATIAL_GRID_LOGS)
+        add_compile_definitions(ENABLE_SPATIAL_GRID_LOGS)
+    endif()
+
+    option(ENABLE_VM_STUB_LOGS "Enable VM unknown/stubbed function logs" OFF)
+    if(ENABLE_VM_STUB_LOGS)
+        add_compile_definitions(ENABLE_VM_STUB_LOGS)
+    endif()
+
     target_include_directories(butterscotch PUBLIC vendor/stb/image)
 
-    #target_include_directories($ENV{DEVKITPRO}/portlibs/3ds/include)
+    if(NOT DEFINED NOVAGL_DIR)
+        if(DEFINED ENV{NOVAGL_DIR})
+            set(NOVAGL_DIR "$ENV{NOVAGL_DIR}")
+        else()
+            set(NOVAGL_DIR "${CMAKE_SOURCE_DIR}/../NovaGL")
+        endif()
+    endif()
 
-    file(GLOB NOVAGL_SOURCES ${NOVAGL_DIR}/src/*.c)
-    target_sources(butterscotch PRIVATE ${NOVAGL_SOURCES})
-    target_include_directories(butterscotch PRIVATE ${NOVAGL_DIR}/include ${NOVAGL_DIR}/src)
+    set(GL2CITRO3D_BUILD_EXAMPLES OFF CACHE BOOL "Build NovaGL examples" FORCE)
+    add_subdirectory(${NOVAGL_DIR} ${CMAKE_BINARY_DIR}/novagl-build)
+    target_include_directories(butterscotch PRIVATE ${NOVAGL_DIR}/src)
 
     if(DEFINED ENV{DEVKITPRO})
         target_include_directories(butterscotch PRIVATE
-                $ENV{DEVKITPRO}/libctru/include
-                $ENV{DEVKITPRO}/portlibs/3ds/include)
+            $ENV{DEVKITPRO}/libctru/include
+            $ENV{DEVKITPRO}/portlibs/3ds/include
+        )
         target_link_directories(butterscotch PRIVATE
-                $ENV{DEVKITPRO}/libctru/lib
-                $ENV{DEVKITPRO}/portlibs/3ds/lib)
+            $ENV{DEVKITPRO}/libctru/lib
+            $ENV{DEVKITPRO}/portlibs/3ds/lib
+        )
     endif()
 
-    # libctru defines __3DS__ via toolchain; we don't need to add it manually.
     target_link_libraries(butterscotch
-            SDL_mixer
-            mad
-            vorbisidec
-            ogg
-            mikmod
-            SDL
-            NovaGL
-            citro3d
-            ctru m)
+        SDL_mixer
+        mad
+        vorbisidec
+        ogg
+        mikmod
+        SDL
+        NovaGL
+        citro3d
+        ctru
+        m
+    )
 
-    # Aggressive optimization for the VM interpreter hot path (big rooms, battles).
-    # -flto and -marm are CRITICAL here to ensure the VM executeLoop keeps its
-    # instruction pointer (IP) and stack pointer (SP) in hardware CPU registers.
     target_compile_options(butterscotch PRIVATE
-            -O3
-            -flto
-            -marm
-            -ffast-math
-            -funroll-loops
-            -fomit-frame-pointer
-            -ffunction-sections
-            -fdata-sections)
+        -O3
+        -flto
+        -marm
+        -ffast-math
+        -funroll-loops
+        -fomit-frame-pointer
+        -ffunction-sections
+        -fdata-sections
+    )
 
     target_link_options(butterscotch PRIVATE
-            -flto
-            -Wl,--gc-sections)
+        -flto
+        -Wl,--gc-sections
+    )
 
     ctr_create_3dsx(butterscotch)
 else()

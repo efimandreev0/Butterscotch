@@ -55,10 +55,7 @@ static void gsDestroy(Renderer* renderer) {
     free(gs);
 }
 
-static void gsBeginFrame(Renderer* renderer, MAYBE_UNUSED int32_t gameW, MAYBE_UNUSED int32_t gameH, MAYBE_UNUSED int32_t windowW, MAYBE_UNUSED int32_t windowH) {
-    GsRendererFlat* gs = (GsRendererFlat*) renderer;
-    gs->zCounter = 1;
-}
+static void gsBeginFrame(Renderer* renderer, MAYBE_UNUSED int32_t gameW, MAYBE_UNUSED int32_t gameH, MAYBE_UNUSED int32_t windowW, MAYBE_UNUSED int32_t windowH) {}
 
 static void gsEndFrame(MAYBE_UNUSED Renderer* renderer) {
     // No-op: flip happens in main loop
@@ -140,8 +137,7 @@ static void gsDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y
     float sy2 = gameY2 * gs->scaleY + gs->offsetY;
 
     u64 quadColor = colorForTpagIndex(tpagIndex, alpha);
-    gsKit_prim_sprite(gs->gsGlobal, sx1, sy1, sx2, sy2, gs->zCounter, quadColor);
-    gs->zCounter++;
+    gsKit_prim_sprite(gs->gsGlobal, sx1, sy1, sx2, sy2, 0, quadColor);
 }
 
 static void gsDrawSpritePart(Renderer* renderer, int32_t tpagIndex, MAYBE_UNUSED int32_t srcOffX, MAYBE_UNUSED int32_t srcOffY, int32_t srcW, int32_t srcH, float x, float y, float xscale, float yscale, MAYBE_UNUSED uint32_t color, float alpha) {
@@ -161,8 +157,7 @@ static void gsDrawSpritePart(Renderer* renderer, int32_t tpagIndex, MAYBE_UNUSED
     float sy2 = gameY2 * gs->scaleY + gs->offsetY;
 
     u64 quadColor = colorForTpagIndex(tpagIndex, alpha);
-    gsKit_prim_sprite(gs->gsGlobal, sx1, sy1, sx2, sy2, gs->zCounter, quadColor);
-    gs->zCounter++;
+    gsKit_prim_sprite(gs->gsGlobal, sx1, sy1, sx2, sy2, 0, quadColor);
 }
 
 static void gsDrawRectangle(Renderer* renderer, float x1, float y1, float x2, float y2, uint32_t color, float alpha, MAYBE_UNUSED bool outline) {
@@ -180,8 +175,7 @@ static void gsDrawRectangle(Renderer* renderer, float x1, float y1, float x2, fl
     float sy2 = (y2 - (float) gs->viewY) * gs->scaleY + gs->offsetY;
 
     u64 rectColor = GS_SETREG_RGBAQ(r, g, b, a, 0x00);
-    gsKit_prim_sprite(gs->gsGlobal, sx1, sy1, sx2, sy2, gs->zCounter, rectColor);
-    gs->zCounter++;
+    gsKit_prim_sprite(gs->gsGlobal, sx1, sy1, sx2, sy2, 0, rectColor);
 }
 
 static void gsDrawLine(Renderer* renderer, float x1, float y1, float x2, float y2, MAYBE_UNUSED float width, uint32_t color, float alpha) {
@@ -198,8 +192,7 @@ static void gsDrawLine(Renderer* renderer, float x1, float y1, float x2, float y
     float sy2 = (y2 - (float) gs->viewY) * gs->scaleY + gs->offsetY;
 
     u64 lineColor = GS_SETREG_RGBAQ(r, g, b, a, 0x00);
-    gsKit_prim_line(gs->gsGlobal, sx1, sy1, sx2, sy2, gs->zCounter, lineColor);
-    gs->zCounter++;
+    gsKit_prim_line(gs->gsGlobal, sx1, sy1, sx2, sy2, 0, lineColor);
 }
 
 // PS2 gsKit doesn't support per-vertex colors on lines, so we just use color1
@@ -254,40 +247,45 @@ static void gsDrawText(Renderer* renderer, const char* text, float x, float y, f
 
         float cursorX = halignOffset;
 
-        // Draw each glyph as a colored rectangle
+        // Draw each glyph as a colored rectangle - decode each codepoint once and carry it forward as next iteration's ch (also used for kerning)
         int32_t pos = 0;
-        while (lineLen > pos) {
-            uint16_t ch = TextUtils_decodeUtf8(line, lineLen, &pos);
-            FontGlyph* glyph = TextUtils_findGlyph(font, ch);
-            if (glyph == nullptr) continue;
-
-            if (glyph->sourceWidth > 0 && glyph->sourceHeight > 0) {
-                float glyphX = x + (cursorX + (float) glyph->offset) * xscale * font->scaleX;
-                float glyphY = y + cursorY * yscale * font->scaleY;
-                float glyphW = (float) glyph->sourceWidth * xscale * font->scaleX;
-                float glyphH = (float) glyph->sourceHeight * yscale * font->scaleY;
-
-                // Apply view offset and scale to screen coordinates
-                float sx1 = (glyphX - (float) gs->viewX) * gs->scaleX + gs->offsetX;
-                float sy1 = (glyphY - (float) gs->viewY) * gs->scaleY + gs->offsetY;
-                float sx2 = (glyphX + glyphW - (float) gs->viewX) * gs->scaleX + gs->offsetX;
-                float sy2 = (glyphY + glyphH - (float) gs->viewY) * gs->scaleY + gs->offsetY;
-
-                gsKit_prim_sprite(gs->gsGlobal, sx1, sy1, sx2, sy2, gs->zCounter, textColor);
-            }
-
-            cursorX += (float) glyph->shift;
-
-            // Apply kerning
-            if (lineLen > pos) {
-                int32_t savedPos = pos;
-                uint16_t nextCh = TextUtils_decodeUtf8(line, lineLen, &pos);
-                pos = savedPos;
-                cursorX += TextUtils_getKerningOffset(glyph, nextCh);
-            }
+        uint16_t ch = 0;
+        bool hasCh = false;
+        if (lineLen > pos) {
+            ch = TextUtils_decodeUtf8(line, lineLen, &pos);
+            hasCh = true;
         }
 
-        gs->zCounter++;
+        while (hasCh) {
+            FontGlyph* glyph = TextUtils_findGlyph(font, ch);
+
+            uint16_t nextCh = 0;
+            bool hasNext = lineLen > pos;
+            if (hasNext) nextCh = TextUtils_decodeUtf8(line, lineLen, &pos);
+
+            if (glyph != nullptr) {
+                if (glyph->sourceWidth > 0 && glyph->sourceHeight > 0) {
+                    float glyphX = x + (cursorX + (float) glyph->offset) * xscale * font->scaleX;
+                    float glyphY = y + cursorY * yscale * font->scaleY;
+                    float glyphW = (float) glyph->sourceWidth * xscale * font->scaleX;
+                    float glyphH = (float) glyph->sourceHeight * yscale * font->scaleY;
+
+                    // Apply view offset and scale to screen coordinates
+                    float sx1 = (glyphX - (float) gs->viewX) * gs->scaleX + gs->offsetX;
+                    float sy1 = (glyphY - (float) gs->viewY) * gs->scaleY + gs->offsetY;
+                    float sx2 = (glyphX + glyphW - (float) gs->viewX) * gs->scaleX + gs->offsetX;
+                    float sy2 = (glyphY + glyphH - (float) gs->viewY) * gs->scaleY + gs->offsetY;
+
+                    gsKit_prim_sprite(gs->gsGlobal, sx1, sy1, sx2, sy2, 0, textColor);
+                }
+
+                cursorX += (float) glyph->shift;
+                if (hasNext) cursorX += TextUtils_getKerningOffset(glyph, nextCh);
+            }
+
+            ch = nextCh;
+            hasCh = hasNext;
+        }
 
         // Advance to next line
         cursorY += lineStride;
@@ -340,6 +338,5 @@ Renderer* GsRendererFlat_create(GSGLOBAL* gsGlobal) {
     gs->gsGlobal = gsGlobal;
     gs->scaleX = 2.0f;
     gs->scaleY = 2.0f;
-    gs->zCounter = 1;
     return (Renderer*) gs;
 }

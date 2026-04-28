@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "utils.h"
 
 // Forward declaration for progress callback
 typedef struct DataWin DataWin;
@@ -35,6 +39,17 @@ typedef struct {
     // If true, precise masks will be skipped when the sprite does not have a precise state set
     bool skipLoadingPreciseMasksForNonPreciseSprites;
 
+    // If true, Room payloads (backgrounds, views, gameObjects, tiles, layers) are parsed on demand via DataWin_loadRoomPayload during gameplay.
+    bool lazyLoadRooms;
+
+    // When lazyLoadRooms is true, this list indicates which rooms should be loaded during load time instead of demand. They will also not be freed.
+    StringBooleanEntry* eagerlyLoadedRooms;
+
+    // 3DS / low-memory knobs
+    bool skipTextureBlobData;
+    bool skipAudioBlobData;
+    const char* codeCachePath;
+
     // Optional progress callback, called before each chunk is parsed.
     // chunkName: 4-character chunk name (e.g. "GEN8", "SPRT")
     // chunkIndex: 0-based index of the current chunk being parsed
@@ -43,12 +58,6 @@ typedef struct {
     // userData: user-provided pointer passed through from the options
     void (*progressCallback)(const char* chunkName, int chunkIndex, int totalChunks, DataWin* dataWin, void* userData);
     void* progressCallbackUserData;
-
-    //3DS shit
-    bool skipTextureBlobData;
-    bool skipAudioBlobData;
-
-    const char* codeCachePath;
 } DataWinParserOptions;
 
 // ===[ GEN8 - General Info ]===
@@ -204,16 +213,14 @@ typedef struct {
     bool gms2PlaybackSpeedType;
     bool specialType;
     uint32_t textureCount;
-    uint32_t* textureOffsets; // absolute file offsets to TexturePageItems
-    int32_t* textureIndices;  // pre-resolved TPAG indices (textureCount entries).
-                              // Populated at data.win load time so Renderer_resolveTPAGIndex
-                              // doesn't have to do a hashmap lookup per sprite draw.
+    int32_t* tpagIndices;    // resolved TPAG indices (one per frame); -1 for unresolved
     uint32_t maskCount;       // number of collision masks (one per frame, or 0)
     uint8_t** masks;          // array of maskCount packed bit arrays (nullptr if none)
 } Sprite;
 
 typedef struct {
     uint32_t count;
+    uint32_t parsedCount; // number of sprites loaded from SPRT; slots >= parsedCount are runtime-allocated and own their `name`
     Sprite* sprites;
 } Sprt;
 
@@ -223,7 +230,7 @@ typedef struct {
     bool transparent;
     bool smooth;
     bool preload;
-    uint32_t textureOffset; // absolute file offset to TexturePageItem
+    int32_t tpagIndex;      // resolved TPAG index, -1 if unresolved
     uint32_t gms2UnknownAlways2;
     uint32_t gms2TileWidth;
     uint32_t gms2TileHeight;
@@ -252,16 +259,16 @@ typedef struct {
 } PathPoint;
 
 typedef struct {
-    double x;
-    double y;
-    double speed;
-    double l; // cumulative arc length from start
+    float x;
+    float y;
+    float speed;
+    float l; // cumulative arc length from start
 } InternalPathPoint;
 
 typedef struct {
-    double x;
-    double y;
-    double speed;
+    float x;
+    float y;
+    float speed;
 } PathPositionResult;
 
 typedef struct {
@@ -273,7 +280,7 @@ typedef struct {
     PathPoint* points;
     uint32_t internalPointCount;
     InternalPathPoint* internalPoints;
-    double length; // total arc length
+    float length; // total arc length
 } GamePath;
 
 typedef struct {
@@ -360,15 +367,37 @@ typedef struct {
     uint8_t charset;
     uint8_t antiAliasing;
     uint32_t rangeEnd;
-    uint32_t textureOffset; // absolute file offset to TexturePageItem
+    int32_t tpagIndex;      // resolved TPAG index, -1 if unresolved
     float scaleX;
     float scaleY;
+    int32_t ascenderOffset; // bytecodeVersion >= 17 only
+    uint32_t ascender;  // GMS 2022.2+ (0 when absent)
+    uint32_t sdfSpread; // GMS 2023.2 nonLTS+ (0 when absent)
+    uint32_t lineHeight; // GMS 2023.6+ (0 when absent)
+    bool hasAscender;
+    bool hasSDFSpread;
+    bool hasLineHeight;
     uint32_t glyphCount;
     FontGlyph* glyphs;
+    uint32_t maxGlyphHeight; // Computed after glyph parse: max sourceHeight across glyphs; HTML5 runner uses this for line stride (see yyFont.TextHeight)
+    // ASCII fast-path lookup: glyphLUT[ch] for ch < 128, populated by Font_buildGlyphLUT after glyphs[] is filled.
+    // Lets TextUtils_findGlyph skip the linear scan over glyphs[] for the (overwhelmingly common) ASCII case.
+    FontGlyph* glyphLUT[128];
     // Sprite font fields (only valid when isSpriteFont is true)
     bool isSpriteFont;
     int32_t spriteIndex; // source sprite index (-1 for regular fonts)
 } Font;
+
+// Builds the ASCII fast-path lookup table from font->glyphs. Call after glyphs[] is fully populated.
+static inline void Font_buildGlyphLUT(Font* font) {
+    memset(font->glyphLUT, 0, sizeof(font->glyphLUT));
+    repeat(font->glyphCount, i) {
+        FontGlyph* g = &font->glyphs[i];
+        if (128 > g->character && font->glyphLUT[g->character] == nullptr) {
+            font->glyphLUT[g->character] = g;
+        }
+    }
+}
 
 typedef struct {
     uint32_t count;
@@ -412,7 +441,7 @@ typedef struct {
 } Tmln;
 
 // ===[ OBJT - Game Objects ]===
-#define OBJT_EVENT_TYPE_COUNT 12
+#define OBJT_EVENT_TYPE_COUNT 15
 
 typedef struct {
     uint32_t eventSubtype;
@@ -434,6 +463,7 @@ typedef struct {
     const char* name;
     int32_t spriteId;
     bool visible;
+    bool managed; // GMS 2022.5+
     bool solid;
     int32_t depth;
     bool persistent;
@@ -520,10 +550,6 @@ typedef struct {
     float scaleX;
     float scaleY;
     uint32_t color;
-    // Renderer-private cache (e.g. PSP atlas entry pointer). NULL = not yet resolved.
-    // Populated by the renderer on first draw, reused on subsequent frames so the
-    // hashmap lookup by (bg, sx, sy, sw, sh) isn't paid per frame per tile.
-    void* rendererAtlasCache;
 } RoomTile;
 
 enum RoomLayerType : uint32_t
@@ -539,7 +565,7 @@ enum RoomLayerType : uint32_t
 
 typedef struct {
     const char* name;
-    uint32_t spritePtr;
+    int32_t spriteIndex; // Direct index into SPRT chunk
     int32_t x;
     int32_t y;
     float scaleX;
@@ -577,6 +603,13 @@ typedef struct {
 } RoomLayerInstancesData;
 
 typedef struct {
+    int32_t backgroundIndex; // tileset (BGND index)
+    uint32_t tilesX; // grid width in tiles
+    uint32_t tilesY; // grid height in tiles
+    uint32_t* tileData; // flat array of tilesX * tilesY tile values (row-major)
+} RoomLayerTilesData;
+
+typedef struct {
     const char* name;
     uint32_t id;
     uint32_t type;
@@ -589,9 +622,11 @@ typedef struct {
     RoomLayerAssetsData *assetsData;
     RoomLayerBackgroundData *backgroundData;
     RoomLayerInstancesData *instancesData;
+    RoomLayerTilesData *tilesData;
 } RoomLayer;
 
 typedef struct {
+    // Scalar header: always valid regardless of payloadLoaded.
     const char* name;
     const char* caption;
     uint32_t width;
@@ -611,15 +646,19 @@ typedef struct {
     float gravityY;
     float metersPerPixel;
 
-    uint32_t backgroundsPtr;
-    uint32_t viewsPtr;
-    uint32_t gameObjectsPtr;
-    uint32_t tilesPtr;
-    uint32_t layersPtr;
-    bool isLoaded;
+    // Lazy-load offsets: absolute file offsets to the PointerList head for each payload section.
+    // Captured during the header pass of parseROOM so DataWin_loadRoomPayload can seek directly.
+    uint32_t backgroundsFileOffset;
+    uint32_t viewsFileOffset;
+    uint32_t gameObjectsFileOffset;
+    uint32_t tilesFileOffset;
+    uint32_t layersFileOffset; // 0 if pre-GMS2
+    bool payloadLoaded;
+    bool eagerlyLoaded; // set if this room's name matched DataWinParserOptions.eagerlyLoadedRooms; payload is preserved across transitions
 
-    RoomBackground backgrounds[8];
-    RoomView views[8];
+    // Payload: valid only when payloadLoaded is true. Zeroed/null otherwise. Backgrounds/views point to a heap array of 8 entries when loaded.
+    RoomBackground* backgrounds;
+    RoomView* views;
     uint32_t gameObjectCount;
     RoomGameObject* gameObjects;
     uint32_t tileCount;
@@ -694,7 +733,9 @@ typedef struct {
 } Function;
 
 typedef struct {
-    uint32_t index;
+    // UndertaleModTool calls this field "Index", but that's because that's how it seemingly worked in pre-bytecode version 17
+    // After bytecode version 17+, this has shown that this is actually the varID of the local variable (it matches the Variable.varID)
+    uint32_t varID;
     const char* name;
 } LocalVar;
 
@@ -747,6 +788,9 @@ typedef struct {
     AudioEntry* entries;
 } Audo;
 
+// ===[ Detected Format ]===
+// The effective GMS version after heuristic detection. GEN8.version is unreliable since GM:S 2,
+// so chunk parsers probe the data and bump these fields upward when they detect newer-format features.
 typedef struct {
     uint32_t major;
     uint32_t minor;
@@ -763,10 +807,7 @@ typedef struct DataWin {
     uint8_t* bytecodeBuffer;     // owned copy of CODE bytecode blob
     // Absolute file offset of bytecodeBuffer[0], we need this because data.win stores absolute offsets (from the beginning of the data.win file) instead of relative offsets
     size_t bytecodeBufferBase;
-#ifndef __3DS__
-    uint8_t* roomBuffer;
-    size_t roomBufferBase;
-#endif
+
     Gen8 gen8;
     Optn optn;
     Lang lang;
@@ -792,26 +833,31 @@ typedef struct DataWin {
     Txtr txtr;
     Audo audo;
 
-    // Lookup map: absolute file offset -> TPAG index (built during TPAG parsing)
-    struct { uint32_t key; int32_t value; }* tpagOffsetMap;
-    // Lookup map: absolute file offset -> SPRT index (built during SPRT parsing)
-    struct { uint32_t key; int32_t value; }* sprtOffsetMap;
-
     DetectedFormat detectedFormat;
 
-    char* filePath;
-    size_t roomChunkOffset;
-    uint32_t roomChunkLength;
+    // Held open across the whole session when DataWinParserOptions.lazyLoadRooms is true.
+    // Used by DataWin_loadRoomPayload to satisfy on-demand room payload reads.
+    // nullptr when lazy loading is disabled. Closed by DataWin_free.
+    FILE* lazyLoadFile;
+    char* lazyLoadFilePath;     // owned strdup of the original file path, for diagnostics
+    bool lazyLoadRooms;          // mirrors the parser option so Runner can branch without re-reading options
+    char* filePath;              // owned strdup of the original data.win path, used by 3DS-side caches
 } DataWin;
 
 DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options);
 void DataWin_free(DataWin* dataWin);
 void DataWin_printDebugSummary(DataWin* dataWin);
-int32_t DataWin_resolveTPAG(DataWin* dw, uint32_t offset);
-int32_t DataWin_resolveSPRT(DataWin* dw, uint32_t offset);
-void GamePath_computeInternal(GamePath* path);
-PathPositionResult GamePath_getPosition(GamePath* path, double t);
-void DataWin_loadRoom(DataWin* dw, int32_t roomIndex);
-void DataWin_unloadRoom(DataWin* dw, int32_t roomIndex);
+// Lazy room payload management. DataWin_loadRoomPayload is a no-op when the payload is already loaded.
+void DataWin_loadRoomPayload(DataWin* dw, int32_t roomIndex);
+void DataWin_freeRoomPayload(Room* room);
+// Finds a reusable dynamic Sprite slot (textureCount == 0) at or above `startIndex`, or appends a new one.
+uint32_t DataWin_allocSpriteSlot(DataWin* dw, uint32_t startIndex);
+// Compares the detected effective GMS version (not the raw GEN8 version) against a lower bound.
+// Returns true if the detected version >= (major, minor, release, build).
+//
+// Mirrors UndertaleModTool's IsVersionAtLeast.
 bool DataWin_isVersionAtLeast(const DataWin* dw, uint32_t major, uint32_t minor, uint32_t release, uint32_t build);
+// Raises the detected effective version to at least (major, minor, release, build). No-op if the detected version is already >= the target.
 void DataWin_bumpVersionTo(DataWin* dw, uint32_t major, uint32_t minor, uint32_t release, uint32_t build);
+void GamePath_computeInternal(GamePath* path);
+PathPositionResult GamePath_getPosition(GamePath* path, float t);

@@ -20,6 +20,8 @@
 
 #include "stb_ds.h"
 
+#define VMBuiltins_find(name) VM_findBuiltin(ctx, (name))
+#define VMBuiltins_register(name, func) VM_registerBuiltin(ctx, (name), (func))
 
 uint32_t g_writerTimeUs = 0;
 int32_t g_writerCalls = 0;
@@ -118,26 +120,101 @@ static const char* selfString(Instance* inst, int32_t varId) {
     return "";
 }
 
+static RValue* findSelfVarSlot(Instance* inst, int32_t varId) {
+    if (inst == NULL || varId < 0) return NULL;
+    return IntRValueHashMap_findSlot(&inst->selfVars, varId);
+}
+
+static RValue cloneLegacyArrayValue(RValue val) {
+    if (val.type == RVALUE_STRING && val.string != nullptr) {
+        return RValue_makeOwnedString(safeStrdup(val.string));
+    }
+    if (val.type == RVALUE_ARRAY && val.array != nullptr) {
+        GMLArray_incRef(val.array);
+        val.ownsString = true;
+        return val;
+    }
+#if IS_BC17_OR_HIGHER_ENABLED
+    if (val.type == RVALUE_METHOD && val.method != nullptr) {
+        GMLMethod_incRef(val.method);
+        val.ownsString = true;
+        return val;
+    }
+#endif
+    return val;
+}
+
+static void updateLegacyArrayEntry(ArrayMapEntry** map, int32_t varId, int32_t index, RValue val) {
+    int64_t key = ((int64_t) varId << 32) | (uint32_t) index;
+    ptrdiff_t existing = hmgeti(*map, key);
+    RValue copy = cloneLegacyArrayValue(val);
+    if (existing >= 0) {
+        RValue_free(&(*map)[existing].value);
+        (*map)[existing].value = copy;
+    } else {
+        hmput(*map, key, copy);
+    }
+}
+
+static RValue* ensureArraySlot(RValue* topLevel, int32_t index) {
+    if (topLevel == nullptr || index < 0) return NULL;
+    if (topLevel->type != RVALUE_ARRAY || topLevel->array == NULL) {
+        RValue_free(topLevel);
+        *topLevel = RValue_makeArray(GMLArray_create(0));
+    }
+    GMLArray_growTo(topLevel->array, index + 1);
+    return GMLArray_slot(topLevel->array, index);
+}
+
+static RValue* selfArraySlot(Instance* inst, int32_t varId, int32_t index, bool create) {
+    if (inst == NULL || varId < 0 || index < 0) return NULL;
+    RValue* topLevel = IntRValueHashMap_getOrInsertUndefined(&inst->selfVars, varId);
+    if (!create) {
+        if (topLevel->type != RVALUE_ARRAY || topLevel->array == NULL) return NULL;
+        return GMLArray_slot(topLevel->array, index);
+    }
+    return ensureArraySlot(topLevel, index);
+}
+
+static RValue* globalArraySlot(VMContext* ctx, int32_t varId, int32_t index, bool create) {
+    if (ctx == NULL || varId < 0 || (uint32_t) varId >= ctx->globalVarCount || index < 0) return NULL;
+    RValue* topLevel = &ctx->globalVars[varId];
+    if (!create) {
+        if (topLevel->type != RVALUE_ARRAY || topLevel->array == NULL) return NULL;
+        return GMLArray_slot(topLevel->array, index);
+    }
+    return ensureArraySlot(topLevel, index);
+}
 
 static RValue selfArrayGet(Instance* inst, int32_t varId, int32_t index) {
-    int64_t k = ((int64_t) varId << 32) | (uint32_t) index;
-    ptrdiff_t idx = hmgeti(inst->selfArrayMap, k);
-    if (0 > idx) return RValue_makeReal(0.0);
-    RValue result = inst->selfArrayMap[idx].value;
+    RValue* slot = selfArraySlot(inst, varId, index, false);
+    if (slot == NULL) return RValue_makeReal(0.0);
+    RValue result = *slot;
     result.ownsString = false;
     return result;
 }
 
 
 static void selfArraySet(Instance* inst, int32_t varId, int32_t index, RValue val) {
-    int64_t k = ((int64_t) varId << 32) | (uint32_t) index;
-    ptrdiff_t idx = hmgeti(inst->selfArrayMap, k);
-    if (idx >= 0) {
-        RValue_free(&inst->selfArrayMap[idx].value);
-        inst->selfArrayMap[idx].value = val;
+    RValue* slot = selfArraySlot(inst, varId, index, true);
+    if (slot == NULL) return;
+    RValue_free(slot);
+    if (val.type == RVALUE_STRING && !val.ownsString && val.string != NULL) {
+        *slot = RValue_makeOwnedString(safeStrdup(val.string));
+    } else if (val.type == RVALUE_ARRAY && val.array != NULL) {
+        GMLArray_incRef(val.array);
+        val.ownsString = true;
+        *slot = val;
+#if IS_BC17_OR_HIGHER_ENABLED
+    } else if (val.type == RVALUE_METHOD && val.method != NULL) {
+        GMLMethod_incRef(val.method);
+        val.ownsString = true;
+        *slot = val;
+#endif
     } else {
-        hmput(inst->selfArrayMap, k, val);
+        *slot = val;
     }
+    updateLegacyArrayEntry(&inst->selfArrayMap, varId, index, *slot);
 }
 
 
@@ -167,15 +244,25 @@ static void globalSet(VMContext* ctx, int32_t varId, RValue val) {
 
 
 static void globalArraySet(VMContext* ctx, int32_t varId, int32_t index, RValue val) {
-    int64_t k = ((int64_t) varId << 32) | (uint32_t) index;
-    ptrdiff_t idx = hmgeti(ctx->globalArrayMap, k);
-    if (idx >= 0) {
-        RValue_free(&ctx->globalArrayMap[idx].value);
-    }
+    RValue* slot = globalArraySlot(ctx, varId, index, true);
+    if (slot == NULL) return;
+    RValue_free(slot);
     if (val.type == RVALUE_STRING && !val.ownsString && val.string != nullptr) {
-        val = RValue_makeOwnedString(safeStrdup(val.string));
+        *slot = RValue_makeOwnedString(safeStrdup(val.string));
+    } else if (val.type == RVALUE_ARRAY && val.array != NULL) {
+        GMLArray_incRef(val.array);
+        val.ownsString = true;
+        *slot = val;
+#if IS_BC17_OR_HIGHER_ENABLED
+    } else if (val.type == RVALUE_METHOD && val.method != NULL) {
+        GMLMethod_incRef(val.method);
+        val.ownsString = true;
+        *slot = val;
+#endif
+    } else {
+        *slot = val;
     }
-    hmput(ctx->globalArrayMap, k, val);
+    updateLegacyArrayEntry(&ctx->globalArrayMap, varId, index, *slot);
 }
 
 
@@ -1051,9 +1138,10 @@ static void initChasefire2Cache(VMContext* ctx, DataWin* dw) {
 }
 
 static Instance* findInstanceByObject(Runner* runner, int32_t objIdx) {
-    if (objIdx < 0 || objIdx >= runner->instancesByObjMax || runner->instancesByObjInclParent == NULL) return NULL;
+    if (runner == NULL || runner->instancesByObject == NULL || objIdx < 0 ||
+        (uint32_t) objIdx >= runner->dataWin->objt.count) return NULL;
 
-    Instance** list = runner->instancesByObjInclParent[objIdx];
+    Instance** list = runner->instancesByObject[objIdx];
     int32_t n = (int32_t)arrlen(list);
     for (int32_t i = 0; i < n; i++) {
         if (list[i]->active) return list[i];
@@ -1137,9 +1225,8 @@ static inline bool checkHeartCollision(Runner* runner, Instance* inst) {
 }
 
 static inline GMLReal getGlobalArray(VMContext* ctx, int32_t varID, int32_t index) {
-    int64_t k = ((int64_t)varID << 32) | (uint32_t)index;
-    ptrdiff_t i = hmgeti(ctx->globalArrayMap, k);
-    return (i >= 0) ? RValue_toReal(ctx->globalArrayMap[i].value) : 0.0;
+    RValue* slot = globalArraySlot(ctx, varID, index, false);
+    return (slot != NULL) ? RValue_toReal(*slot) : 0.0;
 }
 
 // Per-frame cache for border positions (avoids 2× findInstanceByObject + 2× getGlobalArray per bullet)
@@ -1979,17 +2066,16 @@ static void initSwapperCache(VMContext* ctx, DataWin* dw) {
 static inline void swapperDrawText(Runner* runner, float x, float y, const char* text) {
     Renderer* r = runner->renderer;
     if (!r || !text) return;
-    char* processed = TextUtils_preprocessGmlTextIfNeeded(runner, text);
-    r->vtable->drawText(r, processed, x, y, 1.0f, 1.0f, 0.0f);
-    free(processed);
+    PreprocessedText processed = TextUtils_preprocessGmlTextIfNeeded(runner, text);
+    r->vtable->drawText(r, processed.text, x, y, 1.0f, 1.0f, 0.0f);
+    PreprocessedText_free(processed);
 }
 
 
 static const char* swapperGetArrayString(VMContext* ctx, int32_t varID, int32_t idx) {
-    int64_t k = ((int64_t)varID << 32) | (uint32_t)idx;
-    ptrdiff_t i = hmgeti(ctx->globalArrayMap, k);
-    if (i < 0) return "";
-    RValue v = ctx->globalArrayMap[i].value;
+    RValue* slot = globalArraySlot(ctx, varID, idx, false);
+    if (slot == NULL) return "";
+    RValue v = *slot;
     if (v.type == RVALUE_STRING && v.string) return v.string;
     return "";
 }
@@ -2706,7 +2792,7 @@ static int32_t findAllSelfVarIds(DataWin* dw, const char* name, int32_t* outArr,
 
 static int32_t resolveSelfVarIdForInst(Instance* inst, const int32_t* candidates, int32_t count) {
     for (int32_t i = 0; i < count; i++) {
-        if (hmgeti(inst->selfVars, candidates[i]) >= 0) return candidates[i];
+        if (IntRValueHashMap_contains(&inst->selfVars, candidates[i])) return candidates[i];
     }
     return (count > 0) ? candidates[0] : -1;  
 }
@@ -2896,9 +2982,9 @@ static inline void drawFilledRect(Renderer* r, float x1, float y1, float x2, flo
 
 
 static inline void nativeDrawText(Runner* runner, Renderer* r, float x, float y, const char* text) {
-    char* processed = TextUtils_preprocessGmlTextIfNeeded(runner, text);
-    r->vtable->drawText(r, processed, x, y, 1.0f, 1.0f, 0.0f);
-    free(processed);
+    PreprocessedText processed = TextUtils_preprocessGmlTextIfNeeded(runner, text);
+    r->vtable->drawText(r, processed.text, x, y, 1.0f, 1.0f, 0.0f);
+    PreprocessedText_free(processed);
 }
 
 
@@ -2906,19 +2992,20 @@ static inline float nativeStringWidth(Runner* runner, Renderer* r, const char* t
     int32_t fontIndex = r->drawFont;
     if (0 > fontIndex || r->dataWin->font.count <= (uint32_t)fontIndex) return 0.0f;
     Font* font = &r->dataWin->font.fonts[fontIndex];
-    char* processed = TextUtils_preprocessGmlTextIfNeeded(runner, text);
-    int32_t textLen = (int32_t)strlen(processed);
+    PreprocessedText processed = TextUtils_preprocessGmlTextIfNeeded(runner, text);
+    const char* processedText = processed.text;
+    int32_t textLen = (int32_t)strlen(processedText);
     float maxWidth = 0;
     int32_t lineStart = 0;
     while (textLen >= lineStart) {
         int32_t lineEnd = lineStart;
-        while (textLen > lineEnd && !TextUtils_isNewlineChar(processed[lineEnd]))
+        while (textLen > lineEnd && !TextUtils_isNewlineChar(processedText[lineEnd]))
             lineEnd++;
-        float w = TextUtils_measureLineWidth(font, processed + lineStart, lineEnd - lineStart);
+        float w = TextUtils_measureLineWidth(font, processedText + lineStart, lineEnd - lineStart);
         if (w > maxWidth) maxWidth = w;
         lineStart = lineEnd + 1;
     }
-    free(processed);
+    PreprocessedText_free(processed);
     return maxWidth;
 }
 
@@ -4111,9 +4198,9 @@ static void native_dialoguer_Draw0(VMContext* ctx, Runner* runner, Instance* ins
     
     
     
-    if (dialoguerCache.objFace >= 0 && dialoguerCache.objFace < runner->instancesByObjMax &&
-        runner->instancesByObjInclParent != NULL) {
-        Instance** list = runner->instancesByObjInclParent[dialoguerCache.objFace];
+    if (dialoguerCache.objFace >= 0 && runner->instancesByObject != NULL &&
+        (uint32_t) dialoguerCache.objFace < runner->dataWin->objt.count) {
+        Instance** list = runner->instancesByObject[dialoguerCache.objFace];
         int32_t n = (int32_t)arrlen(list);
         Instance* face = NULL;
         for (int32_t i = 0; i < n; i++) {
@@ -4400,9 +4487,9 @@ static void native_overworldctrl_Draw0(VMContext* ctx, Runner* runner, Instance*
             float name0_scale = 1.0f;
             if (isJa) { r->drawFont = 12; name0_y += 4.0f; name0_scale = 0.5f; }
             const char* charname = globalString(ctx, ovrctrlCache.gCharname);
-            char* charnameProc = TextUtils_preprocessGmlTextIfNeeded(runner, charname);
-            r->vtable->drawText(r, charnameProc, 23.0f + xx, name0_y, name0_scale, name0_scale, 0);
-            free(charnameProc);
+            PreprocessedText charnameProc = TextUtils_preprocessGmlTextIfNeeded(runner, charname);
+            r->vtable->drawText(r, charnameProc.text, 23.0f + xx, name0_y, name0_scale, name0_scale, 0);
+            PreprocessedText_free(charnameProc);
 
             r->drawFont = isJa ? 14 : 2;
             float xx0 = xx; if (isJa) xx0 -= 2.0f;
@@ -7095,11 +7182,7 @@ static void native_ratingsmaster_Draw0(VMContext* ctx, Runner* runner, Instance*
             RValue_free(&rqsVal);
             {
                 
-                int64_t k = ((int64_t)ratingsCache.rq_s << 32) | (uint32_t)i;
-                RValue nv = RValue_makeReal(rqs);
-                ptrdiff_t p = hmgeti(inst->selfArrayMap, k);
-                if (p >= 0) { RValue_free(&inst->selfArrayMap[p].value); inst->selfArrayMap[p].value = nv; }
-                else        { ArrayMapEntry e = { .key = k, .value = nv }; hmputs(inst->selfArrayMap, e); }
+                selfArraySet(inst, ratingsCache.rq_s, i, RValue_makeReal(rqs));
             }
 
             float rowAlpha = 1.0f;
@@ -7178,11 +7261,7 @@ static void native_ratingsmaster_Draw0(VMContext* ctx, Runner* runner, Instance*
             for (int32_t k = 0; k < 2; k++) {
                 int32_t idx = i + k;
                 GMLReal v = (k == 0) ? py0 : py1;
-                int64_t key = ((int64_t)ratingsCache.rpy << 32) | (uint32_t)idx;
-                RValue nv = RValue_makeReal(v);
-                ptrdiff_t p = hmgeti(inst->selfArrayMap, key);
-                if (p >= 0) { RValue_free(&inst->selfArrayMap[p].value); inst->selfArrayMap[p].value = nv; }
-                else        { ArrayMapEntry e = { .key = key, .value = nv }; hmputs(inst->selfArrayMap, e); }
+                selfArraySet(inst, ratingsCache.rpy, idx, RValue_makeReal(v));
             }
 
             
@@ -9670,10 +9749,7 @@ static void actRunPattern(VMContext* ctx, Runner* runner, Instance* inst, const 
                     res.string = NULL;
                     res.ownsString = false;
                 }
-                int64_t k = ((int64_t)actSharedCache.globalMsgVarId << 32) | (uint32_t)slot;
-                ptrdiff_t idx = hmgeti(ctx->globalArrayMap, k);
-                if (idx >= 0) { RValue_free(&ctx->globalArrayMap[idx].value); ctx->globalArrayMap[idx].value = nv; }
-                else          { ArrayMapEntry e = { .key = k, .value = nv }; hmputs(ctx->globalArrayMap, e); }
+                globalArraySet(ctx, actSharedCache.globalMsgVarId, slot, nv);
                 RValue_free(&res);  
             }
         }
@@ -9999,13 +10075,10 @@ static void native_bookMaster_Draw0(VMContext* ctx, Runner* runner, Instance* in
                 ctx->currentInstance = inst;
                 RValue res = gtFn(ctx, &arg, 1);
                 ctx->currentInstance = saved;
-                int64_t k = ((int64_t)actSharedCache.globalMsgVarId << 32) | (uint32_t)slot;
                 RValue nv = res;
                 if (nv.type == RVALUE_STRING && nv.string)
                     nv = RValue_makeOwnedString(safeStrdup(nv.string));
-                ptrdiff_t idx = hmgeti(ctx->globalArrayMap, k);
-                if (idx >= 0) { RValue_free(&ctx->globalArrayMap[idx].value); ctx->globalArrayMap[idx].value = nv; }
-                else          { ArrayMapEntry e = { .key = k, .value = nv }; hmputs(ctx->globalArrayMap, e); }
+                globalArraySet(ctx, actSharedCache.globalMsgVarId, slot, nv);
                 RValue_free(&res);
             }
         }
@@ -10568,11 +10641,7 @@ static void native_coolbus_Draw0(VMContext* ctx, Runner* runner, Instance* inst)
             
             if (heart->y < 270.0f) {
                 int32_t snapped = (int32_t)floorf(((heart->y - 20.0f) / 5.0f) + 0.5f) * 5;
-                int64_t k = ((int64_t)coolbusCache.gIdealborder << 32) | (uint32_t)2;
-                RValue nv = RValue_makeReal((GMLReal)snapped);
-                ptrdiff_t idx = hmgeti(ctx->globalArrayMap, k);
-                if (idx >= 0) { RValue_free(&ctx->globalArrayMap[idx].value); ctx->globalArrayMap[idx].value = nv; }
-                else          { ArrayMapEntry e = { .key = k, .value = nv }; hmputs(ctx->globalArrayMap, e); }
+                globalArraySet(ctx, coolbusCache.gIdealborder, 2, RValue_makeReal((GMLReal)snapped));
             }
             
             if (coolbusCache.movinged >= 0) {
@@ -12066,10 +12135,10 @@ static void native_mettnews_ticker_Draw0(VMContext* ctx, Runner* runner, Instanc
         if (doom == 0) {
             nativeDrawText(runner, r, inst->x + 320.0f - (float)tx, inst->y + 10.0f + (float)voff, stringer);
         } else {
-            char* processed = TextUtils_preprocessGmlTextIfNeeded(runner, stringer);
-            r->vtable->drawText(r, processed, inst->x + 320.0f - (float)tx,
+            PreprocessedText processed = TextUtils_preprocessGmlTextIfNeeded(runner, stringer);
+            r->vtable->drawText(r, processed.text, inst->x + 320.0f - (float)tx,
                                 inst->y + 10.0f + (float)voff, 2.0f, 1.0f, 0.0f);
-            free(processed);
+            PreprocessedText_free(processed);
         }
     }
     
@@ -13553,11 +13622,11 @@ static void native_asrielBody_Draw0(VMContext* ctx, Runner* runner, Instance* in
 
             char letter[8] = {0};
             if (byteLen > 0 && byteLen < 8) memcpy(letter, fullphrase + startPos, (size_t)byteLen);
-            char* processed = TextUtils_preprocessGmlTextIfNeeded(runner, letter);
+            PreprocessedText processed = TextUtils_preprocessGmlTextIfNeeded(runner, letter);
             float tx = textx + (float)(sin(((double)siner + (double)charIdx) / 5.0) * 8.0);
             float ty = 270.0f + (float)(cos(((double)siner + (double)charIdx) / 5.0) * 4.0);
-            r->vtable->drawText(r, processed, tx, ty, 1.0f, 1.0f, 0.0f);
-            free(processed);
+            r->vtable->drawText(r, processed.text, tx, ty, 1.0f, 1.0f, 0.0f);
+            PreprocessedText_free(processed);
 
             if (isJa) {
                 uint16_t code = ch;
@@ -15580,8 +15649,9 @@ static void initSpeartileCache(DataWin* dw) {
 
 
 static bool speartile_collisionPoint(Runner* runner, DataWin* dw, Instance* self, float px, float py, int32_t targetObj) {
-    if (targetObj < 0 || targetObj >= runner->instancesByObjMax || runner->instancesByObjInclParent == NULL) return false;
-    Instance** list = runner->instancesByObjInclParent[targetObj];
+    if (runner == NULL || runner->instancesByObject == NULL || targetObj < 0 ||
+        (uint32_t) targetObj >= runner->dataWin->objt.count) return false;
+    Instance** list = runner->instancesByObject[targetObj];
     int32_t n = (int32_t)arrlen(list);
 
     for (int32_t i = 0; i < n; i++) {
@@ -16033,15 +16103,13 @@ static void native_confetti_Step0(VMContext* ctx, Runner* runner, Instance* inst
     if (!confettiCache.ready) return;
 
     
-    ptrdiff_t si = hmgeti(inst->selfVars, confettiCache.siner);
-    ptrdiff_t ti = hmgeti(inst->selfVars, confettiCache.timer);
-    if (si < 0 || ti < 0) return;  
+    RValue* sv = findSelfVarSlot(inst, confettiCache.siner);
+    RValue* tv = findSelfVarSlot(inst, confettiCache.timer);
+    if (sv == NULL || tv == NULL) return;  
 
     
     
     
-    RValue* sv = &inst->selfVars[si].value;
-    RValue* tv = &inst->selfVars[ti].value;
     GMLReal siner = (sv->type == RVALUE_REAL) ? sv->real : RValue_toReal(*sv);
     GMLReal timer = (tv->type == RVALUE_REAL) ? tv->real : RValue_toReal(*tv);
     siner += 1.0;
@@ -16211,7 +16279,7 @@ static void native_mettatonnnWriter_Draw0(VMContext* ctx, Runner* runner, Instan
     r->drawColor = 0xFFFFFFu;
 
     
-    char* chProc = TextUtils_preprocessGmlTextIfNeeded(runner, ch);
+    PreprocessedText chProc = TextUtils_preprocessGmlTextIfNeeded(runner, ch);
 
     float randScale = 1.0f / (float)RAND_MAX;
     #define RND01() ((float)rand() * randScale >= 0.5f ? 1.0f : 0.0f)
@@ -16219,7 +16287,7 @@ static void native_mettatonnnWriter_Draw0(VMContext* ctx, Runner* runner, Instan
     
     float xx = xstart_top, yy = ystart_top;
     for (int32_t i = 0; i < count_top; i++) {
-        r->vtable->drawText(r, chProc, xx + RND01(), yy + RND01(), 1.0f, 1.0f, 0.0f);
+        r->vtable->drawText(r, chProc.text, xx + RND01(), yy + RND01(), 1.0f, 1.0f, 0.0f);
         xx += spacing;
     }
 
@@ -16229,26 +16297,26 @@ static void native_mettatonnnWriter_Draw0(VMContext* ctx, Runner* runner, Instan
     
     xx = xstart_right; yy = ystart_right;
     for (int32_t i = 0; i < count_right; i++) {
-        r->vtable->drawText(r, chProc, xx + RND01(), yy + RND01(), 1.0f, 1.0f, 270.0f);
+        r->vtable->drawText(r, chProc.text, xx + RND01(), yy + RND01(), 1.0f, 1.0f, 270.0f);
         yy += spacing;
     }
 
     
     xx = xstart_bottom; yy = ystart_bottom;
     for (int32_t i = 0; i < count_bottom; i++) {
-        r->vtable->drawText(r, chProc, xx + RND01(), yy + RND01(), 1.0f, 1.0f, 180.0f);
+        r->vtable->drawText(r, chProc.text, xx + RND01(), yy + RND01(), 1.0f, 1.0f, 180.0f);
         xx -= spacing;
     }
 
     
     xx = xstart_left; yy = ystart_left;
     for (int32_t i = 0; i < count_left; i++) {
-        r->vtable->drawText(r, chProc, xx + RND01(), yy + RND01(), 1.0f, 1.0f, 90.0f);
+        r->vtable->drawText(r, chProc.text, xx + RND01(), yy + RND01(), 1.0f, 1.0f, 90.0f);
         yy -= spacing;
     }
 
     #undef RND01
-    free(chProc);
+    PreprocessedText_free(chProc);
 }
 
 
@@ -16318,9 +16386,8 @@ static void native_chimesparkle_Step0(VMContext* ctx, Runner* runner, Instance* 
     (void)ctx;
     if (!chimesparkleCache.ready) return;
 
-    ptrdiff_t ti = hmgeti(inst->selfVars, chimesparkleCache.timer);
-    if (ti < 0) return;
-    RValue* tv = &inst->selfVars[ti].value;
+    RValue* tv = findSelfVarSlot(inst, chimesparkleCache.timer);
+    if (tv == NULL) return;
     GMLReal timer = (tv->type == RVALUE_REAL) ? tv->real : RValue_toReal(*tv);
 
     if (timer < 30.0) inst->imageAlpha += 0.1f;
@@ -16362,11 +16429,9 @@ static void native_sugarbullet_Step0(VMContext* ctx, Runner* runner, Instance* i
 
     if (inst->vspeed > 0.0f) inst->depth = 2;
 
-    ptrdiff_t si = hmgeti(inst->selfVars, sugarbulletCache.size);
-    ptrdiff_t ai = hmgeti(inst->selfVars, sugarbulletCache.ang);
-    if (si < 0 || ai < 0) return;
-    RValue* sv = &inst->selfVars[si].value;
-    RValue* av = &inst->selfVars[ai].value;
+    RValue* sv = findSelfVarSlot(inst, sugarbulletCache.size);
+    RValue* av = findSelfVarSlot(inst, sugarbulletCache.ang);
+    if (sv == NULL || av == NULL) return;
     GMLReal size = (sv->type == RVALUE_REAL) ? sv->real : RValue_toReal(*sv);
     GMLReal ang  = (av->type == RVALUE_REAL) ? av->real : RValue_toReal(*av);
 
@@ -16498,9 +16563,8 @@ static void native_mettEggbullet_Step0(VMContext* ctx, Runner* runner, Instance*
 
     if (inst->imageAlpha < 1.0f) inst->imageAlpha += 0.2f;
 
-    ptrdiff_t ai = hmgeti(inst->selfVars, mettEggbulletCache.ang);
-    if (ai >= 0) {
-        RValue* av = &inst->selfVars[ai].value;
+    RValue* av = findSelfVarSlot(inst, mettEggbulletCache.ang);
+    if (av != NULL) {
         GMLReal ang = (av->type == RVALUE_REAL) ? av->real : RValue_toReal(*av);
         inst->imageAngle += (float)ang;
     }
@@ -16539,11 +16603,9 @@ static void native_steamplume2_Step0(VMContext* ctx, Runner* runner, Instance* i
     inst->imageYscale += 0.1f;
 
     
-    ptrdiff_t ti = hmgeti(inst->selfVars, steamplume2Cache.t_v);
-    ptrdiff_t ai = hmgeti(inst->selfVars, steamplume2Cache.aa_v);
-    if (ti < 0 || ai < 0) return;
-    RValue* tv = &inst->selfVars[ti].value;
-    RValue* av = &inst->selfVars[ai].value;
+    RValue* tv = findSelfVarSlot(inst, steamplume2Cache.t_v);
+    RValue* av = findSelfVarSlot(inst, steamplume2Cache.aa_v);
+    if (tv == NULL || av == NULL) return;
     GMLReal t  = (tv->type == RVALUE_REAL) ? tv->real : RValue_toReal(*tv);
     GMLReal aa = (av->type == RVALUE_REAL) ? av->real : RValue_toReal(*av);
 

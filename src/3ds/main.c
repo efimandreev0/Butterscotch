@@ -22,9 +22,9 @@
 u32 __ctru_heap_size = 0;
 u32 __ctru_linear_heap_size = 25 * 1024 * 1024;
 u32 __stacksize__ = 64 * 1024;
-//#define DELTA
+#define DELTA
 #ifdef DELTA
-#define DATA_WIN_PATH "sdmc:/3ds/butterscotch/delta/data.orig.win"
+#define DATA_WIN_PATH "sdmc:/3ds/butterscotch/delta/chapter1_windows/data.orig.win"
 #define NOVA_TEX_CACHE_PATH "sdmc:/3ds/butterscotch/delta/cache"
 #define CODE_CACHE_PATH    "sdmc:/3ds/butterscotch/delta/cache/code.cache"
 #else
@@ -194,9 +194,8 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
         audio->dataWin = dataWin;
     }
 
-    Runner* runner = Runner_create(dataWin, vm, (FileSystem*) fs);
-    runner->renderer = renderer;
-    runner->audioSystem = audio;
+    Runner* runner = Runner_create(dataWin, vm, renderer, (FileSystem*) fs, audio);
+    runner->osType = OS_3DS;
 
     audio->vtable->init(audio, audio->dataWin, (FileSystem*) fs);
     renderer->vtable->init(renderer, dataWin);
@@ -242,10 +241,11 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
         bool viewsEnabled = (activeRoom->flags & 1) != 0;
         if (viewsEnabled) {
             int32_t maxRight = 0, maxBottom = 0;
-            for (int vi = 0; vi < 8; vi++) {
-                if (!activeRoom->views[vi].enabled) continue;
-                int32_t right = activeRoom->views[vi].portX + activeRoom->views[vi].portWidth;
-                int32_t bottom = activeRoom->views[vi].portY + activeRoom->views[vi].portHeight;
+            for (int vi = 0; vi < MAX_VIEWS; vi++) {
+                RuntimeView* view = &runner->views[vi];
+                if (!view->enabled) continue;
+                int32_t right = view->portX + view->portWidth;
+                int32_t bottom = view->portY + view->portHeight;
                 if (right > maxRight) maxRight = right;
                 if (bottom > maxBottom) maxBottom = bottom;
             }
@@ -283,8 +283,8 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
 
             bool anyViewRendered = false;
             if (viewsEnabled) {
-                for (int vi = 0; vi < 8; vi++) {
-                    RoomView* view = &activeRoom->views[vi];
+                for (int vi = 0; vi < MAX_VIEWS; vi++) {
+                    RuntimeView* view = &runner->views[vi];
                     if (!view->enabled) continue;
 
                     int32_t viewX = view->viewX;
@@ -295,7 +295,7 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
                     int32_t portY = view->portY;
                     int32_t portW = view->portWidth;
                     int32_t portH = view->portHeight;
-                    float viewAngle = runner->viewAngles[vi];
+                    float viewAngle = view->viewAngle;
 
                     runner->viewCurrent = vi;
 
@@ -303,6 +303,11 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
                     renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH, portX, portY, portW, portH, viewAngle);
                     Runner_draw(runner);
                     renderer->vtable->endView(renderer);
+                    int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : portW;
+                    int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : portH;
+                    renderer->vtable->beginGUI(renderer, guiW, guiH, portX, portY, portW, portH);
+                    Runner_drawGUI(runner);
+                    renderer->vtable->endGUI(renderer);
                     renderer->vtable->flush(renderer);
 
                     anyViewRendered = true;
@@ -315,6 +320,11 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
                 renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, 0, 0, gameW, gameH, 0.0f);
                 Runner_draw(runner);
                 renderer->vtable->endView(renderer);
+                int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : gameW;
+                int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : gameH;
+                renderer->vtable->beginGUI(renderer, guiW, guiH, 0, 0, gameW, gameH);
+                Runner_drawGUI(runner);
+                renderer->vtable->endGUI(renderer);
                 renderer->vtable->flush(renderer);
             }
 

@@ -6,6 +6,37 @@
 
 #include "stb_ds.h"
 #include "utils.h"
+#include "int_rvalue_hashmap.h"
+
+static RValue cloneArrayMapValue(RValue val) {
+    if (val.type == RVALUE_STRING && val.string != nullptr) {
+        return RValue_makeOwnedString(safeStrdup(val.string));
+    }
+    if (val.type == RVALUE_ARRAY && val.array != nullptr) {
+        GMLArray_incRef(val.array);
+        val.ownsString = true;
+        return val;
+    }
+#if IS_BC17_OR_HIGHER_ENABLED
+    if (val.type == RVALUE_METHOD && val.method != nullptr) {
+        GMLMethod_incRef(val.method);
+        val.ownsString = true;
+        return val;
+    }
+#endif
+    return val;
+}
+
+static void arrayMapPutOwned(ArrayMapEntry** map, int64_t key, RValue val) {
+    ptrdiff_t idx = hmgeti(*map, key);
+    RValue copy = cloneArrayMapValue(val);
+    if (idx >= 0) {
+        RValue_free(&(*map)[idx].value);
+        (*map)[idx].value = copy;
+    } else {
+        hmput(*map, key, copy);
+    }
+}
 
 Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, GMLReal x, GMLReal y) {
     Instance* inst = safeCalloc(1, sizeof(Instance));
@@ -24,6 +55,7 @@ Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, GMLReal x, G
     inst->visible = true;
     inst->destroyed = false;
     inst->outsideRoom = false;
+    inst->spatialGridDirty = false;
     inst->spriteIndex = -1;
     inst->imageSpeed = 1.0f;
     inst->imageIndex = 0.0f;
@@ -42,9 +74,6 @@ Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, GMLReal x, G
     inst->gravityDirection = 270.0f;
     inst->pathIndex = -1;
     inst->pathScale = 1.0f;
-    inst->selfVars = nullptr;
-    inst->selfArrayMap = nullptr;
-    inst->selfArrayVarTracker = nullptr;
 
     // Initialize alarms to -1 (inactive)
     repeat(GML_ALARM_COUNT, i) {
@@ -57,22 +86,72 @@ Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, GMLReal x, G
 void Instance_free(Instance* instance) {
     if (instance == nullptr) return;
 
-    // Free owned strings in selfVars hashmap
-    repeat(hmlen(instance->selfVars), i) {
-        RValue_free(&instance->selfVars[i].value);
-    }
-    hmfree(instance->selfVars);
-
-    // Free selfArrayMap
-    repeat(hmlen(instance->selfArrayMap), i) {
+    // Free owned strings and decRef owned arrays in selfVars hashmap, then release the entries buffer.
+    IntRValueHashMap_freeAllValues(&instance->selfVars);
+    int32_t legacyArrayLen = (int32_t) hmlen(instance->selfArrayMap);
+    repeat(legacyArrayLen, i) {
         RValue_free(&instance->selfArrayMap[i].value);
     }
     hmfree(instance->selfArrayMap);
-
-    // Free selfArrayVarTracker
-    hmfree(instance->selfArrayVarTracker);
+    arrfree(instance->collisionCells);
 
     free(instance);
+}
+
+void Instance_copyFields(Instance* source, Instance* destination) {
+    destination->x = source->x;
+    destination->y = source->y;
+    destination->xprevious = source->xprevious;
+    destination->yprevious = source->yprevious;
+    destination->xstart = source->xstart;
+    destination->ystart = source->ystart;
+    destination->persistent = source->persistent;
+    destination->solid = source->solid;
+    destination->active = source->active;
+    destination->visible = source->visible;
+    destination->outsideRoom = source->outsideRoom;
+    destination->maskIndex = source->maskIndex;
+    destination->spriteIndex = source->spriteIndex;
+    destination->imageSpeed = source->imageSpeed;
+    destination->imageIndex = source->imageIndex;
+    destination->imageXscale = source->imageXscale;
+    destination->imageYscale = source->imageYscale;
+    destination->imageAngle = source->imageAngle;
+    destination->imageAlpha = source->imageAlpha;
+    destination->imageBlend = source->imageBlend;
+    destination->depth = source->depth;
+    destination->speed = source->speed;
+    destination->direction = source->direction;
+    destination->hspeed = source->hspeed;
+    destination->vspeed = source->vspeed;
+    destination->friction = source->friction;
+    destination->gravity = source->gravity;
+    destination->gravityDirection = source->gravityDirection;
+    destination->pathIndex = source->pathIndex;
+    destination->pathPosition = source->pathPosition;
+    destination->pathPositionPrevious = source->pathPositionPrevious;
+    destination->pathSpeed = source->pathSpeed;
+    destination->pathScale = source->pathScale;
+    destination->pathOrientation = source->pathOrientation;
+    destination->pathEndAction = source->pathEndAction;
+    destination->pathXStart = source->pathXStart;
+    destination->pathYStart = source->pathYStart;
+    repeat(GML_ALARM_COUNT, i) {
+        destination->alarm[i] = source->alarm[i];
+    }
+    destination->activeAlarmMask = source->activeAlarmMask;
+
+    // Deep-copy self variables (Instance_setSelfVar handles string duplication + array incRef)
+    repeat(source->selfVars.capacity, i) {
+        IntRValueEntry* entry = &source->selfVars.entries[i];
+        if (entry->key != INT_RVALUE_HASHMAP_EMPTY_KEY) {
+            Instance_setSelfVar(destination, entry->key, entry->value);
+        }
+    }
+    int32_t legacyArrayLen = (int32_t) hmlen(source->selfArrayMap);
+    repeat(legacyArrayLen, i) {
+        arrayMapPutOwned(&destination->selfArrayMap, source->selfArrayMap[i].key, source->selfArrayMap[i].value);
+    }
 }
 
 // Compute speed and direction from hspeed/vspeed (HTML5: Compute_Speed1)

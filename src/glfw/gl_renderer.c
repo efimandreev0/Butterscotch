@@ -343,10 +343,27 @@ static void glEndFrame(Renderer* renderer) {
     GLRenderer* gl = (GLRenderer*) renderer;
     glBindVertexArray(0);
 
+    int effectiveEndX, effectiveEndY;
+    int effectiveStartX, effectiveStartY;
+
+    // Try and match the "intended" aspect ratio as closely 
+    // as possible while still fitting on the screen
+    if ((gl->gameW * gl->windowH) / gl->gameH < gl->windowW) {
+        effectiveEndX = (gl->gameW * gl->windowH) / gl->gameH;
+        effectiveEndY = gl->windowH;
+    } else {
+        effectiveEndX = gl->windowW;
+        effectiveEndY = (gl->gameH * gl->windowW) / gl->gameW;
+    }
+    effectiveStartX = (gl->windowW - effectiveEndX) / 2;
+    effectiveStartY = (gl->windowH - effectiveEndY) / 2;
+    effectiveEndX += effectiveStartX;
+    effectiveEndY += effectiveStartY;
+
     // Blit the full game-resolution FBO to the window
     glBindFramebuffer(GL_READ_FRAMEBUFFER, gl->fbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-    glBlitFramebuffer(0, 0, gl->fboWidth, gl->fboHeight, 0, 0, gl->windowW, gl->windowH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBlitFramebuffer(0, 0, gl->fboWidth, gl->fboHeight, effectiveStartX, effectiveStartY, effectiveEndX, effectiveEndY, GL_COLOR_BUFFER_BIT, GL_NEAREST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -387,29 +404,55 @@ static bool ensureTextureLoaded(GLRenderer* gl, uint32_t pageId) {
     return true;
 }
 
-static void glDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y, float originX, float originY, float xscale, float yscale, float angleDeg, uint32_t color, float alpha) {
-    GLRenderer* gl = (GLRenderer*) renderer;
-    DataWin* dw = renderer->dataWin;
-
-    if (0 > tpagIndex || dw->tpag.count <= (uint32_t) tpagIndex) return;
-
+// Resolves a TPAG index to a loaded GL texture. Returns false if drawing should be skipped.
+static bool resolveSpriteTexture(GLRenderer* gl, int32_t tpagIndex, TexturePageItem** outTpag, GLuint* outTexId, int32_t* outTexW, int32_t* outTexH) {
+    DataWin* dw = gl->base.dataWin;
+    if (0 > tpagIndex || dw->tpag.count <= (uint32_t) tpagIndex) return false;
     TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
     int16_t pageId = tpag->texturePageId;
-    if (0 > pageId || gl->textureCount <= (uint32_t) pageId) return;
-    if (!ensureTextureLoaded(gl, (uint32_t) pageId)) return;
+    if (0 > pageId || gl->textureCount <= (uint32_t) pageId) return false;
+    if (!ensureTextureLoaded(gl, (uint32_t) pageId)) return false;
+    *outTpag = tpag;
+    *outTexId = gl->glTextures[pageId];
+    *outTexW = gl->textureWidths[pageId];
+    *outTexH = gl->textureHeights[pageId];
+    return true;
+}
 
-    GLuint texId = gl->glTextures[pageId];
-    int32_t texW = gl->textureWidths[pageId];
-    int32_t texH = gl->textureHeights[pageId];
-
-    // Flush if texture changed or batch full
-    if (gl->quadCount > 0 && gl->currentTextureId != texId) {
-        flushBatch(gl);
-    }
-    if (gl->quadCount >= MAX_QUADS) {
-        flushBatch(gl);
-    }
+// Emits a single textured quad into the batch given 4 final screen-space corners (TL, TR, BR, BL), 4 UVs forming a rect (u0,v0)-(u1,v1), and a flat color/alpha.
+// Handles texture rebinding and batch flushing.
+static void emitTexturedQuad(GLRenderer* gl, GLuint texId, float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3, float u0, float v0, float u1, float v1, float r, float g, float b, float alpha) {
+    if (gl->quadCount > 0 && gl->currentTextureId != texId) flushBatch(gl);
+    if (gl->quadCount >= MAX_QUADS) flushBatch(gl);
     gl->currentTextureId = texId;
+
+    float* verts = gl->vertexData + gl->quadCount * VERTICES_PER_QUAD * FLOATS_PER_VERTEX;
+
+    // Vertex 0: top-left
+    verts[0] = x0; verts[1] = y0; verts[2] = u0; verts[3] = v0;
+    verts[4] = r;  verts[5] = g;  verts[6] = b;  verts[7] = alpha;
+
+    // Vertex 1: top-right
+    verts[8]  = x1; verts[9]  = y1; verts[10] = u1; verts[11] = v0;
+    verts[12] = r;  verts[13] = g;  verts[14] = b;  verts[15] = alpha;
+
+    // Vertex 2: bottom-right
+    verts[16] = x2; verts[17] = y2; verts[18] = u1; verts[19] = v1;
+    verts[20] = r;  verts[21] = g;  verts[22] = b;  verts[23] = alpha;
+
+    // Vertex 3: bottom-left
+    verts[24] = x3; verts[25] = y3; verts[26] = u0; verts[27] = v1;
+    verts[28] = r;  verts[29] = g;  verts[30] = b;  verts[31] = alpha;
+
+    gl->quadCount++;
+}
+
+static void glDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y, float originX, float originY, float xscale, float yscale, float angleDeg, uint32_t color, float alpha) {
+    GLRenderer* gl = (GLRenderer*) renderer;
+    TexturePageItem* tpag;
+    GLuint texId;
+    int32_t texW, texH;
+    if (!resolveSpriteTexture(gl, tpagIndex, &tpag, &texId, &texW, &texH)) return;
 
     // Compute normalized UVs from TPAG source rect
     float u0 = (float) tpag->sourceX / (float) texW;
@@ -442,26 +485,7 @@ static void glDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y
     float g = (float) BGR_G(color) / 255.0f;
     float b = (float) BGR_B(color) / 255.0f;
 
-    // Write 4 vertices into batch buffer
-    float* verts = gl->vertexData + gl->quadCount * VERTICES_PER_QUAD * FLOATS_PER_VERTEX;
-
-    // Vertex 0: top-left
-    verts[0] = x0; verts[1] = y0; verts[2] = u0; verts[3] = v0;
-    verts[4] = r;  verts[5] = g;  verts[6] = b;  verts[7] = alpha;
-
-    // Vertex 1: top-right
-    verts[8]  = x1; verts[9]  = y1; verts[10] = u1; verts[11] = v0;
-    verts[12] = r;  verts[13] = g;  verts[14] = b;  verts[15] = alpha;
-
-    // Vertex 2: bottom-right
-    verts[16] = x2; verts[17] = y2; verts[18] = u1; verts[19] = v1;
-    verts[20] = r;  verts[21] = g;  verts[22] = b;  verts[23] = alpha;
-
-    // Vertex 3: bottom-left
-    verts[24] = x3; verts[25] = y3; verts[26] = u0; verts[27] = v1;
-    verts[28] = r;  verts[29] = g;  verts[30] = b;  verts[31] = alpha;
-
-    gl->quadCount++;
+    emitTexturedQuad(gl, texId, x0, y0, x1, y1, x2, y2, x3, y3, u0, v0, u1, v1, r, g, b, alpha);
 }
 
 static void glDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t srcOffX, int32_t srcOffY, int32_t srcW, int32_t srcH, float x, float y, float xscale, float yscale, uint32_t color, float alpha) {
@@ -521,6 +545,21 @@ static void glDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t srcO
     verts[28] = r;  verts[29] = g;  verts[30] = b;  verts[31] = alpha;
 
     gl->quadCount++;
+}
+
+static void glDrawSpritePos(Renderer* renderer, int32_t tpagIndex, float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, float alpha) {
+    GLRenderer* gl = (GLRenderer*) renderer;
+    TexturePageItem* tpag;
+    GLuint texId;
+    int32_t texW, texH;
+    if (!resolveSpriteTexture(gl, tpagIndex, &tpag, &texId, &texW, &texH)) return;
+
+    float u0 = (float) tpag->sourceX / (float) texW;
+    float v0 = (float) tpag->sourceY / (float) texH;
+    float u1 = (float) (tpag->sourceX + tpag->sourceWidth) / (float) texW;
+    float v1 = (float) (tpag->sourceY + tpag->sourceHeight) / (float) texH;
+
+    emitTexturedQuad(gl, texId, x1, y1, x2, y2, x3, y3, x4, y4, u0, v0, u1, v1, 1.0f, 1.0f, 1.0f, alpha);
 }
 
 // Emits a single colored quad into the batch using the white pixel texture
@@ -726,7 +765,7 @@ static bool glResolveFontState(GLRenderer* gl, DataWin* dw, Font* font, GlFontSt
     state->spriteFontSprite = nullptr;
 
     if (!font->isSpriteFont) {
-        int32_t fontTpagIndex = DataWin_resolveTPAG(dw, font->textureOffset);
+        int32_t fontTpagIndex = font->tpagIndex;
         if (0 > fontTpagIndex) return false;
 
         state->fontTpag = &dw->tpag.items[fontTpagIndex];
@@ -752,8 +791,7 @@ static bool glResolveGlyph(GLRenderer* gl, DataWin* dw, GlFontState* state, Font
         int32_t glyphIndex = (int32_t) (glyph - font->glyphs);
         if (0 > glyphIndex ||  glyphIndex >= (int32_t) sprite->textureCount) return false;
 
-        uint32_t tpagOffset = sprite->textureOffsets[glyphIndex];
-        int32_t tpagIdx = DataWin_resolveTPAG(dw, tpagOffset);
+        int32_t tpagIdx = sprite->tpagIndices[glyphIndex];
         if (0 > tpagIdx) return false;
 
         TexturePageItem* glyphTpag = &dw->tpag.items[tpagIdx];
@@ -844,66 +882,73 @@ static void glDrawText(Renderer* renderer, const char* text, float x, float y, f
 
         float cursorX = halignOffset;
 
-        // Render each glyph in the line
+        // Render each glyph in the line - decode each codepoint once and carry it forward as next iteration's ch (also used for kerning)
         int32_t pos = 0;
-        while (lineLen > pos) {
-            uint16_t ch = TextUtils_decodeUtf8(text + lineStart, lineLen, &pos);
+        uint16_t ch = 0;
+        bool hasCh = false;
+        if (lineLen > pos) {
+            ch = TextUtils_decodeUtf8(text + lineStart, lineLen, &pos);
+            hasCh = true;
+        }
+
+        while (hasCh) {
             FontGlyph* glyph = TextUtils_findGlyph(font, ch);
-            if (glyph == nullptr) continue;
-            if (glyph->sourceWidth == 0 || glyph->sourceHeight == 0) {
+
+            uint16_t nextCh = 0;
+            bool hasNext = lineLen > pos;
+            if (hasNext) nextCh = TextUtils_decodeUtf8(text + lineStart, lineLen, &pos);
+
+            if (glyph != nullptr) {
+                bool drewSuccessfully = false;
+                if (glyph->sourceWidth != 0 && glyph->sourceHeight != 0) {
+                    float u0, v0, u1, v1;
+                    float localX0, localY0;
+                    GLuint glyphTexId;
+
+                    if (glResolveGlyph(gl, dw, &fontState, glyph, cursorX, cursorY, &glyphTexId, &u0, &v0, &u1, &v1, &localX0, &localY0)) {
+                        // Flush if texture changed or batch full
+                        if (gl->quadCount > 0 && gl->currentTextureId != glyphTexId) flushBatch(gl);
+                        if (gl->quadCount >= MAX_QUADS) flushBatch(gl);
+                        gl->currentTextureId = glyphTexId;
+
+                        float localX1 = localX0 + (float) glyph->sourceWidth;
+                        float localY1 = localY0 + (float) glyph->sourceHeight;
+
+                        // Transform corners
+                        float px0, py0, px1, py1, px2, py2, px3, py3;
+                        Matrix4f_transformPoint(&transform, localX0, localY0, &px0, &py0);
+                        Matrix4f_transformPoint(&transform, localX1, localY0, &px1, &py1);
+                        Matrix4f_transformPoint(&transform, localX1, localY1, &px2, &py2);
+                        Matrix4f_transformPoint(&transform, localX0, localY1, &px3, &py3);
+
+                        // Write 4 vertices
+                        float* verts = gl->vertexData + gl->quadCount * VERTICES_PER_QUAD * FLOATS_PER_VERTEX;
+
+                        verts[0] = px0; verts[1] = py0; verts[2] = u0; verts[3] = v0;
+                        verts[4] = r;   verts[5] = g;   verts[6] = b;  verts[7] = alpha;
+
+                        verts[8]  = px1; verts[9]  = py1; verts[10] = u1; verts[11] = v0;
+                        verts[12] = r;   verts[13] = g;   verts[14] = b;  verts[15] = alpha;
+
+                        verts[16] = px2; verts[17] = py2; verts[18] = u1; verts[19] = v1;
+                        verts[20] = r;   verts[21] = g;   verts[22] = b;  verts[23] = alpha;
+
+                        verts[24] = px3; verts[25] = py3; verts[26] = u0; verts[27] = v1;
+                        verts[28] = r;   verts[29] = g;   verts[30] = b;  verts[31] = alpha;
+
+                        gl->quadCount++;
+                        drewSuccessfully = true;
+                    }
+                }
+
                 cursorX += glyph->shift;
-                continue;
+                if (drewSuccessfully && hasNext) {
+                    cursorX += TextUtils_getKerningOffset(glyph, nextCh);
+                }
             }
 
-            float u0, v0, u1, v1;
-            float localX0, localY0;
-            GLuint glyphTexId;
-
-            if (!glResolveGlyph(gl, dw, &fontState, glyph, cursorX, cursorY, &glyphTexId, &u0, &v0, &u1, &v1, &localX0, &localY0)) {
-                cursorX += glyph->shift;
-                continue;
-            }
-
-            // Flush if texture changed or batch full
-            if (gl->quadCount > 0 && gl->currentTextureId != glyphTexId) flushBatch(gl);
-            if (gl->quadCount >= MAX_QUADS) flushBatch(gl);
-            gl->currentTextureId = glyphTexId;
-
-            float localX1 = localX0 + (float) glyph->sourceWidth;
-            float localY1 = localY0 + (float) glyph->sourceHeight;
-
-            // Transform corners
-            float px0, py0, px1, py1, px2, py2, px3, py3;
-            Matrix4f_transformPoint(&transform, localX0, localY0, &px0, &py0);
-            Matrix4f_transformPoint(&transform, localX1, localY0, &px1, &py1);
-            Matrix4f_transformPoint(&transform, localX1, localY1, &px2, &py2);
-            Matrix4f_transformPoint(&transform, localX0, localY1, &px3, &py3);
-
-            // Write 4 vertices
-            float* verts = gl->vertexData + gl->quadCount * VERTICES_PER_QUAD * FLOATS_PER_VERTEX;
-
-            verts[0] = px0; verts[1] = py0; verts[2] = u0; verts[3] = v0;
-            verts[4] = r;   verts[5] = g;   verts[6] = b;  verts[7] = alpha;
-
-            verts[8]  = px1; verts[9]  = py1; verts[10] = u1; verts[11] = v0;
-            verts[12] = r;   verts[13] = g;   verts[14] = b;  verts[15] = alpha;
-
-            verts[16] = px2; verts[17] = py2; verts[18] = u1; verts[19] = v1;
-            verts[20] = r;   verts[21] = g;   verts[22] = b;  verts[23] = alpha;
-
-            verts[24] = px3; verts[25] = py3; verts[26] = u0; verts[27] = v1;
-            verts[28] = r;   verts[29] = g;   verts[30] = b;  verts[31] = alpha;
-
-            gl->quadCount++;
-
-            // Advance cursor by glyph shift + kerning
-            cursorX += glyph->shift;
-            if (lineLen > pos) {
-                int32_t savedPos = pos;
-                uint16_t nextCh = TextUtils_decodeUtf8(text + lineStart, lineLen, &pos);
-                pos = savedPos;
-                cursorX += TextUtils_getKerningOffset(glyph, nextCh);
-            }
+            ch = nextCh;
+            hasCh = hasNext;
         }
 
         cursorY += lineStride;
@@ -986,9 +1031,16 @@ static void glDrawTextColor(Renderer* renderer, const char* text, float x, float
 
         float cursorX = halignOffset;
 
-        // Render each glyph in the line
+        // Render each glyph in the line - decode each codepoint once and carry it forward as next iteration's ch (also used for kerning)
         int32_t pos = 0;
-        while (lineLen > pos) {
+        uint16_t ch = 0;
+        bool hasCh = false;
+        if (lineLen > pos) {
+            ch = TextUtils_decodeUtf8(text + lineStart, lineLen, &pos);
+            hasCh = true;
+        }
+
+        while (hasCh) {
             // do 16.16 maths
             int32_t c2 = ((c1 & 0xff0000) + (left_delta_r & 0xff0000)) & 0xff0000;
                 c2 |= ((c1 & 0xff00) + (left_delta_g >> 8) & 0xff00) & 0xff00;
@@ -1004,69 +1056,69 @@ static void glDrawTextColor(Renderer* renderer, const char* text, float x, float
             right_delta_g += right_g_dx;
             right_delta_b += right_b_dx;
 
-            uint16_t ch = TextUtils_decodeUtf8(text + lineStart, lineLen, &pos);
             FontGlyph* glyph = TextUtils_findGlyph(font, ch);
-            if (glyph == nullptr) continue;
-            if (glyph->sourceWidth == 0 || glyph->sourceHeight == 0) {
+
+            uint16_t nextCh = 0;
+            bool hasNext = lineLen > pos;
+            if (hasNext) nextCh = TextUtils_decodeUtf8(text + lineStart, lineLen, &pos);
+
+            if (glyph != nullptr) {
+                bool drewSuccessfully = false;
+                if (glyph->sourceWidth != 0 && glyph->sourceHeight != 0) {
+                    float u0, v0, u1, v1;
+                    float localX0, localY0;
+                    GLuint glyphTexId;
+
+                    if (glResolveGlyph(gl, dw, &fontState, glyph, cursorX, cursorY, &glyphTexId, &u0, &v0, &u1, &v1, &localX0, &localY0)) {
+                        // Flush if texture changed or batch full
+                        if (gl->quadCount > 0 && gl->currentTextureId != glyphTexId) flushBatch(gl);
+                        if (gl->quadCount >= MAX_QUADS) flushBatch(gl);
+                        gl->currentTextureId = glyphTexId;
+
+                        float localX1 = localX0 + (float) glyph->sourceWidth;
+                        float localY1 = localY0 + (float) glyph->sourceHeight;
+
+                        // Transform corners
+                        float px0, py0, px1, py1, px2, py2, px3, py3;
+                        Matrix4f_transformPoint(&transform, localX0, localY0, &px0, &py0);
+                        Matrix4f_transformPoint(&transform, localX1, localY0, &px1, &py1);
+                        Matrix4f_transformPoint(&transform, localX1, localY1, &px2, &py2);
+                        Matrix4f_transformPoint(&transform, localX0, localY1, &px3, &py3);
+
+                        // Write 4 vertices
+                        float* verts = gl->vertexData + gl->quadCount * VERTICES_PER_QUAD * FLOATS_PER_VERTEX;
+
+                        // top left
+                        verts[0] = px0; verts[1] = py0; verts[2] = u0; verts[3] = v0;
+                        verts[4] = ((float) BGR_R(c1) / 255.0f); verts[5] = ((float) BGR_G(c1) / 255.0f); verts[6] = ((float) BGR_B(c1) / 255.0f); verts[7] = alpha;
+
+                        // top right
+                        verts[8]  = px1; verts[9]  = py1; verts[10] = u1; verts[11] = v0;
+                        verts[12] = ((float) BGR_R(c2) / 255.0f); verts[13] = ((float) BGR_G(c2) / 255.0f); verts[14] = ((float) BGR_B(c2) / 255.0f); verts[15] = alpha;
+
+                        // bottom right
+                        verts[16] = px2; verts[17] = py2; verts[18] = u1; verts[19] = v1;
+                        verts[20] = ((float) BGR_R(c3) / 255.0f); verts[21] = ((float) BGR_G(c3) / 255.0f); verts[22] = ((float) BGR_B(c3) / 255.0f); verts[23] = alpha;
+
+                        // bottom left
+                        verts[24] = px3; verts[25] = py3; verts[26] = u0; verts[27] = v1;
+                        verts[28] = ((float) BGR_R(c4) / 255.0f); verts[29] = ((float) BGR_G(c4) / 255.0f); verts[30] = ((float) BGR_B(c4) / 255.0f); verts[31] = alpha;
+
+                        gl->quadCount++;
+                        drewSuccessfully = true;
+                    }
+                }
+
                 cursorX += glyph->shift;
-                continue;
+                if (drewSuccessfully) {
+                    if (hasNext) cursorX += TextUtils_getKerningOffset(glyph, nextCh);
+                    c4 = c3;    // set left edge to be what the last right edge was....
+                    c1 = c2;
+                }
             }
 
-            float u0, v0, u1, v1;
-            float localX0, localY0;
-            GLuint glyphTexId;
-
-            if (!glResolveGlyph(gl, dw, &fontState, glyph, cursorX, cursorY, &glyphTexId, &u0, &v0, &u1, &v1, &localX0, &localY0)) {
-                cursorX += glyph->shift;
-                continue;
-            }
-
-            // Flush if texture changed or batch full
-            if (gl->quadCount > 0 && gl->currentTextureId != glyphTexId) flushBatch(gl);
-            if (gl->quadCount >= MAX_QUADS) flushBatch(gl);
-            gl->currentTextureId = glyphTexId;
-
-            float localX1 = localX0 + (float) glyph->sourceWidth;
-            float localY1 = localY0 + (float) glyph->sourceHeight;
-
-            // Transform corners
-            float px0, py0, px1, py1, px2, py2, px3, py3;
-            Matrix4f_transformPoint(&transform, localX0, localY0, &px0, &py0);
-            Matrix4f_transformPoint(&transform, localX1, localY0, &px1, &py1);
-            Matrix4f_transformPoint(&transform, localX1, localY1, &px2, &py2);
-            Matrix4f_transformPoint(&transform, localX0, localY1, &px3, &py3);
-
-            // Write 4 vertices
-            float* verts = gl->vertexData + gl->quadCount * VERTICES_PER_QUAD * FLOATS_PER_VERTEX;
-
-            // top left
-            verts[0] = px0; verts[1] = py0; verts[2] = u0; verts[3] = v0;
-            verts[4] = ((float) BGR_R(c1) / 255.0f); verts[5] = ((float) BGR_G(c1) / 255.0f); verts[6] = ((float) BGR_B(c1) / 255.0f); verts[7] = alpha;
-
-            // top right
-            verts[8]  = px1; verts[9]  = py1; verts[10] = u1; verts[11] = v0;
-            verts[12] = ((float) BGR_R(c2) / 255.0f); verts[13] = ((float) BGR_G(c2) / 255.0f); verts[14] = ((float) BGR_B(c2) / 255.0f); verts[15] = alpha;
-
-            // bottom right
-            verts[16] = px2; verts[17] = py2; verts[18] = u1; verts[19] = v1;
-            verts[20] = ((float) BGR_R(c3) / 255.0f); verts[21] = ((float) BGR_G(c3) / 255.0f); verts[22] = ((float) BGR_B(c3) / 255.0f); verts[23] = alpha;
-
-            // bottom left
-            verts[24] = px3; verts[25] = py3; verts[26] = u0; verts[27] = v1;
-            verts[28] = ((float) BGR_R(c4) / 255.0f); verts[29] = ((float) BGR_G(c4) / 255.0f); verts[30] = ((float) BGR_B(c4) / 255.0f); verts[31] = alpha;
-
-            gl->quadCount++;
-
-            // Advance cursor by glyph shift + kerning
-            cursorX += glyph->shift;
-            if (lineLen > pos) {
-                int32_t savedPos = pos;
-                uint16_t nextCh = TextUtils_decodeUtf8(text + lineStart, lineLen, &pos);
-                pos = savedPos;
-                cursorX += TextUtils_getKerningOffset(glyph, nextCh);
-            }
-            c4 = c3;    // set left edge to be what the last right edge was....
-		    c1 = c2;    //
+            ch = nextCh;
+            hasCh = hasNext;
         }
 
         cursorY += lineStride;
@@ -1080,9 +1132,6 @@ static void glDrawTextColor(Renderer* renderer, const char* text, float x, float
 }
 
 // ===[ Dynamic Sprite Creation/Deletion ]===
-
-// Sentinel base for fake TPAG offsets used by dynamic sprites
-#define DYNAMIC_TPAG_OFFSET_BASE 0xD0000000u
 
 // Finds a free dynamic texture page slot (glTextures[i] == 0), or appends a new one.
 static uint32_t findOrAllocTexturePageSlot(GLRenderer* gl) {
@@ -1114,18 +1163,6 @@ static uint32_t findOrAllocTpagSlot(DataWin* dw, uint32_t originalTpagCount) {
     dw->tpag.items = safeRealloc(dw->tpag.items, dw->tpag.count * sizeof(TexturePageItem));
     memset(&dw->tpag.items[newIndex], 0, sizeof(TexturePageItem));
     dw->tpag.items[newIndex].texturePageId = -1;
-    return newIndex;
-}
-
-// Finds a free dynamic Sprite slot (textureCount == 0), or appends a new one.
-static uint32_t findOrAllocSpriteSlot(DataWin* dw, uint32_t originalSpriteCount) {
-    for (uint32_t i = originalSpriteCount; dw->sprt.count > i; i++) {
-        if (dw->sprt.sprites[i].textureCount == 0) return i;
-    }
-    uint32_t newIndex = dw->sprt.count;
-    dw->sprt.count++;
-    dw->sprt.sprites = safeRealloc(dw->sprt.sprites, dw->sprt.count * sizeof(Sprite));
-    memset(&dw->sprt.sprites[newIndex], 0, sizeof(Sprite));
     return newIndex;
 }
 
@@ -1193,20 +1230,16 @@ static int32_t glCreateSpriteFromSurface(Renderer* renderer, int32_t x, int32_t 
     tpag->boundingHeight = (uint16_t) h;
     tpag->texturePageId = (int16_t) pageId;
 
-    // Register a fake offset in the tpagOffsetMap so DataWin_resolveTPAG works
-    uint32_t fakeOffset = DYNAMIC_TPAG_OFFSET_BASE + tpagIndex;
-    hmput(dw->tpagOffsetMap, fakeOffset, (int32_t) tpagIndex);
-
-    uint32_t spriteIndex = findOrAllocSpriteSlot(dw, gl->originalSpriteCount);
+    uint32_t spriteIndex = DataWin_allocSpriteSlot(dw, gl->originalSpriteCount);
     Sprite* sprite = &dw->sprt.sprites[spriteIndex];
-    sprite->name = "dynamic_sprite";
+    // name was set by DataWin_allocSpriteSlot ("__newsprite<N>"); don't overwrite it here
     sprite->width = (uint32_t) w;
     sprite->height = (uint32_t) h;
     sprite->originX = xorig;
     sprite->originY = yorig;
     sprite->textureCount = 1;
-    sprite->textureOffsets = safeMalloc(sizeof(uint32_t));
-    sprite->textureOffsets[0] = fakeOffset;
+    sprite->tpagIndices = safeMalloc(sizeof(int32_t));
+    sprite->tpagIndices[0] = (int32_t) tpagIndex;
     sprite->maskCount = 0;
     sprite->masks = nullptr;
 
@@ -1229,29 +1262,27 @@ static void glDeleteSprite(Renderer* renderer, int32_t spriteIndex) {
     Sprite* sprite = &dw->sprt.sprites[spriteIndex];
     if (sprite->textureCount == 0) return; // already deleted
 
-    // Clean up GL texture, TPAG entries, and tpagOffsetMap entries
+    // Clean up GL texture and TPAG entries owned by this sprite.
+    // Slots with index >= originalTpagCount are dynamically allocated and ours to free.
     repeat(sprite->textureCount, i) {
-        uint32_t offset = sprite->textureOffsets[i];
-        if (offset >= DYNAMIC_TPAG_OFFSET_BASE) {
-            int32_t tpagIdx = DataWin_resolveTPAG(dw, offset);
-            if (tpagIdx >= 0) {
-                TexturePageItem* tpag = &dw->tpag.items[tpagIdx];
-                int16_t pageId = tpag->texturePageId;
-                if (pageId >= 0 && gl->textureCount > (uint32_t) pageId) {
-                    glDeleteTextures(1, &gl->glTextures[pageId]);
-                    gl->glTextures[pageId] = 0;
-                }
-                // Mark TPAG slot as free for reuse
-                tpag->texturePageId = -1;
+        int32_t tpagIdx = sprite->tpagIndices[i];
+        if (tpagIdx >= 0 && (uint32_t) tpagIdx >= gl->originalTpagCount) {
+            TexturePageItem* tpag = &dw->tpag.items[tpagIdx];
+            int16_t pageId = tpag->texturePageId;
+            if (pageId >= 0 && gl->textureCount > (uint32_t) pageId) {
+                glDeleteTextures(1, &gl->glTextures[pageId]);
+                gl->glTextures[pageId] = 0;
             }
-            // Remove the fake offset from the lookup map
-            hmdel(dw->tpagOffsetMap, offset);
+            // Mark TPAG slot as free for reuse
+            tpag->texturePageId = -1;
         }
     }
 
-    // Clear the sprite entry so it won't be drawn and can be reused
-    free(sprite->textureOffsets);
+    // Clear the sprite entry so it won't be drawn and can be reused. Preserve `name` across the memset: the slot is still in sprt.count and must keep a valid string for asset_get_index / name lookups.
+    free(sprite->tpagIndices);
+    const char* keepName = sprite->name;
     memset(sprite, 0, sizeof(Sprite));
+    sprite->name = keepName;
 
     fprintf(stderr, "GL: Deleted sprite %d\n", spriteIndex);
 }
@@ -1268,6 +1299,7 @@ static RendererVtable glVtable = {
     .beginGUI = glBeginGUI,
     .endGUI = glEndGUI,
     .drawSprite = glDrawSprite,
+    .drawSpritePos = glDrawSpritePos,
     .drawSpritePart = glDrawSpritePart,
     .drawRectangle = glDrawRectangle,
     .drawLine = glDrawLine,

@@ -47,6 +47,7 @@ typedef struct RunnerKeyboardState {
     bool keyPressed[GML_KEY_COUNT];  // Just pressed this frame
     bool keyReleased[GML_KEY_COUNT]; // Just released this frame
     int32_t lastKey;                 // Last key pressed (for keyboard_key variable)
+    char lastChar[2];                // Last character pressed (for keyboard_char variable)
 } RunnerKeyboardState;
 
 // Lifecycle
@@ -59,6 +60,9 @@ void RunnerKeyboard_beginFrame(RunnerKeyboardState* kb);
 // Called by platform layer when a key is pressed/released (gmlKeyCode = GML vk_ code)
 void RunnerKeyboard_onKeyDown(RunnerKeyboardState* kb, int32_t gmlKeyCode);
 void RunnerKeyboard_onKeyUp(RunnerKeyboardState* kb, int32_t gmlKeyCode);
+
+// Called by platform layer when a character is typed
+void RunnerKeyboard_onCharacter(RunnerKeyboardState* kb, unsigned int character);
 
 // GML function queries
 bool RunnerKeyboard_check(RunnerKeyboardState* kb, int32_t gmlKeyCode);

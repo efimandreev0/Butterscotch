@@ -13,6 +13,12 @@
 #include "ps2_utils.h"
 #include "matrix_math.h"
 
+#ifdef ENABLE_PS2_RENDERER_LOGS
+#define rendererPrintf(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define rendererPrintf(...) ((void) 0)
+#endif
+
 // ===[ Constants ]===
 #define ATLAS_WIDTH 512
 #define ATLAS_HEIGHT 512
@@ -324,13 +330,13 @@ static void evictAtlas(GsRenderer* gs, int16_t atlasId) {
     }
 
     uint32_t availableChunks = countFreeChunks(gs);
-    fprintf(stderr, "GsRenderer: Evicted atlas %d from VRAM (available chunks = %d)\n", atlasId, availableChunks);
+    rendererPrintf("GsRenderer: Evicted atlas %d from VRAM (available chunks = %d)\n", atlasId, availableChunks);
 }
 
 // Defragment the texture cache by evicting all loaded atlases.
 // They will be reloaded on-demand as needed during subsequent draw calls.
 static void defragTextureCache(GsRenderer* gs) {
-    fprintf(stderr, "GsRenderer: Defragmenting VRAM texture cache...\n");
+    rendererPrintf("GsRenderer: Defragmenting VRAM texture cache...\n");
 
     forEach(VRAMChunk, chunk, gs->chunks, gs->chunkCount) {
         chunk->atlasId = -1;
@@ -341,7 +347,7 @@ static void defragTextureCache(GsRenderer* gs) {
         gs->atlasToChunk[i] = -1;
     }
 
-    fprintf(stderr, "GsRenderer: Defrag complete - all %u chunks freed\n", gs->chunkCount);
+    rendererPrintf("GsRenderer: Defrag complete - all %u chunks freed\n", gs->chunkCount);
 }
 
 // Allocate consecutive chunks for an atlas. Evicts LRU victims or defrags if needed.
@@ -362,7 +368,7 @@ static int32_t allocateChunks(GsRenderer* gs, int chunksNeeded) {
         // We only need to flush if the victim was used on this frame
         // If it wasn't, then we can evict with no care in the world
         if (wasUsedOnThisFrame) {
-            fprintf(stderr, "GsRenderer: Flushing draw queue before VRAM evicting because atlas was used on the current frame\n");
+            rendererPrintf("GsRenderer: Flushing draw queue before VRAM evicting because atlas was used on the current frame\n");
             gs->evictedAtlasUsedInCurrentFrame = true;
             gsKit_queue_exec(gs->gsGlobal);
         }
@@ -377,7 +383,7 @@ static int32_t allocateChunks(GsRenderer* gs, int chunksNeeded) {
 
     // At this point we are lost, just flush and hope for the best
     gs->evictedAtlasUsedInCurrentFrame = true;
-    fprintf(stderr, "GsRenderer: Flushing draw queue before VRAM defrag\n");
+    rendererPrintf("GsRenderer: Flushing draw queue before VRAM defrag\n");
     gsKit_queue_exec(gs->gsGlobal);
 
     // Attempt 3: defrag - evict ALL and let them reload on demand
@@ -594,7 +600,7 @@ static void eeCacheInsert(GsRenderer* gs, uint16_t atlasId, const uint8_t* data,
 
     if (gs->eeCacheBumpPtr + size > gs->eeCacheCapacity) {
         if (!eeCacheEvictLRU(gs, size)) {
-            fprintf(stderr, "GsRenderer: EE cache eviction failed for atlas %u (%u bytes)\n", atlasId, size);
+            rendererPrintf("GsRenderer: EE cache eviction failed for atlas %u (%u bytes)\n", atlasId, size);
             return;
         }
     }
@@ -638,6 +644,7 @@ static void uploadAtlasToChunk(GsRenderer* gs, uint16_t atlasId, int32_t firstCh
         // Try to insert uncompressed data into EE cache
         eeCacheInsert(gs, atlasId, tempPixelData, uncompSize);
         atlasSource = "disk";
+        gs->diskLoadsThisFrame++;
 
         uploadData = eeCacheLookup(gs, atlasId);
         if (uploadData != nullptr) {
@@ -646,7 +653,7 @@ static void uploadAtlasToChunk(GsRenderer* gs, uint16_t atlasId, int32_t firstCh
             tempPixelData = nullptr;
         } else {
             // EE cache insert failed, upload directly from temp buffer
-            fprintf(stderr, "GsRenderer: EE cache insert failed for atlas %u, uploading directly\n", atlasId);
+            rendererPrintf("GsRenderer: EE cache insert failed for atlas %u, uploading directly\n", atlasId);
             uploadData = tempPixelData;
         }
     }
@@ -667,7 +674,7 @@ static void uploadAtlasToChunk(GsRenderer* gs, uint16_t atlasId, int32_t firstCh
     }
     gs->atlasToChunk[atlasId] = (int16_t) firstChunk;
 
-    fprintf(stderr, "GsRenderer: Atlas %u uploaded to chunk %d (VRAM 0x%08X, %ubpp, src: %s)\n", atlasId, firstChunk, vramAddr, bpp, atlasSource);
+    rendererPrintf("GsRenderer: Atlas %u uploaded to chunk %d (VRAM 0x%08X, %ubpp, src: %s)\n", atlasId, firstChunk, vramAddr, bpp, atlasSource);
 
     free(tempPixelData);
 }
@@ -685,6 +692,13 @@ static bool ensureAtlasLoaded(GsRenderer* gs, uint16_t atlasId) {
         int16_t firstChunk = gs->atlasToChunk[atlasId];
         uint8_t bpp = gs->atlasBpp[atlasId];
         int chunksUsed = (bpp == 8) ? 2 : 1;
+
+        // Track unique atlases per frame (first touch = lastUsed hasn't been updated yet)
+        if (gs->chunks[firstChunk].lastUsed != gs->frameCounter) {
+            gs->uniqueAtlasesThisFrame++;
+            gs->chunksNeededThisFrame += (uint16_t) chunksUsed;
+        }
+
         repeat(chunksUsed, i) {
             gs->chunks[firstChunk + i].lastUsed = gs->frameCounter;
         }
@@ -698,6 +712,10 @@ static bool ensureAtlasLoaded(GsRenderer* gs, uint16_t atlasId) {
         return false;
     }
     int chunksNeeded = (bpp == 8) ? 2 : 1;
+
+    // Fresh load is always a new unique atlas this frame
+    gs->uniqueAtlasesThisFrame++;
+    gs->chunksNeededThisFrame += (uint16_t) chunksNeeded;
 
     // Allocate chunks (may evict or defrag)
     int32_t chunkIdx = allocateChunks(gs, chunksNeeded);
@@ -880,9 +898,11 @@ static void gsDestroy(Renderer* renderer) {
 
 static void gsBeginFrame(Renderer* renderer, MAYBE_UNUSED int32_t gameW, MAYBE_UNUSED int32_t gameH, MAYBE_UNUSED int32_t windowW, MAYBE_UNUSED int32_t windowH) {
     GsRenderer* gs = (GsRenderer*) renderer;
-    gs->zCounter = 1;
     gs->frameCounter++;
     gs->evictedAtlasUsedInCurrentFrame = false;
+    gs->uniqueAtlasesThisFrame = 0;
+    gs->chunksNeededThisFrame = 0;
+    gs->diskLoadsThisFrame = 0;
 }
 
 static void gsEndFrame(MAYBE_UNUSED Renderer* renderer) {
@@ -1028,11 +1048,10 @@ static void gsDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y
         uint8_t a = alphaToGS(alpha);
         u64 fallbackColor = GS_SETREG_RGBAQ(r, g, b, a, 0x00);
         if (hasRotation) {
-            gsKit_prim_quad(gs->gsGlobal, sx0, sy0, sx1, sy1, sx2, sy2, sx3, sy3, gs->zCounter, fallbackColor);
+            gsKit_prim_quad(gs->gsGlobal, sx0, sy0, sx1, sy1, sx2, sy2, sx3, sy3, 0, fallbackColor);
         } else {
-            gsKit_prim_sprite(gs->gsGlobal, sx0, sy0, sx3, sy3, gs->zCounter, fallbackColor);
+            gsKit_prim_sprite(gs->gsGlobal, sx0, sy0, sx3, sy3, 0, fallbackColor);
         }
-        gs->zCounter++;
         return;
     }
 
@@ -1065,13 +1084,131 @@ static void gsDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y
             sx1, sy1, u1, v0, // top-right
             sx2, sy2, u0, v1, // bottom-left
             sx3, sy3, u1, v1, // bottom-right
-            gs->zCounter,
+            0,
             gsColor
-            );
+        );
     } else {
-        gsKit_prim_sprite_texture(gs->gsGlobal, &tex, sx0, sy0, u0, v0, sx3, sy3, u1, v1, gs->zCounter, gsColor);
+        gsKit_prim_sprite_texture(gs->gsGlobal, &tex, sx0, sy0, u0, v0, sx3, sy3, u1, v1, 0, gsColor);
     }
-    gs->zCounter++;
+}
+
+static void gsDrawTiled(Renderer* renderer, int32_t tpagIndex, float originX, float originY, float x, float y, float xscale, float yscale, bool tileX, bool tileY, float roomW, float roomH, uint32_t color, float alpha) {
+    GsRenderer* gs = (GsRenderer*) renderer;
+    DataWin* dw = renderer->dataWin;
+
+    if (0 > tpagIndex || (uint32_t) tpagIndex >= dw->tpag.count) return;
+
+    TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
+
+    float cropX = 0.0f, cropY = 0.0f;
+    float cropW = (float) tpag->boundingWidth;
+    float cropH = (float) tpag->boundingHeight;
+    if (gs->atlasTPAGCount > (uint32_t) tpagIndex) {
+        AtlasTPAGEntry* entry = &gs->atlasTPAGEntries[tpagIndex];
+        if (entry->atlasId != 0xFFFF) {
+            cropX = (float) entry->cropX;
+            cropY = (float) entry->cropY;
+            cropW = (float) entry->cropW;
+            cropH = (float) entry->cropH;
+        }
+    }
+
+    float axScale = fabsf(xscale);
+    float ayScale = fabsf(yscale);
+    float tileW = (float) tpag->boundingWidth * axScale;
+    float tileH = (float) tpag->boundingHeight * ayScale;
+    if (0 >= tileW || 0 >= tileH) return;
+
+    float startX, endX, startY, endY;
+    if (tileX) {
+        startX = fmodf(x - originX * axScale, tileW);
+        if (startX > 0) startX -= tileW;
+        endX = roomW;
+    } else {
+        startX = x - originX * axScale;
+        endX = startX + tileW;
+    }
+    if (tileY) {
+        startY = fmodf(y - originY * ayScale, tileH);
+        if (startY > 0) startY -= tileH;
+        endY = roomH;
+    } else {
+        startY = y - originY * ayScale;
+        endY = startY + tileH;
+    }
+
+    // Per-tile quad layout in world space, derived from gsDrawSprite's axis-aligned path.
+    // For tile origin dx, the wrapper-equivalent x_call = dx + originX * axScale, then:
+    //   gameX1 = x_call + (cropX - originX) * xscale = dx + cropX * xscale + originX * (axScale - xscale)
+    // Same shape for Y. Both reduce to dx + cropX*xscale when xscale > 0 (the common case).
+    float dxLocalX0 = cropX * xscale + originX * (axScale - xscale);
+    float dyLocalY0 = cropY * yscale + originY * (ayScale - yscale);
+    float tileGameW = cropW * xscale;
+    float tileGameH = cropH * yscale;
+
+    GSTEXTURE tex;
+    if (!setupTextureForTPAG(gs, &tex, tpagIndex)) return;
+
+    AtlasTPAGEntry* atlasEntry = &gs->atlasTPAGEntries[tpagIndex];
+    float u0 = (float) atlasEntry->atlasX;
+    float v0 = (float) atlasEntry->atlasY;
+    float u1 = u0 + (float) atlasEntry->width;
+    float v1 = v0 + (float) atlasEntry->height;
+
+    // 0x80 is the exact 1.0x multiplier in GS modulate mode (output = texture * vertex / 128).
+    // So, to avoid dimming the texture (BGR_R(0xFFFFFF) >> 1 = 0x7F is 0.992x) we'll hand-pick the white case.
+    uint8_t r, g, b;
+    if (color == 0xFFFFFFu) {
+        r = g = b = 0x80;
+    } else {
+        r = BGR_R(color) >> 1;
+        g = BGR_G(color) >> 1;
+        b = BGR_B(color) >> 1;
+    }
+    uint8_t a = alphaToGS(alpha);
+    u64 gsColor = GS_SETREG_RGBAQ(r, g, b, a, 0x00);
+
+    float viewBaseX = -(float) gs->viewX;
+    float viewBaseY = -(float) gs->viewY;
+    float viewScaleX = gs->scaleX;
+    float viewScaleY = gs->scaleY;
+    float viewOffX = gs->offsetX;
+    float viewOffY = gs->offsetY;
+
+    // Integer tile counts avoid FP-comparison drift; the inner break handles overshoot at the boundary
+    int32_t tilesX = tileX ? ((int32_t) ((endX - startX) / tileW) + 1) : 1;
+    int32_t tilesY = tileY ? ((int32_t) ((endY - startY) / tileH) + 1) : 1;
+    if (0 >= tilesX || 0 >= tilesY) return;
+
+    repeat(tilesY, iy) {
+        float dy = startY + (float) iy * tileH;
+        if (dy >= endY) break;
+
+        float gameY1 = dy + dyLocalY0 + viewBaseY;
+        float gameY2 = gameY1 + tileGameH;
+        float sy0 = gameY1 * viewScaleY + viewOffY;
+        float sy1 = gameY2 * viewScaleY + viewOffY;
+
+        float minSY = sy0 < sy1 ? sy0 : sy1;
+        float maxSY = sy0 > sy1 ? sy0 : sy1;
+        if (0.0f > maxSY || minSY > PS2_SCREEN_HEIGHT) continue;
+
+        repeat(tilesX, ix) {
+            float dx = startX + (float) ix * tileW;
+            if (endX <= dx) break;
+
+            float gameX1 = dx + dxLocalX0 + viewBaseX;
+            float gameX2 = gameX1 + tileGameW;
+            float sx0 = gameX1 * viewScaleX + viewOffX;
+            float sx1 = gameX2 * viewScaleX + viewOffX;
+
+            float minSX = sx0 < sx1 ? sx0 : sx1;
+            float maxSX = sx0 > sx1 ? sx0 : sx1;
+            if (0.0f > maxSX || minSX > PS2_SCREEN_WIDTH) continue;
+
+            gsKit_prim_sprite_texture(gs->gsGlobal, &tex, sx0, sy0, u0, v0, sx1, sy1, u1, v1, 0, gsColor);
+        }
+    }
 }
 
 static void gsDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t srcOffX, int32_t srcOffY, int32_t srcW, int32_t srcH, float x, float y, float xscale, float yscale, uint32_t color, float alpha) {
@@ -1105,8 +1242,7 @@ static void gsDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t srcO
         uint8_t g = BGR_G(color);
         uint8_t b = BGR_B(color);
         uint8_t a = alphaToGS(alpha);
-        gsKit_prim_sprite(gs->gsGlobal, sx1, sy1, sx2, sy2, gs->zCounter, GS_SETREG_RGBAQ(r, g, b, a, 0x00));
-        gs->zCounter++;
+        gsKit_prim_sprite(gs->gsGlobal, sx1, sy1, sx2, sy2, 0, GS_SETREG_RGBAQ(r, g, b, a, 0x00));
         return;
     }
 
@@ -1155,8 +1291,61 @@ static void gsDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t srcO
     uint8_t a = alphaToGS(alpha);
     u64 gsColor = GS_SETREG_RGBAQ(r, g, b, a, 0x00);
 
-    gsKit_prim_sprite_texture(gs->gsGlobal, &tex, sx1, sy1, u1, v1, sx2, sy2, u2, v2, gs->zCounter, gsColor);
-    gs->zCounter++;
+    gsKit_prim_sprite_texture(gs->gsGlobal, &tex, sx1, sy1, u1, v1, sx2, sy2, u2, v2, 0, gsColor);
+}
+
+static void gsDrawSpritePos(Renderer* renderer, int32_t tpagIndex, float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, float alpha) {
+    GsRenderer* gs = (GsRenderer*) renderer;
+    DataWin* dw = renderer->dataWin;
+
+    if (0 > tpagIndex || (uint32_t) tpagIndex >= dw->tpag.count) return;
+
+    // Apply view transform. Z-pattern tristrip ordering: (0)=TL, (1)=TR, (2)=BL, (3)=BR.
+    float sx0 = (x1 - (float) gs->viewX) * gs->scaleX + gs->offsetX;
+    float sy0 = (y1 - (float) gs->viewY) * gs->scaleY + gs->offsetY;
+    float sx1 = (x2 - (float) gs->viewX) * gs->scaleX + gs->offsetX;
+    float sy1 = (y2 - (float) gs->viewY) * gs->scaleY + gs->offsetY;
+    float sx2 = (x4 - (float) gs->viewX) * gs->scaleX + gs->offsetX;
+    float sy2 = (y4 - (float) gs->viewY) * gs->scaleY + gs->offsetY;
+    float sx3 = (x3 - (float) gs->viewX) * gs->scaleX + gs->offsetX;
+    float sy3 = (y3 - (float) gs->viewY) * gs->scaleY + gs->offsetY;
+
+    float minSX = fminf(fminf(sx0, sx1), fminf(sx2, sx3));
+    float maxSX = fmaxf(fmaxf(sx0, sx1), fmaxf(sx2, sx3));
+    float minSY = fminf(fminf(sy0, sy1), fminf(sy2, sy3));
+    float maxSY = fmaxf(fmaxf(sy0, sy1), fmaxf(sy2, sy3));
+    if (maxSX < 0.0f || minSX > PS2_SCREEN_WIDTH || maxSY < 0.0f || minSY > PS2_SCREEN_HEIGHT) return;
+
+    GSTEXTURE tex;
+    if (!setupTextureForTPAG(gs, &tex, tpagIndex)) {
+        uint8_t a = alphaToGS(alpha);
+        u64 fallbackColor = GS_SETREG_RGBAQ(0xFF, 0xFF, 0xFF, a, 0x00);
+        gsKit_prim_quad(gs->gsGlobal, sx0, sy0, sx1, sy1, sx2, sy2, sx3, sy3, 0, fallbackColor);
+        return;
+    }
+
+    AtlasTPAGEntry* atlasEntry = &gs->atlasTPAGEntries[tpagIndex];
+
+    // Map the entire atlas entry (the trimmed source content in atlas texels) to the user's quad.
+    float u0 = (float) atlasEntry->atlasX;
+    float v0 = (float) atlasEntry->atlasY;
+    float u1 = u0 + (float) atlasEntry->width;
+    float v1 = v0 + (float) atlasEntry->height;
+
+    // GS modulate mode: Output = Texture * Vertex / 128
+    uint8_t a = alphaToGS(alpha);
+    u64 gsColor = GS_SETREG_RGBAQ(0x80, 0x80, 0x80, a, 0x00);
+
+    gsKit_prim_quad_texture(
+        gs->gsGlobal,
+        &tex,
+        sx0, sy0, u0, v0, // TL
+        sx1, sy1, u1, v0, // TR
+        sx2, sy2, u0, v1, // BL
+        sx3, sy3, u1, v1, // BR
+        0,
+        gsColor
+    );
 }
 
 static void gsDrawRectangle(Renderer* renderer, float x1, float y1, float x2, float y2, uint32_t color, float alpha, bool outline) {
@@ -1178,17 +1367,12 @@ static void gsDrawRectangle(Renderer* renderer, float x1, float y1, float x2, fl
         // Draw 4 one-pixel-wide edges: top, bottom, left, right
         float pw = gs->scaleX; // one pixel width in screen coords
         float ph = gs->scaleY; // one pixel height in screen coords
-        gsKit_prim_sprite(gs->gsGlobal, sx1, sy1, sx2 + pw, sy1 + ph, gs->zCounter, rectColor); // top
-        gs->zCounter++;
-        gsKit_prim_sprite(gs->gsGlobal, sx1, sy2, sx2 + pw, sy2 + ph, gs->zCounter, rectColor); // bottom
-        gs->zCounter++;
-        gsKit_prim_sprite(gs->gsGlobal, sx1, sy1 + ph, sx1 + pw, sy2, gs->zCounter, rectColor); // left
-        gs->zCounter++;
-        gsKit_prim_sprite(gs->gsGlobal, sx2, sy1 + ph, sx2 + pw, sy2, gs->zCounter, rectColor); // right
-        gs->zCounter++;
+        gsKit_prim_sprite(gs->gsGlobal, sx1, sy1, sx2 + pw, sy1 + ph, 0, rectColor); // top
+        gsKit_prim_sprite(gs->gsGlobal, sx1, sy2, sx2 + pw, sy2 + ph, 0, rectColor); // bottom
+        gsKit_prim_sprite(gs->gsGlobal, sx1, sy1 + ph, sx1 + pw, sy2, 0, rectColor); // left
+        gsKit_prim_sprite(gs->gsGlobal, sx2, sy1 + ph, sx2 + pw, sy2, 0, rectColor); // right
     } else {
-        gsKit_prim_sprite(gs->gsGlobal, sx1, sy1, sx2, sy2, gs->zCounter, rectColor);
-        gs->zCounter++;
+        gsKit_prim_sprite(gs->gsGlobal, sx1, sy1, sx2, sy2, 0, rectColor);
     }
 }
 
@@ -1206,8 +1390,7 @@ static void gsDrawLine(Renderer* renderer, float x1, float y1, float x2, float y
     float sy2 = (y2 - (float) gs->viewY) * gs->scaleY + gs->offsetY;
 
     u64 lineColor = GS_SETREG_RGBAQ(r, g, b, a, 0x00);
-    gsKit_prim_line(gs->gsGlobal, sx1, sy1, sx2, sy2, gs->zCounter, lineColor);
-    gs->zCounter++;
+    gsKit_prim_line(gs->gsGlobal, sx1, sy1, sx2, sy2, 0, lineColor);
 }
 
 // PS2 gsKit doesn't support per-vertex colors on lines, so we just use color1
@@ -1234,7 +1417,7 @@ static bool gsResolveFontState(GsRenderer* gs, DataWin* dw, Font* font, GsFontSt
     state->spriteFontSprite = nullptr;
 
     if (!font->isSpriteFont) {
-        int32_t fontTpagIndex = DataWin_resolveTPAG(dw, font->textureOffset);
+        int32_t fontTpagIndex = font->tpagIndex;
         if (0 > fontTpagIndex) return false;
 
         if (!setupTextureForTPAG(gs, &state->tex, fontTpagIndex)) return false;
@@ -1261,8 +1444,7 @@ static bool gsResolveGlyph(GsRenderer* gs, DataWin* dw, GsFontState* state, Font
         int32_t glyphIndex = (int32_t) (glyph - font->glyphs);
         if (0 > glyphIndex || glyphIndex >= (int32_t) sprite->textureCount) return false;
 
-        uint32_t tpagOffset = sprite->textureOffsets[glyphIndex];
-        int32_t tpagIdx = DataWin_resolveTPAG(dw, tpagOffset);
+        int32_t tpagIdx = sprite->tpagIndices[glyphIndex];
         if (0 > tpagIdx) return false;
 
         if (!setupTextureForTPAG(gs, outTex, tpagIdx)) return false;
@@ -1310,6 +1492,15 @@ static void gsDrawText(Renderer* renderer, const char* text, float x, float y, f
     // Scale vertex RGB from 0-255 to 0-128 so white (255) becomes 1.0x multiplier
     uint32_t color = renderer->drawColor;
     uint8_t a = alphaToGS(renderer->drawAlpha);
+    uint8_t r = BGR_R(color) >> 1;
+    uint8_t g = BGR_G(color) >> 1;
+    uint8_t b = BGR_B(color) >> 1;
+    u64 textColor = GS_SETREG_RGBAQ(r, g, b, a, 0x00);
+
+    float screenScaleX = xscale * font->scaleX * gs->scaleX;
+    float screenScaleY = yscale * font->scaleY * gs->scaleY;
+    float screenBaseX = (x - (float) gs->viewX) * gs->scaleX + gs->offsetX;
+    float screenBaseY = (y - (float) gs->viewY) * gs->scaleY + gs->offsetY;
 
     int32_t textLen = (int32_t) strlen(text);
 
@@ -1346,52 +1537,50 @@ static void gsDrawText(Renderer* renderer, const char* text, float x, float y, f
 
         float cursorX = halignOffset;
 
-        // Draw each glyph
+        // Draw each glyph - decode each codepoint once and carry it forward as next iteration's ch (also used for kerning)
         int32_t pos = 0;
-        while (lineLen > pos) {
-            uint16_t ch = TextUtils_decodeUtf8(line, lineLen, &pos);
-            FontGlyph* glyph = TextUtils_findGlyph(font, ch);
-            if (glyph == nullptr) continue;
-
-            if (glyph->sourceWidth > 0 && glyph->sourceHeight > 0) {
-                GSTEXTURE glyphTex;
-                float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
-                float localX0, localY0;
-
-                if (!gsResolveGlyph(gs, dw, &fontState, glyph, cursorX, cursorY, &glyphTex, &u0, &v0, &u1, &v1, &localX0, &localY0)) {
-                    cursorX += (float) glyph->shift;
-                    continue;
-                }
-
-                float glyphX = x + localX0 * xscale * font->scaleX;
-                float glyphY = y + localY0 * yscale * font->scaleY;
-                float glyphW = (float) glyph->sourceWidth * xscale * font->scaleX;
-                float glyphH = (float) glyph->sourceHeight * yscale * font->scaleY;
-
-                float sx1 = (glyphX - (float) gs->viewX) * gs->scaleX + gs->offsetX;
-                float sy1 = (glyphY - (float) gs->viewY) * gs->scaleY + gs->offsetY;
-                float sx2 = (glyphX + glyphW - (float) gs->viewX) * gs->scaleX + gs->offsetX;
-                float sy2 = (glyphY + glyphH - (float) gs->viewY) * gs->scaleY + gs->offsetY;
-
-                uint8_t r = BGR_R(color) >> 1;
-                uint8_t g = BGR_G(color) >> 1;
-                uint8_t b = BGR_B(color) >> 1;
-                u64 textColor = GS_SETREG_RGBAQ(r, g, b, a, 0x00);
-                gsKit_prim_sprite_texture(gs->gsGlobal, &glyphTex, sx1, sy1, u0, v0, sx2, sy2, u1, v1, gs->zCounter, textColor);
-            }
-
-            cursorX += (float) glyph->shift;
-
-            // Kerning
-            if (lineLen > pos) {
-                int32_t savedPos = pos;
-                uint16_t nextCh = TextUtils_decodeUtf8(line, lineLen, &pos);
-                pos = savedPos;
-                cursorX += TextUtils_getKerningOffset(glyph, nextCh);
-            }
+        uint16_t ch = 0;
+        bool hasCh = false;
+        if (lineLen > pos) {
+            ch = TextUtils_decodeUtf8(line, lineLen, &pos);
+            hasCh = true;
         }
 
-        gs->zCounter++;
+        while (hasCh) {
+            FontGlyph* glyph = TextUtils_findGlyph(font, ch);
+
+            uint16_t nextCh = 0;
+            bool hasNext = lineLen > pos;
+            if (hasNext) nextCh = TextUtils_decodeUtf8(line, lineLen, &pos);
+
+            if (glyph != nullptr) {
+                bool resolveOk = true;
+                if (glyph->sourceWidth > 0 && glyph->sourceHeight > 0) {
+                    GSTEXTURE glyphTex;
+                    float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+                    float localX0, localY0;
+
+                    if (gsResolveGlyph(gs, dw, &fontState, glyph, cursorX, cursorY, &glyphTex, &u0, &v0, &u1, &v1, &localX0, &localY0)) {
+                        float sx1 = localX0 * screenScaleX + screenBaseX;
+                        float sy1 = localY0 * screenScaleY + screenBaseY;
+                        float sx2 = sx1 + (float) glyph->sourceWidth * screenScaleX;
+                        float sy2 = sy1 + (float) glyph->sourceHeight * screenScaleY;
+
+                        gsKit_prim_sprite_texture(gs->gsGlobal, &glyphTex, sx1, sy1, u0, v0, sx2, sy2, u1, v1, 0, textColor);
+                    } else {
+                        resolveOk = false;
+                    }
+                }
+
+                cursorX += (float) glyph->shift;
+                if (resolveOk && hasNext) {
+                    cursorX += TextUtils_getKerningOffset(glyph, nextCh);
+                }
+            }
+
+            ch = nextCh;
+            hasCh = hasNext;
+        }
 
         // Next line
         cursorY += lineStride;
@@ -1416,6 +1605,11 @@ static void gsDrawTextColor(Renderer* renderer, const char* text, float x, float
 
     int32_t textLen = (int32_t) strlen(text);
     if(textLen == 0) return;
+
+    float screenScaleX = xscale * font->scaleX * gs->scaleX;
+    float screenScaleY = yscale * font->scaleY * gs->scaleY;
+    float screenBaseX = (x - (float) gs->viewX) * gs->scaleX + gs->offsetX;
+    float screenBaseY = (y - (float) gs->viewY) * gs->scaleY + gs->offsetY;
 
     // Vertical alignment
     int32_t lineCount = TextUtils_countLines(text, textLen);
@@ -1456,6 +1650,29 @@ static void gsDrawTextColor(Renderer* renderer, const char* text, float x, float
             c3 |= ((c4 & 0xff00) + (right_delta_g >> 8) & 0xff00) & 0xff00;
             c3 |= ((c4 & 0xff) + (right_delta_b >> 16)) & 0xff;
 
+        // GS modulate mode: Output = Texture * Vertex / 128
+        // Scale vertex RGB from 0-255 to 0-128 so white (255) becomes 1.0x multiplier
+        uint8_t ga = alphaToGS(alpha);
+        uint8_t r1 = BGR_R(c1) >> 1;
+        uint8_t g1 = BGR_G(c1) >> 1;
+        uint8_t b1 = BGR_B(c1) >> 1;
+        u64 textColor1 = GS_SETREG_RGBAQ(r1, g1, b1, ga, 0x00);
+
+        uint8_t r2 = BGR_R(c2) >> 1;
+        uint8_t g2 = BGR_G(c2) >> 1;
+        uint8_t b2 = BGR_B(c2) >> 1;
+        u64 textColor2 = GS_SETREG_RGBAQ(r2, g2, b2, ga, 0x00);
+
+        uint8_t r3 = BGR_R(c3) >> 1;
+        uint8_t g3 = BGR_G(c3) >> 1;
+        uint8_t b3 = BGR_B(c3) >> 1;
+        u64 textColor3 = GS_SETREG_RGBAQ(r3, g3, b3, ga, 0x00);
+
+        uint8_t r4 = BGR_R(c4) >> 1;
+        uint8_t g4 = BGR_G(c4) >> 1;
+        uint8_t b4 = BGR_B(c4) >> 1;
+        u64 textColor4 = GS_SETREG_RGBAQ(r4, g4, b4, ga, 0x00);
+
         left_delta_r += left_r_dx;
         left_delta_g += left_g_dx;
         left_delta_b += left_b_dx;
@@ -1480,80 +1697,59 @@ static void gsDrawTextColor(Renderer* renderer, const char* text, float x, float
 
         float cursorX = halignOffset;
 
-        // Draw each glyph
+        // Draw each glyph - decode each codepoint once and carry it forward as next iteration's ch (also used for kerning)
         int32_t pos = 0;
-        while (lineLen > pos) {
-            uint16_t ch = TextUtils_decodeUtf8(line, lineLen, &pos);
-            FontGlyph* glyph = TextUtils_findGlyph(font, ch);
-            if (glyph == nullptr) continue;
-
-            if (glyph->sourceWidth > 0 && glyph->sourceHeight > 0) {
-                GSTEXTURE glyphTex;
-                float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
-                float localX0, localY0;
-
-                if (!gsResolveGlyph(gs, dw, &fontState, glyph, cursorX, cursorY, &glyphTex, &u0, &v0, &u1, &v1, &localX0, &localY0)) {
-                    cursorX += (float) glyph->shift;
-                    continue;
-                }
-
-                float glyphX = x + localX0 * xscale * font->scaleX;
-                float glyphY = y + localY0 * yscale * font->scaleY;
-                float glyphW = (float) glyph->sourceWidth * xscale * font->scaleX;
-                float glyphH = (float) glyph->sourceHeight * yscale * font->scaleY;
-
-                float sx1 = (glyphX - (float) gs->viewX) * gs->scaleX + gs->offsetX;
-                float sy1 = (glyphY - (float) gs->viewY) * gs->scaleY + gs->offsetY;
-                float sx2 = (glyphX + glyphW - (float) gs->viewX) * gs->scaleX + gs->offsetX;
-                float sy2 = (glyphY + glyphH - (float) gs->viewY) * gs->scaleY + gs->offsetY;
-
-                // GS modulate mode: Output = Texture * Vertex / 128
-                // Scale vertex RGB from 0-255 to 0-128 so white (255) becomes 1.0x multiplier
-                uint8_t ga = alphaToGS(alpha);
-                uint8_t r1 = BGR_R(c1) >> 1;
-                uint8_t g1 = BGR_G(c1) >> 1;
-                uint8_t b1 = BGR_B(c1) >> 1;
-                u64 textColor1 = GS_SETREG_RGBAQ(r1, g1, b1, ga, 0x00);
-
-                uint8_t r2 = BGR_R(c2) >> 1;
-                uint8_t g2 = BGR_G(c2) >> 1;
-                uint8_t b2 = BGR_B(c2) >> 1;
-                u64 textColor2 = GS_SETREG_RGBAQ(r2, g2, b2, ga, 0x00);
-
-                uint8_t r3 = BGR_R(c3) >> 1;
-                uint8_t g3 = BGR_G(c3) >> 1;
-                uint8_t b3 = BGR_B(c3) >> 1;
-                u64 textColor3 = GS_SETREG_RGBAQ(r3, g3, b3, ga, 0x00);
-
-                uint8_t r4 = BGR_R(c4) >> 1;
-                uint8_t g4 = BGR_G(c4) >> 1;
-                uint8_t b4 = BGR_B(c4) >> 1;
-                u64 textColor4 = GS_SETREG_RGBAQ(r4, g4, b4, ga, 0x00);
-
-                gsKit_prim_triangle_goraud_texture_3d(gs->gsGlobal, &glyphTex,
-                        sx1, sy1, gs->zCounter, u0, v0,
-                        sx2, sy1, gs->zCounter, u1, v0,
-                        sx2, sy2, gs->zCounter, u1, v1,
-                        textColor1, textColor2, textColor3);
-                gsKit_prim_triangle_goraud_texture_3d(gs->gsGlobal, &glyphTex,
-                    sx1, sy1, gs->zCounter, u0, v0,
-                    sx2, sy2, gs->zCounter, u1, v1,
-                    sx1, sy2, gs->zCounter, u0, v1,
-                    textColor1, textColor3, textColor4);
-            }
-
-            cursorX += (float) glyph->shift;
-
-            // Kerning
-            if (lineLen > pos) {
-                int32_t savedPos = pos;
-                uint16_t nextCh = TextUtils_decodeUtf8(line, lineLen, &pos);
-                pos = savedPos;
-                cursorX += TextUtils_getKerningOffset(glyph, nextCh);
-            }
+        uint16_t ch = 0;
+        bool hasCh = false;
+        if (lineLen > pos) {
+            ch = TextUtils_decodeUtf8(line, lineLen, &pos);
+            hasCh = true;
         }
 
-        gs->zCounter++;
+        while (hasCh) {
+            FontGlyph* glyph = TextUtils_findGlyph(font, ch);
+
+            uint16_t nextCh = 0;
+            bool hasNext = lineLen > pos;
+            if (hasNext) nextCh = TextUtils_decodeUtf8(line, lineLen, &pos);
+
+            if (glyph != nullptr) {
+                bool resolveOk = true;
+                if (glyph->sourceWidth > 0 && glyph->sourceHeight > 0) {
+                    GSTEXTURE glyphTex;
+                    float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+                    float localX0, localY0;
+
+                    if (gsResolveGlyph(gs, dw, &fontState, glyph, cursorX, cursorY, &glyphTex, &u0, &v0, &u1, &v1, &localX0, &localY0)) {
+                        float sx1 = localX0 * screenScaleX + screenBaseX;
+                        float sy1 = localY0 * screenScaleY + screenBaseY;
+                        float sx2 = sx1 + (float) glyph->sourceWidth * screenScaleX;
+                        float sy2 = sy1 + (float) glyph->sourceHeight * screenScaleY;
+
+                        gsKit_prim_triangle_goraud_texture_3d(gs->gsGlobal, &glyphTex,
+                                sx1, sy1, 0, u0, v0,
+                                sx2, sy1, 0, u1, v0,
+                                sx2, sy2, 0, u1, v1,
+                                textColor1, textColor2, textColor3);
+                        gsKit_prim_triangle_goraud_texture_3d(gs->gsGlobal, &glyphTex,
+                            sx1, sy1, 0, u0, v0,
+                            sx2, sy2, 0, u1, v1,
+                            sx1, sy2, 0, u0, v1,
+                            textColor1, textColor3, textColor4);
+                    } else {
+                        resolveOk = false;
+                    }
+                }
+
+                cursorX += (float) glyph->shift;
+                if (resolveOk && hasNext) {
+                    cursorX += TextUtils_getKerningOffset(glyph, nextCh);
+                }
+            }
+
+            ch = nextCh;
+            hasCh = hasNext;
+        }
 
         // Next line
         cursorY += lineStride;
@@ -1588,12 +1784,7 @@ static void gsDrawTriangle(Renderer *renderer, float x1, float y1, float x2, flo
         float b = (float) BGR_B(renderer->drawColor);
 
         u64 triColor = GS_SETREG_RGBAQ(r, g, b, alphaToGS(renderer->drawAlpha), 0x00);
-        gsKit_prim_triangle_gouraud_3d(gs->gsGlobal, 
-            sx1, sy1, gs->zCounter,
-            sx2, sy2, gs->zCounter,
-            sx3, sy3, gs->zCounter,
-            triColor, triColor, triColor);
-        gs->zCounter++;
+        gsKit_prim_triangle_gouraud_3d(gs->gsGlobal, sx1, sy1, 0,sx2, sy2, 0,sx3, sy3, 0,triColor, triColor, triColor);
     }
 }
 
@@ -1602,7 +1793,7 @@ static void gsFlush(MAYBE_UNUSED Renderer* renderer) {
 }
 
 static int32_t gsCreateSpriteFromSurface(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t x, MAYBE_UNUSED int32_t y, MAYBE_UNUSED int32_t w, MAYBE_UNUSED int32_t h, MAYBE_UNUSED bool removeback, MAYBE_UNUSED bool smooth, MAYBE_UNUSED int32_t xorig, MAYBE_UNUSED int32_t yorig) {
-    fprintf(stderr, "GsRenderer: createSpriteFromSurface not supported on PS2\n");
+    rendererPrintf("GsRenderer: createSpriteFromSurface not supported on PS2\n");
     return -1;
 }
 
@@ -1660,8 +1851,7 @@ static void gsDrawTile(Renderer* renderer, RoomTile* tile, float offsetX, float 
     uint8_t a = alphaToGS(alpha);
     u64 gsColor = GS_SETREG_RGBAQ(r, g, b, a, 0x00);
 
-    gsKit_prim_sprite_texture(gs->gsGlobal, &tex, sx1, sy1, u1, v1, sx2, sy2, u2, v2, gs->zCounter, gsColor);
-    gs->zCounter++;
+    gsKit_prim_sprite_texture(gs->gsGlobal, &tex, sx1, sy1, u1, v1, sx2, sy2, u2, v2, 0, gsColor);
 }
 
 // ===[ Vtable ]===
@@ -1676,6 +1866,7 @@ static RendererVtable gsVtable = {
     .beginGUI = gsBeginGUI,
     .endGUI = gsEndGUI,
     .drawSprite = gsDrawSprite,
+    .drawSpritePos = gsDrawSpritePos,
     .drawSpritePart = gsDrawSpritePart,
     .drawRectangle = gsDrawRectangle,
     .drawLine = gsDrawLine,
@@ -1687,6 +1878,7 @@ static RendererVtable gsVtable = {
     .createSpriteFromSurface = gsCreateSpriteFromSurface,
     .deleteSprite = gsDeleteSprite,
     .drawTile = gsDrawTile,
+    .drawTiled = gsDrawTiled,
 };
 
 // ===[ Public API ]===
@@ -1697,6 +1889,5 @@ Renderer* GsRenderer_create(GSGLOBAL* gsGlobal) {
     gs->gsGlobal = gsGlobal;
     gs->scaleX = 2.0f;
     gs->scaleY = 2.0f;
-    gs->zCounter = 1;
     return (Renderer*) gs;
 }

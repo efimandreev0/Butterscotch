@@ -88,9 +88,6 @@ typedef struct {
     int32_t viewX;
     int32_t viewY;
 
-    // Z counter for depth ordering
-    uint16_t zCounter;
-
     // ATLAS.BIN data
     uint16_t atlasTPAGCount;
     uint16_t atlasTileCount;
@@ -118,6 +115,9 @@ typedef struct {
     uint8_t* atlasBpp;         // Bits per pixel per atlas (4 or 8), from ATLAS.BIN [atlasCount]
     uint64_t frameCounter;     // Incremented each frame for LRU tracking
     bool evictedAtlasUsedInCurrentFrame; // Used for debugging, true if a atlas that was used on the current frame was evicted (VRAM thrashing)
+    uint16_t uniqueAtlasesThisFrame;     // Number of distinct atlases touched this frame
+    uint16_t chunksNeededThisFrame;      // Total VRAM chunks needed by all atlases touched this frame
+    uint16_t diskLoadsThisFrame;         // Number of atlas loads from TEXTURES.BIN this frame (EE cache misses)
 
     // EE RAM atlas cache (stores uncompressed atlas pixel data for zero-copy VRAM uploads)
     uint8_t* eeCache;                  // Contiguous buffer with uncompressed texture data

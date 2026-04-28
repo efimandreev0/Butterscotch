@@ -18,6 +18,7 @@
 #endif
 
 #include "runner_keyboard.h"
+#include "glfw_gamepad.h"
 #include "runner.h"
 #include "input_recording.h"
 #include "debug_overlay.h"
@@ -475,6 +476,10 @@ static void setGlfwWindowTitle(void* window, const char* title) {
     glfwSetWindowTitle((GLFWwindow*) window, title);
 }
 
+static bool getGlfwWindowFocus(void* window) {
+    return glfwGetWindowAttrib((GLFWwindow*) window, GLFW_FOCUSED) != 0;
+}
+
 void saveInputRecording() {
     // Save input recording if active, then free
     if (globalInputRecording != nullptr) {
@@ -538,7 +543,7 @@ int main(int argc, char* argv[]) {
     );
 
     Gen8* gen8 = &dataWin->gen8;
-    printf("Loaded \"%s\" (%d) successfully! [Bytecode Version %u]\n", gen8->name, gen8->gameID, gen8->bytecodeVersion);
+    printf("Loaded \"%s\" (%d) successfully! [Bytecode Version %u / GameMaker version %u.%u.%u.%u]\n", gen8->name, gen8->gameID, gen8->bytecodeVersion, dataWin->detectedFormat.major, dataWin->detectedFormat.minor, dataWin->detectedFormat.release, dataWin->detectedFormat.build);
 
     #ifdef __GLIBC__
     {
@@ -642,6 +647,27 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Load SDL gamecontroller mappings
+    {
+        const char* dbPath = "gamecontrollerdb.txt";
+        FILE* f = fopen(dbPath, "r");
+        if (f != NULL) {
+            fseek(f, 0, SEEK_END);
+            long len = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            char* buffer = (char*) malloc(len + 1);
+            if (buffer != NULL) {
+                fread(buffer, 1, len, f);
+                buffer[len] = '\0';
+                GlfwGamepad_loadMappings(buffer);
+                free(buffer);
+            }
+            fclose(f);
+        } else {
+            fprintf(stderr, "Gamepad: SDL gamecontrollerdb.txt not found at %s, using defaults\n", dbPath);
+        }
+    }
+
     if (strcmp(args.renderer, "legacy-gl") == 0) {
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
     } else {
@@ -698,6 +724,7 @@ int main(int argc, char* argv[]) {
     runner->osType = args.osType;
     runner->nativeWindow = window;
     runner->setWindowTitle = setGlfwWindowTitle;
+    runner->windowHasFocus = getGlfwWindowFocus;
 
     // Set up input recording/playback (both can be active: playback then continue recording)
     if (args.playbackInputsPath != nullptr) {
@@ -744,7 +771,9 @@ int main(int argc, char* argv[]) {
     while (!glfwWindowShouldClose(window) && !runner->shouldExit) {
         // Clear last frame's pressed/released state, then poll new input events
         RunnerKeyboard_beginFrame(runner->keyboard);
+        RunnerGamepad_beginFrame(runner->gamepads);
         glfwPollEvents();
+        GlfwGamepad_poll(runner->gamepads);
 
         // Process input recording/playback (must happen after glfwPollEvents, before Runner_step)
         InputRecording_processFrame(globalInputRecording, runner->keyboard, runner->frameCount);
@@ -897,23 +926,31 @@ int main(int argc, char* argv[]) {
         int32_t gameW = (int32_t) gen8->defaultWindowWidth;
         int32_t gameH = (int32_t) gen8->defaultWindowHeight;
 
-        // Compute FBO size from the bounding box of all enabled view ports
-        // GMS2 sizes the application surface to the port bounds, then stretches to the window
+        // The application surface (FBO) is sized to defaultWindowWidth x defaultWindowHeight.
+        // It is a bit hard to understand, but here's how it works:
+        // The Port X/Port Y controls the position of the game viewport within the application surface.
+        // The Port W/Port H controls the size of the game viewport within the application surface.
+        // Think of it like if you had an image (or... well, a framebuffer) and you are "pasting" it over the application surface.
+        // And the Port W/Port H are scaled by the window size too (set by the GEN8 chunk)
+        float displayScaleX = 1.0f;
+        float displayScaleY = 1.0f;
         bool viewsEnabled = (activeRoom->flags & 1) != 0;
         if (viewsEnabled) {
-        int32_t maxRight = 0;
-        int32_t maxBottom = 0;
-        repeat(MAX_VIEWS, vi) {
-            RuntimeView* view = &runner->views[vi];
-            if (!view->enabled) continue;
+            int32_t minLeft = INT32_MAX, minTop = INT32_MAX;
+            int32_t maxRight = INT32_MIN, maxBottom = INT32_MIN;
+            repeat(MAX_VIEWS, vi) {
+                RuntimeView* view = &runner->views[vi];
+                if (!view->enabled) continue;
+                if (minLeft > view->portX) minLeft = view->portX;
+                if (minTop > view->portY) minTop = view->portY;
                 int32_t right = view->portX + view->portWidth;
                 int32_t bottom = view->portY + view->portHeight;
                 if (right > maxRight) maxRight = right;
                 if (bottom > maxBottom) maxBottom = bottom;
             }
-            if (maxRight > 0 && maxBottom > 0) {
-                gameW = maxRight;
-                gameH = maxBottom;
+            if (maxRight > minLeft && maxBottom > minTop) {
+                displayScaleX = (float) gameW / (float) (maxRight - minLeft);
+                displayScaleY = (float) gameH / (float) (maxBottom - minTop);
             }
         }
 
@@ -942,10 +979,10 @@ int main(int argc, char* argv[]) {
                 int32_t viewY = view->viewY;
                 int32_t viewW = view->viewWidth;
                 int32_t viewH = view->viewHeight;
-                int32_t portX = view->portX;
-                int32_t portY = view->portY;
-                int32_t portW = view->portWidth;
-                int32_t portH = view->portHeight;
+                int32_t portX = (int32_t) ((float) view->portX * displayScaleX + 0.5f);
+                int32_t portY = (int32_t) ((float) view->portY * displayScaleY + 0.5f);
+                int32_t portW = (int32_t) ((float) view->portWidth * displayScaleX + 0.5f);
+                int32_t portH = (int32_t) ((float) view->portHeight * displayScaleY + 0.5f);
                 float viewAngle = view->viewAngle;
 
                 runner->viewCurrent = vi;

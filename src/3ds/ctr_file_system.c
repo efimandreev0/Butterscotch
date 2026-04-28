@@ -74,12 +74,55 @@ static bool n3dsDeleteFile(FileSystem* fs, const char* relativePath) {
     return result == 0;
 }
 
+static bool n3dsReadFileBinary(FileSystem* fs, const char* relativePath, uint8_t** outData, int32_t* outSize) {
+    *outData = NULL;
+    *outSize = 0;
+
+    char* fullPath = buildFullPath((N3dsFileSystem*) fs, relativePath);
+    FILE* f = fopen(fullPath, "rb");
+    free(fullPath);
+    if (f == NULL) return false;
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size < 0) {
+        fclose(f);
+        return false;
+    }
+
+    uint8_t* data = safeMalloc((size_t) size);
+    size_t bytesRead = fread(data, 1, (size_t) size, f);
+    fclose(f);
+    if (bytesRead != (size_t) size) {
+        free(data);
+        return false;
+    }
+
+    *outData = data;
+    *outSize = (int32_t) size;
+    return true;
+}
+
+static bool n3dsWriteFileBinary(FileSystem* fs, const char* relativePath, const uint8_t* data, int32_t size) {
+    char* fullPath = buildFullPath((N3dsFileSystem*) fs, relativePath);
+    FILE* f = fopen(fullPath, "wb");
+    free(fullPath);
+    if (f == NULL) return false;
+
+    size_t written = fwrite(data, 1, (size_t) size, f);
+    fclose(f);
+    return written == (size_t) size;
+}
+
 static FileSystemVtable n3dsFileSystemVtable = {
     .resolvePath = n3dsResolvePath,
     .fileExists = n3dsFileExists,
     .readFileText = n3dsReadFileText,
     .writeFileText = n3dsWriteFileText,
     .deleteFile = n3dsDeleteFile,
+    .readFileBinary = n3dsReadFileBinary,
+    .writeFileBinary = n3dsWriteFileBinary,
 };
 
 N3dsFileSystem* N3dsFileSystem_create(const char* dataWinPath) {

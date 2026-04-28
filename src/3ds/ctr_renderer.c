@@ -231,19 +231,31 @@ static void ctrBeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int3
     gl->gameW = gameW; gl->gameH = gameH;
 }
 
+static void ctrSetViewportForPort(CtrRenderer* gl, int32_t portX, int32_t portY, int32_t portW, int32_t portH) {
+    float scaleX = (float) gl->windowW / (float) gl->gameW;
+    float scaleY = (float) gl->windowH / (float) gl->gameH;
+    float scale = fminf(scaleX, scaleY);
+
+    int32_t baseVpW = (int32_t) roundf((float) gl->gameW * scale);
+    int32_t baseVpH = (int32_t) roundf((float) gl->gameH * scale);
+    int32_t baseVpX = (gl->windowW - baseVpW) / 2;
+    int32_t baseVpY = (gl->windowH - baseVpH) / 2;
+
+    int32_t vpX = baseVpX + (int32_t) roundf((float) portX * scale);
+    int32_t vpY = baseVpY + (int32_t) roundf((float) portY * scale);
+    int32_t vpW = (int32_t) roundf((float) portW * scale);
+    int32_t vpH = (int32_t) roundf((float) portH * scale);
+
+    if (vpW < 1) vpW = 1;
+    if (vpH < 1) vpH = 1;
+    glViewport(vpX, vpY, vpW, vpH);
+}
+
 static void ctrBeginView(Renderer* renderer, int32_t viewX, int32_t viewY, int32_t viewW, int32_t viewH, int32_t portX, int32_t portY, int32_t portW, int32_t portH, float viewAngle) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
     ctrFlushBatch(gl);
     glBindTexture(GL_TEXTURE_2D, 0);
-    float scaleX = (float)gl->windowW / (float)gl->gameW;
-    float scaleY = (float)gl->windowH / (float)gl->gameH;
-    float scale = fminf(scaleX, scaleY);
-
-    int32_t vpW = (int32_t)(gl->gameW * scale);
-    int32_t vpH = (int32_t)(gl->gameH * scale);
-    int32_t vpX = (gl->windowW - vpW) / 2;
-    int32_t vpY = (gl->windowH - vpH) / 2;
-    glViewport(vpX, vpY, vpW, vpH);
+    ctrSetViewportForPort(gl, portX, portY, portW, portH);
 
     Matrix4f projection;
     Matrix4f_identity(&projection);
@@ -268,7 +280,24 @@ static void ctrBeginView(Renderer* renderer, int32_t viewX, int32_t viewY, int32
     glLoadIdentity();
 }
 
+static void ctrBeginGUI(Renderer* renderer, int32_t guiW, int32_t guiH, int32_t portX, int32_t portY, int32_t portW, int32_t portH) {
+    CtrRenderer* gl = (CtrRenderer*) renderer;
+    ctrFlushBatch(gl);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    ctrSetViewportForPort(gl, portX, portY, portW, portH);
+
+    Matrix4f projection;
+    Matrix4f_identity(&projection);
+    Matrix4f_ortho(&projection, 0.0f, (float) guiW, (float) guiH, 0.0f, -1.0f, 1.0f);
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadMatrixf(projection.m);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+}
+
 static void ctrEndView(Renderer* renderer) {}
+static void ctrEndGUI(Renderer* renderer) {}
 static void ctrEndFrame(Renderer* renderer) { ctrFlushBatch((CtrRenderer*) renderer); g_frameCounter++; }
 static void ctrRendererFlush(Renderer* renderer) { ctrFlushBatch((CtrRenderer*) renderer); }
 
@@ -531,16 +560,18 @@ static void markTpagResident(CtrRenderer* gl, int32_t tpagIndex) {
     if (tpagIndex >= 0 && (uint32_t)tpagIndex < gl->tpagCount) gl->tpags[tpagIndex].keepResident = true;
 }
 static void markTpagOffsetResident(CtrRenderer* gl, DataWin* dw, uint32_t tpagOffset) {
-    markTpagResident(gl, DataWin_resolveTPAG(dw, tpagOffset));
+    (void) gl;
+    (void) dw;
+    (void) tpagOffset;
 }
 static void markSpriteResident(CtrRenderer* gl, DataWin* dw, int32_t spriteIndex) {
     if (spriteIndex < 0 || (uint32_t) spriteIndex >= dw->sprt.count) return;
     Sprite* s = &dw->sprt.sprites[spriteIndex];
-    for (uint32_t f = 0; f < s->textureCount; f++) markTpagOffsetResident(gl, dw, s->textureOffsets[f]);
+    for (uint32_t f = 0; f < s->textureCount; f++) markTpagResident(gl, s->tpagIndices[f]);
 }
 
 static void markBackgroundResident(CtrRenderer* gl, DataWin* dw, int32_t bgndIndex) {
-    if (bgndIndex >= 0 && (uint32_t) bgndIndex < dw->bgnd.count) markTpagOffsetResident(gl, dw, dw->bgnd.backgrounds[bgndIndex].textureOffset);
+    if (bgndIndex >= 0 && (uint32_t) bgndIndex < dw->bgnd.count) markTpagResident(gl, dw->bgnd.backgrounds[bgndIndex].tpagIndex);
 }
 void CtrRenderer_prefetchSprite(Renderer* renderer, int32_t spriteIndex) {
     if (!renderer || !renderer->dataWin) return;
@@ -555,7 +586,7 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
 
     for (uint32_t i = 0; i < gl->tpagCount; i++) gl->tpags[i].keepResident = false;
 
-    for (uint32_t i = 0; i < dw->font.count; i++) markTpagOffsetResident(gl, dw, dw->font.fonts[i].textureOffset);
+    for (uint32_t i = 0; i < dw->font.count; i++) markTpagResident(gl, dw->font.fonts[i].tpagIndex);
 
     if (room->backgrounds) {
         for (int i = 0; i < 8; i++) {
@@ -750,6 +781,19 @@ static void ctrDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t src
     float x1 = cx + roundf((float)srcW * xscale); float y1 = cy + roundf((float)srcH * yscale);
 
     ctrDrawTpagRegion(gl, tpagIndex, (float)srcOffX, (float)srcOffY, (float)srcW, (float)srcH, cx, cy, x1, cy, x1, y1, cx, y1, BGR_R(color), BGR_G(color), BGR_B(color), a);
+}
+
+static void ctrDrawSpritePos(Renderer* renderer, int32_t tpagIndex, float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, float alpha) {
+    CtrRenderer* gl = (CtrRenderer*) renderer;
+    if (tpagIndex < 0 || (uint32_t) tpagIndex >= gl->tpagCount) return;
+
+    TexturePageItem* tpag = &renderer->dataWin->tpag.items[tpagIndex];
+    uint8_t a = ctrAlphaToByte(alpha);
+    if (a == 0) return;
+
+    ctrDrawTpagRegion(gl, (uint32_t) tpagIndex, 0.0f, 0.0f, (float) tpag->sourceWidth, (float) tpag->sourceHeight,
+        x1, y1, x2, y2, x3, y3, x4, y4,
+        BGR_R(renderer->drawColor), BGR_G(renderer->drawColor), BGR_B(renderer->drawColor), a);
 }
 
 static void ctrDrawTile(Renderer* renderer, RoomTile* tile, float offsetX, float offsetY) {
@@ -954,7 +998,7 @@ static void ctrDrawRoundrect(Renderer* renderer, float x1, float y1, float x2, f
 typedef struct { Font* font; uint32_t tpagIndex; } CtrFontState;
 static bool ctrResolveFontState(CtrRenderer* gl, DataWin* dw, Font* font, CtrFontState* state) {
     state->font = font; state->tpagIndex = 0;
-    int32_t fontTpagIndex = DataWin_resolveTPAG(dw, font->textureOffset);
+    int32_t fontTpagIndex = font->tpagIndex;
     if (fontTpagIndex < 0 || fontTpagIndex >= (int32_t)gl->tpagCount) return false;
 
     if (!gl->tpags[fontTpagIndex].isLoaded) loadDynamicSprite(gl, dw, fontTpagIndex);
@@ -983,13 +1027,14 @@ static void ctrDrawText(Renderer* renderer, const char* text, float x, float y, 
 
     uint8_t a = ctrAlphaToByte(renderer->drawAlpha); if (a == 0) return;
 
-    char* processed = TextUtils_preprocessGmlText(text);
-    int32_t textLen = (int32_t) strlen(processed);
-    if (textLen == 0) { free(processed); return; }
+    PreprocessedText processed = TextUtils_preprocessGmlText(text);
+    const char* processedText = processed.text;
+    int32_t textLen = (int32_t) strlen(processedText);
+    if (textLen == 0) { PreprocessedText_free(processed); return; }
     x = roundf(x);
     y = roundf(y);
 
-    int32_t lineCount = TextUtils_countLines(processed, textLen);
+    int32_t lineCount = TextUtils_countLines(processedText, textLen);
 
     float lineStride = (float) font->emSize;
     if (lineStride <= 0.0f) {
@@ -1012,10 +1057,10 @@ static void ctrDrawText(Renderer* renderer, const char* text, float x, float y, 
 
     for (int32_t lineIdx = 0; lineCount > lineIdx; lineIdx++) {
         int32_t lineEnd = lineStart;
-        while (textLen > lineEnd && !TextUtils_isNewlineChar(processed[lineEnd])) lineEnd++;
+        while (textLen > lineEnd && !TextUtils_isNewlineChar(processedText[lineEnd])) lineEnd++;
         int32_t lineLen = lineEnd - lineStart;
 
-        float lineWidth = TextUtils_measureLineWidth(font, processed + lineStart, lineLen);
+        float lineWidth = TextUtils_measureLineWidth(font, processedText + lineStart, lineLen);
         float halignOffset = 0;
         if (renderer->drawHalign == 1) halignOffset = -lineWidth / 2.0f;
         else if (renderer->drawHalign == 2) halignOffset = -lineWidth;
@@ -1023,7 +1068,7 @@ static void ctrDrawText(Renderer* renderer, const char* text, float x, float y, 
         float cursorX = halignOffset; int32_t pos = 0;
         while (lineLen > pos) {
             int32_t oldPos = pos;
-            uint16_t ch = TextUtils_decodeUtf8(processed + lineStart, lineLen, &pos);
+            uint16_t ch = TextUtils_decodeUtf8(processedText + lineStart, lineLen, &pos);
             if (pos == oldPos) { pos++; continue; }
 
             FontGlyph* glyph = TextUtils_findGlyph(font, ch);
@@ -1052,15 +1097,15 @@ static void ctrDrawText(Renderer* renderer, const char* text, float x, float y, 
             cursorX += glyph->shift;
             if (lineLen > pos) {
                 int32_t savedPos = pos;
-                uint16_t nextCh = TextUtils_decodeUtf8(processed + lineStart, lineLen, &pos);
+                uint16_t nextCh = TextUtils_decodeUtf8(processedText + lineStart, lineLen, &pos);
                 pos = savedPos; cursorX += TextUtils_getKerningOffset(glyph, nextCh);
             }
         }
         cursorY += lineStride;
-        lineStart = (textLen > lineEnd) ? TextUtils_skipNewline(processed, lineEnd, textLen) : lineEnd;
+        lineStart = (textLen > lineEnd) ? TextUtils_skipNewline(processedText, lineEnd, textLen) : lineEnd;
     }
 
-    free(processed);
+    PreprocessedText_free(processed);
 }
 
 static void ctrDrawTextColor(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, float angleDeg, int32_t _c1, int32_t _c2, int32_t _c3, int32_t _c4, float floatAlpha) {
@@ -1074,8 +1119,8 @@ static void ctrDeleteSprite(Renderer* renderer, int32_t spriteIndex) {}
 
 static RendererVtable ctrVtable = {
     .init = ctrInit, .destroy = ctrDestroy, .beginFrame = ctrBeginFrame, .endFrame = ctrEndFrame,
-    .beginView = ctrBeginView, .endView = ctrEndView,
-    .drawSprite = ctrDrawSprite, .drawSpritePart = ctrDrawSpritePart, .drawRectangle = ctrDrawRectangle,
+    .beginView = ctrBeginView, .endView = ctrEndView, .beginGUI = ctrBeginGUI, .endGUI = ctrEndGUI,
+    .drawSprite = ctrDrawSprite, .drawSpritePart = ctrDrawSpritePart, .drawSpritePos = ctrDrawSpritePos, .drawRectangle = ctrDrawRectangle,
     .drawLine = ctrDrawLine, .drawLineColor = ctrDrawLineColor, .drawTriangle = ctrDrawTriangle,
     .drawText = ctrDrawText, .drawTextColor = ctrDrawTextColor, .flush = ctrRendererFlush,
     .createSpriteFromSurface = ctrCreateSpriteFromSurface, .deleteSprite = ctrDeleteSprite,
@@ -1088,5 +1133,6 @@ Renderer* CtrRenderer_create(void) {
     CtrRenderer* gl = safeCalloc(1, sizeof(CtrRenderer));
     gl->base.vtable = &ctrVtable;
     gl->base.drawColor = 0xFFFFFF; gl->base.drawAlpha = 1.0f; gl->base.drawFont = -1;
+    gl->base.circlePrecision = 36;
     return (Renderer*) gl;
 }
