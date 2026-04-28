@@ -821,26 +821,31 @@ static void ctrDrawTriangleColor(Renderer* renderer, float x1, float y1, float x
 static void ctrDrawEllipse(Renderer* renderer, float cx, float cy, float rx, float ry, uint32_t color, float alpha, bool outline, int32_t precision) {
     CtrRenderer* gl = (CtrRenderer*) renderer;
     rx = fabsf(rx); ry = fabsf(ry);
-    if (rx <= 0.0f || ry <= 0.0f) { ctrDrawRectangle(renderer, cx - rx, cy - ry, cx + rx, cy + ry, color, alpha, outline); return; }
 
-    int32_t segments = ctrClampSegments(precision, 4, CTR_MAX_CIRCLE_SEGMENTS);
-    float angleStep = (2.0f * (float)M_PI) / (float)segments;
-
-    if (outline) {
-        float prevX = cx + rx; float prevY = cy;
-        for (int32_t i = 1; i <= segments; i++) {
-            float angle = angleStep * (float)i; float nextX = cx + cosf(angle) * rx; float nextY = cy + sinf(angle) * ry;
-            ctrDrawLine(renderer, prevX, prevY, nextX, nextY, 1.0f, color, alpha);
-            prevX = nextX; prevY = nextY;
-        }
+    if (rx <= 2.5f && ry <= 2.5f) {
+        ctrDrawRectangle(renderer, cx - rx, cy - ry, cx + rx, cy + ry, color, alpha, outline);
         return;
     }
 
+    float maxRadius = fmaxf(rx, ry);
+    int32_t segments = (int32_t)(sqrtf(maxRadius) * 3.5f);
+    if (segments < 8) segments = 8;
+    if (segments > 32) segments = 32;
+
+    float angleStep = (2.0f * (float)M_PI) / (float)segments;
     uint8_t r, g, b, a; ctrColorToBytes(color, alpha, &r, &g, &b, &a);
+
     float prevX = cx + rx; float prevY = cy;
     for (int32_t i = 1; i <= segments; i++) {
-        float angle = angleStep * (float)i; float nextX = cx + cosf(angle) * rx; float nextY = cy + sinf(angle) * ry;
-        ctrPushTriangleSolid(gl, cx, cy, prevX, prevY, nextX, nextY, r, g, b, a);
+        float angle = angleStep * (float)i;
+        float nextX = cx + cosf(angle) * rx;
+        float nextY = cy + sinf(angle) * ry;
+
+        if (outline) {
+            ctrDrawLine(renderer, prevX, prevY, nextX, nextY, 1.0f, color, alpha);
+        } else {
+            ctrPushTriangleSolid(gl, cx, cy, prevX, prevY, nextX, nextY, r, g, b, a);
+        }
         prevX = nextX; prevY = nextY;
     }
 }
@@ -858,7 +863,10 @@ static void ctrDrawRoundrect(Renderer* renderer, float x1, float y1, float x2, f
     radx = fabsf(radx); rady = fabsf(rady);
     if (radx > width * 0.5f) radx = width * 0.5f; if (rady > height * 0.5f) rady = height * 0.5f;
 
-    int32_t arcSegments = ctrClampSegments(precision / 4, 1, CTR_MAX_ROUNDRECT_CORNER_SEGMENTS);
+    int32_t arcSegments = (int32_t)(sqrtf(fmaxf(radx, rady)) * 0.8f);
+    if (arcSegments < 2) arcSegments = 2;
+    if (arcSegments > 8) arcSegments = 8;
+
     float pX[CTR_MAX_ROUNDRECT_POINTS]; float pY[CTR_MAX_ROUNDRECT_POINTS]; int32_t count = 0; float halfPi = 0.5f * (float)M_PI;
 
     ctrAppendArcPoints(pX, pY, &count, right - radx, top + rady, radx, rady, -halfPi, 0.0f, arcSegments, false);
@@ -868,19 +876,18 @@ static void ctrDrawRoundrect(Renderer* renderer, float x1, float y1, float x2, f
 
     if (count < 2) { ctrDrawRectangle(renderer, left, top, right, bottom, color, alpha, outline); return; }
 
+    uint8_t r, g, b, a; ctrColorToBytes(color, alpha, &r, &g, &b, &a);
     if (outline) {
         for (int32_t i = 0; i < count; i++) {
             int32_t next = (i + 1) % count;
             ctrDrawLine(renderer, pX[i], pY[i], pX[next], pY[next], 1.0f, color, alpha);
         }
-        return;
-    }
-
-    uint8_t r, g, b, a; ctrColorToBytes(color, alpha, &r, &g, &b, &a);
-    float centerX = (left + right) * 0.5f; float centerY = (top + bottom) * 0.5f;
-    for (int32_t i = 0; i < count; i++) {
-        int32_t next = (i + 1) % count;
-        ctrPushTriangleSolid(gl, centerX, centerY, pX[i], pY[i], pX[next], pY[next], r, g, b, a);
+    } else {
+        float centerX = (left + right) * 0.5f; float centerY = (top + bottom) * 0.5f;
+        for (int32_t i = 0; i < count; i++) {
+            int32_t next = (i + 1) % count;
+            ctrPushTriangleSolid(gl, centerX, centerY, pX[i], pY[i], pX[next], pY[next], r, g, b, a);
+        }
     }
 }
 typedef struct { Font* font; uint32_t tpagIndex; } CtrFontState;
