@@ -5,11 +5,11 @@
 
 #include "utils.h"
 
-void DataWin_printDebugSummary(DataWin* dataWin) {
+void DataWin_printDebugSummary(DataWin *dataWin) {
     printf("===== data.win Summary =====\n\n");
 
     // GEN8
-    Gen8* g = &dataWin->gen8;
+    Gen8 *g = &dataWin->gen8;
     printf("-- GEN8 (General Info) --\n");
     printf("  Game Name:        %s\n", g->name ? g->name : "(null)");
     printf("  Display Name:     %s\n", g->displayName ? g->displayName : "(null)");
@@ -29,7 +29,8 @@ void DataWin_printDebugSummary(DataWin* dataWin) {
     if (dataWin->optn.constantCount > 0) {
         uint32_t show = dataWin->optn.constantCount < 3 ? dataWin->optn.constantCount : 3;
         forEachIndexed(OptnConstant, constant, idx, dataWin->optn.constants, show) {
-            printf("    [%u] %s = %s\n", idx, constant->name ? constant->name : "?", constant->value ? constant->value : "?");
+            printf("    [%u] %s = %s\n", idx, constant->name ? constant->name : "?",
+                   constant->value ? constant->value : "?");
         }
         if (dataWin->optn.constantCount > 3) printf("    ... and %u more\n", dataWin->optn.constantCount - 3);
     }
@@ -75,7 +76,8 @@ void DataWin_printDebugSummary(DataWin* dataWin) {
     if (dataWin->sprt.count > 0) {
         uint32_t show = dataWin->sprt.count < 3 ? dataWin->sprt.count : 3;
         forEachIndexed(Sprite, spr, idx, dataWin->sprt.sprites, show) {
-            printf("    [%u] %s (%ux%u, %u frames)\n", idx, spr->name ? spr->name : "?", spr->width, spr->height, spr->textureCount);
+            printf("    [%u] %s (%ux%u, %u frames)\n", idx, spr->name ? spr->name : "?", spr->width, spr->height,
+                   spr->textureCount);
         }
         if (dataWin->sprt.count > 3) printf("    ... and %u more\n", dataWin->sprt.count - 3);
     }
@@ -127,7 +129,8 @@ void DataWin_printDebugSummary(DataWin* dataWin) {
     printf("-- FONT (Fonts) --\n");
     printf("  Fonts:            %u\n", dataWin->font.count);
     forEachIndexed(Font, fnt, idx, dataWin->font.fonts, dataWin->font.count) {
-        printf("    [%u] %s (%s, em=%u, %u glyphs)\n", idx, fnt->name ? fnt->name : "?", fnt->displayName ? fnt->displayName : "?", fnt->emSize, fnt->glyphCount);
+        printf("    [%u] %s (%s, em=%u, %u glyphs)\n", idx, fnt->name ? fnt->name : "?",
+               fnt->displayName ? fnt->displayName : "?", fnt->emSize, fnt->glyphCount);
     }
     printf("\n");
 
@@ -146,7 +149,8 @@ void DataWin_printDebugSummary(DataWin* dataWin) {
             repeat(OBJT_EVENT_TYPE_COUNT, e) {
                 totalEvents += obj->eventLists[e].eventCount;
             }
-            printf("    [%u] %s (sprite=%d, depth=%d, %u events)\n", idx, obj->name ? obj->name : "?", obj->spriteId, obj->depth, totalEvents);
+            printf("    [%u] %s (sprite=%d, depth=%d, %u events)\n", idx, obj->name ? obj->name : "?", obj->spriteId,
+                   obj->depth, totalEvents);
         }
         if (dataWin->objt.count > 3) printf("    ... and %u more\n", dataWin->objt.count - 3);
     }
@@ -159,10 +163,12 @@ void DataWin_printDebugSummary(DataWin* dataWin) {
         uint32_t show = dataWin->room.count < 3 ? dataWin->room.count : 3;
         forEachIndexed(Room, rm, idx, dataWin->room.rooms, show) {
             if (rm->payloadLoaded) {
-                printf("    [%u] %s (%ux%u, %u objects, %u tiles)\n", idx, rm->name ? rm->name : "?", rm->width, rm->height, rm->gameObjectCount, rm->tileCount);
+                printf("    [%u] %s (%ux%u, %u objects, %u tiles)\n", idx, rm->name ? rm->name : "?", rm->width,
+                       rm->height, rm->gameObjectCount, rm->tileCount);
             } else {
                 // Lazy room with payload not yet loaded: gameObjectCount/tileCount would be 0 and misleading.
-                printf("    [%u] %s (%ux%u, payload not loaded)\n", idx, rm->name ? rm->name : "?", rm->width, rm->height);
+                printf("    [%u] %s (%ux%u, payload not loaded)\n", idx, rm->name ? rm->name : "?", rm->width,
+                       rm->height);
             }
         }
         if (dataWin->room.count > 3) printf("    ... and %u more\n", dataWin->room.count - 3);
@@ -180,7 +186,8 @@ void DataWin_printDebugSummary(DataWin* dataWin) {
     if (dataWin->code.count > 0) {
         uint32_t show = dataWin->code.count < 3 ? dataWin->code.count : 3;
         forEachIndexed(CodeEntry, entry, idx, dataWin->code.entries, show) {
-            printf("    [%u] %s (%u bytes, %u locals, %u args)\n", idx, entry->name ? entry->name : "?", entry->length, entry->localsCount, entry->argumentsCount);
+            printf("    [%u] %s (%u bytes, %u locals, %u args)\n", idx, entry->name ? entry->name : "?", entry->length,
+                   entry->localsCount, entry->argumentsCount);
         }
         if (dataWin->code.count > 3) printf("    ... and %u more\n", dataWin->code.count - 3);
     }
@@ -193,7 +200,8 @@ void DataWin_printDebugSummary(DataWin* dataWin) {
     if (dataWin->vari.variableCount > 0) {
         uint32_t show = dataWin->vari.variableCount < 3 ? dataWin->vari.variableCount : 3;
         forEachIndexed(Variable, var, idx, dataWin->vari.variables, show) {
-            printf("    [%u] %s (type=%d, id=%d, %u refs)\n", idx, var->name ? var->name : "?", var->instanceType, var->varID, var->occurrences);
+            printf("    [%u] %s (type=%d, id=%d, %u refs)\n", idx, var->name ? var->name : "?", var->instanceType,
+                   var->varID, var->occurrences);
         }
         if (dataWin->vari.variableCount > 3) printf("    ... and %u more\n", dataWin->vari.variableCount - 3);
     }
@@ -218,7 +226,7 @@ void DataWin_printDebugSummary(DataWin* dataWin) {
     if (dataWin->strg.count > 0) {
         uint32_t show = dataWin->strg.count < 5 ? dataWin->strg.count : 5;
         repeat(show, i) {
-            const char* str = dataWin->strg.strings[i];
+            const char *str = dataWin->strg.strings[i];
             // Truncate long strings for display
             if (str) {
                 size_t len = strlen(str);
@@ -268,8 +276,9 @@ void DataWin_printDebugSummary(DataWin* dataWin) {
 
         forEachIndexed(RoomGameObject, roomGameObject, idx, room->gameObjects, room->gameObjectCount) {
             int32_t objectDefinitionId = roomGameObject->objectDefinition;
-            GameObject* objectDefinition = &dataWin->objt.objects[objectDefinitionId];
-            printf("  Object %d (%s, x=%d, y=%d)\n", objectDefinitionId, objectDefinition->name, roomGameObject->x, roomGameObject->y);
+            GameObject *objectDefinition = &dataWin->objt.objects[objectDefinitionId];
+            printf("  Object %d (%s, x=%d, y=%d)\n", objectDefinitionId, objectDefinition->name, roomGameObject->x,
+                   roomGameObject->y);
         }
     }
 

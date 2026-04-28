@@ -6,14 +6,14 @@
 #include <string.h>
 #include <sys/stat.h>
 
-static char* buildFullPath(N3dsFileSystem* fs, const char* relativePath) {
-    if(strncmp(relativePath, fs->basePath, strlen(fs->basePath)) == 0) {
+static char *buildFullPath(N3dsFileSystem *fs, const char *relativePath) {
+    if (strncmp(relativePath, fs->basePath, strlen(fs->basePath)) == 0) {
         return safeStrdup(relativePath);
     }
 
     size_t baseLen = strlen(fs->basePath);
     size_t relLen = strlen(relativePath);
-    char* fullPath = safeMalloc(baseLen + relLen + 1);
+    char *fullPath = safeMalloc(baseLen + relLen + 1);
 
     memcpy(fullPath, fs->basePath, baseLen);
     memcpy(fullPath + baseLen, relativePath, relLen);
@@ -22,21 +22,21 @@ static char* buildFullPath(N3dsFileSystem* fs, const char* relativePath) {
     return fullPath;
 }
 
-static char* n3dsResolvePath(FileSystem* fs, const char* relativePath) {
-    return buildFullPath((N3dsFileSystem*) fs, relativePath);
+static char *n3dsResolvePath(FileSystem *fs, const char *relativePath) {
+    return buildFullPath((N3dsFileSystem *) fs, relativePath);
 }
 
-static bool n3dsFileExists(FileSystem* fs, const char* relativePath) {
-    char* fullPath = buildFullPath((N3dsFileSystem*) fs, relativePath);
+static bool n3dsFileExists(FileSystem *fs, const char *relativePath) {
+    char *fullPath = buildFullPath((N3dsFileSystem *) fs, relativePath);
     struct stat st;
     bool exists = (stat(fullPath, &st) == 0);
     free(fullPath);
     return exists;
 }
 
-static char* n3dsReadFileText(FileSystem* fs, const char* relativePath) {
-    char* fullPath = buildFullPath((N3dsFileSystem*) fs, relativePath);
-    FILE* f = fopen(fullPath, "rb");
+static char *n3dsReadFileText(FileSystem *fs, const char *relativePath) {
+    char *fullPath = buildFullPath((N3dsFileSystem *) fs, relativePath);
+    FILE *f = fopen(fullPath, "rb");
     free(fullPath);
 
     if (f == NULL) return NULL;
@@ -45,7 +45,7 @@ static char* n3dsReadFileText(FileSystem* fs, const char* relativePath) {
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
 
-    char* content = safeMalloc((size_t) size + 1);
+    char *content = safeMalloc((size_t) size + 1);
     size_t bytesRead = fread(content, 1, (size_t) size, f);
     content[bytesRead] = '\0';
     fclose(f);
@@ -53,9 +53,9 @@ static char* n3dsReadFileText(FileSystem* fs, const char* relativePath) {
     return content;
 }
 
-static bool n3dsWriteFileText(FileSystem* fs, const char* relativePath, const char* contents) {
-    char* fullPath = buildFullPath((N3dsFileSystem*) fs, relativePath);
-    FILE* f = fopen(fullPath, "wb");
+static bool n3dsWriteFileText(FileSystem *fs, const char *relativePath, const char *contents) {
+    char *fullPath = buildFullPath((N3dsFileSystem *) fs, relativePath);
+    FILE *f = fopen(fullPath, "wb");
     free(fullPath);
 
     if (f == NULL) return false;
@@ -67,19 +67,19 @@ static bool n3dsWriteFileText(FileSystem* fs, const char* relativePath, const ch
     return written == len;
 }
 
-static bool n3dsDeleteFile(FileSystem* fs, const char* relativePath) {
-    char* fullPath = buildFullPath((N3dsFileSystem*) fs, relativePath);
+static bool n3dsDeleteFile(FileSystem *fs, const char *relativePath) {
+    char *fullPath = buildFullPath((N3dsFileSystem *) fs, relativePath);
     int result = remove(fullPath);
     free(fullPath);
     return result == 0;
 }
 
-static bool n3dsReadFileBinary(FileSystem* fs, const char* relativePath, uint8_t** outData, int32_t* outSize) {
+static bool n3dsReadFileBinary(FileSystem *fs, const char *relativePath, uint8_t **outData, int32_t *outSize) {
     *outData = NULL;
     *outSize = 0;
 
-    char* fullPath = buildFullPath((N3dsFileSystem*) fs, relativePath);
-    FILE* f = fopen(fullPath, "rb");
+    char *fullPath = buildFullPath((N3dsFileSystem *) fs, relativePath);
+    FILE *f = fopen(fullPath, "rb");
     free(fullPath);
     if (f == NULL) return false;
 
@@ -91,7 +91,7 @@ static bool n3dsReadFileBinary(FileSystem* fs, const char* relativePath, uint8_t
         return false;
     }
 
-    uint8_t* data = safeMalloc((size_t) size);
+    uint8_t *data = safeMalloc((size_t) size);
     size_t bytesRead = fread(data, 1, (size_t) size, f);
     fclose(f);
     if (bytesRead != (size_t) size) {
@@ -104,9 +104,9 @@ static bool n3dsReadFileBinary(FileSystem* fs, const char* relativePath, uint8_t
     return true;
 }
 
-static bool n3dsWriteFileBinary(FileSystem* fs, const char* relativePath, const uint8_t* data, int32_t size) {
-    char* fullPath = buildFullPath((N3dsFileSystem*) fs, relativePath);
-    FILE* f = fopen(fullPath, "wb");
+static bool n3dsWriteFileBinary(FileSystem *fs, const char *relativePath, const uint8_t *data, int32_t size) {
+    char *fullPath = buildFullPath((N3dsFileSystem *) fs, relativePath);
+    FILE *f = fopen(fullPath, "wb");
     free(fullPath);
     if (f == NULL) return false;
 
@@ -125,11 +125,11 @@ static FileSystemVtable n3dsFileSystemVtable = {
     .writeFileBinary = n3dsWriteFileBinary,
 };
 
-N3dsFileSystem* N3dsFileSystem_create(const char* dataWinPath) {
-    N3dsFileSystem* fs = safeCalloc(1, sizeof(N3dsFileSystem));
+N3dsFileSystem *N3dsFileSystem_create(const char *dataWinPath) {
+    N3dsFileSystem *fs = safeCalloc(1, sizeof(N3dsFileSystem));
     fs->base.vtable = &n3dsFileSystemVtable;
 
-    const char* lastSlash = strrchr(dataWinPath, '/');
+    const char *lastSlash = strrchr(dataWinPath, '/');
 
     if (lastSlash != NULL) {
         size_t dirLen = (size_t) (lastSlash - dataWinPath + 1);
@@ -143,7 +143,7 @@ N3dsFileSystem* N3dsFileSystem_create(const char* dataWinPath) {
     return fs;
 }
 
-void N3dsFileSystem_destroy(N3dsFileSystem* fs) {
+void N3dsFileSystem_destroy(N3dsFileSystem *fs) {
     if (fs == NULL) return;
     free(fs->basePath);
     free(fs);

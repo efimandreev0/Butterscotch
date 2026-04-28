@@ -12,59 +12,103 @@
 typedef struct Renderer Renderer;
 
 typedef struct {
-    void (*init)(Renderer* renderer, DataWin* dataWin);
-    void (*destroy)(Renderer* renderer);
-    void (*beginFrame)(Renderer* renderer, int32_t gameW, int32_t gameH, int32_t windowW, int32_t windowH);
-    void (*endFrame)(Renderer* renderer);
-    void (*beginView)(Renderer* renderer, int32_t viewX, int32_t viewY, int32_t viewW, int32_t viewH, int32_t portX, int32_t portY, int32_t portW, int32_t portH, float viewAngle);
-    void (*endView)(Renderer* renderer);
+    void (*init)(Renderer *renderer, DataWin *dataWin);
+
+    void (*destroy)(Renderer *renderer);
+
+    void (*beginFrame)(Renderer *renderer, int32_t gameW, int32_t gameH, int32_t windowW, int32_t windowH);
+
+    void (*endFrame)(Renderer *renderer);
+
+    void (*beginView)(Renderer *renderer, int32_t viewX, int32_t viewY, int32_t viewW, int32_t viewH, int32_t portX,
+                      int32_t portY, int32_t portW, int32_t portH, float viewAngle);
+
+    void (*endView)(Renderer *renderer);
+
     // GUI pass: coordinates are (0,0)..(guiW,guiH) mapped to the current view's port rect. Called after endView.
-    void (*beginGUI)(Renderer* renderer, int32_t guiW, int32_t guiH, int32_t portX, int32_t portY, int32_t portW, int32_t portH);
-    void (*endGUI)(Renderer* renderer);
-    void (*drawSprite)(Renderer* renderer, int32_t tpagIndex, float x, float y, float originX, float originY, float xscale, float yscale, float angleDeg, uint32_t color, float alpha);
-    void (*drawSpritePart)(Renderer* renderer, int32_t tpagIndex, int32_t srcOffX, int32_t srcOffY, int32_t srcW, int32_t srcH, float x, float y, float xscale, float yscale, uint32_t color, float alpha);
-    void (*drawSpritePos)(Renderer* renderer, int32_t tpagIndex, float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, float alpha);
-    void (*drawRectangle)(Renderer* renderer, float x1, float y1, float x2, float y2, uint32_t color, float alpha, bool outline);
-    void (*drawLine)(Renderer* renderer, float x1, float y1, float x2, float y2, float width, uint32_t color, float alpha);
+    void (*beginGUI)(Renderer *renderer, int32_t guiW, int32_t guiH, int32_t portX, int32_t portY, int32_t portW,
+                     int32_t portH);
+
+    void (*endGUI)(Renderer *renderer);
+
+    void (*drawSprite)(Renderer *renderer, int32_t tpagIndex, float x, float y, float originX, float originY,
+                       float xscale, float yscale, float angleDeg, uint32_t color, float alpha);
+
+    void (*drawSpritePart)(Renderer *renderer, int32_t tpagIndex, int32_t srcOffX, int32_t srcOffY, int32_t srcW,
+                           int32_t srcH, float x, float y, float xscale, float yscale, uint32_t color, float alpha);
+
+    void (*drawSpritePos)(Renderer *renderer, int32_t tpagIndex, float x1, float y1, float x2, float y2, float x3,
+                          float y3, float x4, float y4, float alpha);
+
+    void (*drawRectangle)(Renderer *renderer, float x1, float y1, float x2, float y2, uint32_t color, float alpha,
+                          bool outline);
+
+    void (*drawLine)(Renderer *renderer, float x1, float y1, float x2, float y2, float width, uint32_t color,
+                     float alpha);
+
     void (*drawTriangle)(Renderer *renderer, float x1, float y1, float x2, float y2, float x3, float y3, bool outline);
-    void (*drawLineColor)(Renderer* renderer, float x1, float y1, float x2, float y2, float width, uint32_t color1, uint32_t color2, float alpha);
-    void (*drawText)(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, float angleDeg);
-    void (*drawTextColor)(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, float angleDeg, int32_t c1, int32_t c2, int32_t c3, int32_t c4, float alpha);
-    void (*flush)(Renderer* renderer);
-    int32_t (*createSpriteFromSurface)(Renderer* renderer, int32_t x, int32_t y, int32_t w, int32_t h, bool removeback, bool smooth, int32_t xorig, int32_t yorig);
-    void (*deleteSprite)(Renderer* renderer, int32_t spriteIndex);
+
+    void (*drawLineColor)(Renderer *renderer, float x1, float y1, float x2, float y2, float width, uint32_t color1,
+                          uint32_t color2, float alpha);
+
+    void (*drawText)(Renderer *renderer, const char *text, float x, float y, float xscale, float yscale,
+                     float angleDeg);
+
+    void (*drawTextColor)(Renderer *renderer, const char *text, float x, float y, float xscale, float yscale,
+                          float angleDeg, int32_t c1, int32_t c2, int32_t c3, int32_t c4, float alpha);
+
+    void (*flush)(Renderer *renderer);
+
+    int32_t (*createSpriteFromSurface)(Renderer *renderer, int32_t x, int32_t y, int32_t w, int32_t h, bool removeback,
+                                       bool smooth, int32_t xorig, int32_t yorig);
+
+    void (*deleteSprite)(Renderer *renderer, int32_t spriteIndex);
+
     // Optional: platform-specific tile rendering (nullptr = use default drawSpritePart path)
-    void (*drawTile)(Renderer* renderer, RoomTile* tile, float offsetX, float offsetY);
+    void (*drawTile)(Renderer *renderer, RoomTile *tile, float offsetX, float offsetY);
+
     // Optional: platform-specific tiled draw (nullptr = use default per-tile drawSprite loop).
-    void (*drawTiled)(Renderer* renderer, int32_t tpagIndex, float originX, float originY, float x, float y, float xscale, float yscale, bool tileX, bool tileY, float roomW, float roomH, uint32_t color, float alpha);
-    void (*drawCircle)(Renderer* renderer, float x, float y, float radius, uint32_t color, float alpha, bool outline, int32_t precision);
-    void (*drawRoundrect)(Renderer* renderer, float x1, float y1, float x2, float y2, float radx, float rady, uint32_t color, float alpha, bool outline, int32_t precision);
-    void (*drawTriangleColor)(Renderer* renderer, float x1, float y1, float x2, float y2, float x3, float y3, uint32_t col1, uint32_t col2, uint32_t col3, float alpha, bool outline);
-    void (*drawEllipse)(Renderer* renderer, float cx, float cy, float rx, float ry, uint32_t color, float alpha, bool outline, int32_t precision);
-    void (*onRoomChanged)(Renderer* renderer, int32_t roomIndex);
-    void (*set3DDepthOffset)(Renderer* renderer, float depth);
+    void (*drawTiled)(Renderer *renderer, int32_t tpagIndex, float originX, float originY, float x, float y,
+                      float xscale, float yscale, bool tileX, bool tileY, float roomW, float roomH, uint32_t color,
+                      float alpha);
+
+    void (*drawCircle)(Renderer *renderer, float x, float y, float radius, uint32_t color, float alpha, bool outline,
+                       int32_t precision);
+
+    void (*drawRoundrect)(Renderer *renderer, float x1, float y1, float x2, float y2, float radx, float rady,
+                          uint32_t color, float alpha, bool outline, int32_t precision);
+
+    void (*drawTriangleColor)(Renderer *renderer, float x1, float y1, float x2, float y2, float x3, float y3,
+                              uint32_t col1, uint32_t col2, uint32_t col3, float alpha, bool outline);
+
+    void (*drawEllipse)(Renderer *renderer, float cx, float cy, float rx, float ry, uint32_t color, float alpha,
+                        bool outline, int32_t precision);
+
+    void (*onRoomChanged)(Renderer *renderer, int32_t roomIndex);
+
+    void (*set3DDepthOffset)(Renderer *renderer, float depth);
 } RendererVtable;
 
 // ===[ Renderer Base Struct ]===
 
 struct Renderer {
-    RendererVtable* vtable;
-    DataWin* dataWin;
-    uint32_t drawColor;  // BGR format, default 0xFFFFFF (white)
-    float drawAlpha;     // default 1.0
-    int32_t drawFont;    // default -1 (no font)
-    int32_t drawHalign;  // 0=left, 1=center, 2=right
-    int32_t drawValign;  // 0=top, 1=middle, 2=bottom
+    RendererVtable *vtable;
+    DataWin *dataWin;
+    uint32_t drawColor; // BGR format, default 0xFFFFFF (white)
+    float drawAlpha; // default 1.0
+    int32_t drawFont; // default -1 (no font)
+    int32_t drawHalign; // 0=left, 1=center, 2=right
+    int32_t drawValign; // 0=top, 1=middle, 2=bottom
     int32_t circlePrecision;
 };
 
 // ===[ Shared Helpers (platform-agnostic) ]===
 
 // Resolves a sprite + subimage to a TPAG index, with frame wrapping
-static int32_t Renderer_resolveTPAGIndex(DataWin* dataWin, int32_t spriteIndex, int32_t subimg) {
+static int32_t Renderer_resolveTPAGIndex(DataWin *dataWin, int32_t spriteIndex, int32_t subimg) {
     if (0 > spriteIndex || dataWin->sprt.count <= (uint32_t) spriteIndex) return -1;
 
-    Sprite* sprite = &dataWin->sprt.sprites[spriteIndex];
+    Sprite *sprite = &dataWin->sprt.sprites[spriteIndex];
     if (sprite->textureCount == 0) return -1;
 
     // Wrap subimage index
@@ -75,17 +119,18 @@ static int32_t Renderer_resolveTPAGIndex(DataWin* dataWin, int32_t spriteIndex, 
 }
 
 // Convenience: draw_sprite(sprite, subimg, x, y)
-static void Renderer_drawSprite(Renderer* renderer, int32_t spriteIndex, int32_t subimg, float x, float y) {
-    DataWin* dw = renderer->dataWin;
+static void Renderer_drawSprite(Renderer *renderer, int32_t spriteIndex, int32_t subimg, float x, float y) {
+    DataWin *dw = renderer->dataWin;
     int32_t tpagIndex = Renderer_resolveTPAGIndex(dw, spriteIndex, subimg);
     if (0 > tpagIndex) return;
 
-    Sprite* sprite = &dw->sprt.sprites[spriteIndex];
-    renderer->vtable->drawSprite(renderer, tpagIndex, x, y, (float) sprite->originX, (float) sprite->originY, 1.0f, 1.0f, 0.0f, 0xFFFFFF, renderer->drawAlpha);
+    Sprite *sprite = &dw->sprt.sprites[spriteIndex];
+    renderer->vtable->drawSprite(renderer, tpagIndex, x, y, (float) sprite->originX, (float) sprite->originY, 1.0f,
+                                 1.0f, 0.0f, 0xFFFFFF, renderer->drawAlpha);
 }
 
 // Stretched: draw_sprite_stretched(sprite, subimg, x, y, w, h)
-static void Renderer_drawCircle(Renderer* renderer, float x, float y, float radius, bool outline) {
+static void Renderer_drawCircle(Renderer *renderer, float x, float y, float radius, bool outline) {
     if (renderer->vtable->drawCircle != nullptr) {
         renderer->vtable->drawCircle(renderer, x, y, radius,
                                      renderer->drawColor, renderer->drawAlpha,
@@ -93,7 +138,7 @@ static void Renderer_drawCircle(Renderer* renderer, float x, float y, float radi
     }
 }
 
-static void Renderer_drawRoundrect(Renderer* renderer, float x1, float y1, float x2, float y2, bool outline) {
+static void Renderer_drawRoundrect(Renderer *renderer, float x1, float y1, float x2, float y2, bool outline) {
     if (renderer->vtable->drawRoundrect != nullptr) {
         renderer->vtable->drawRoundrect(renderer, x1, y1, x2, y2, 10.0f, 10.0f,
                                         renderer->drawColor, renderer->drawAlpha,
@@ -101,10 +146,18 @@ static void Renderer_drawRoundrect(Renderer* renderer, float x1, float y1, float
     }
 }
 
-static void Renderer_drawEllipse(Renderer* renderer, float x1, float y1, float x2, float y2, bool outline) {
+static void Renderer_drawEllipse(Renderer *renderer, float x1, float y1, float x2, float y2, bool outline) {
     if (renderer->vtable->drawEllipse != nullptr) {
-        if (x1 > x2) { float t = x1; x1 = x2; x2 = t; }
-        if (y1 > y2) { float t = y1; y1 = y2; y2 = t; }
+        if (x1 > x2) {
+            float t = x1;
+            x1 = x2;
+            x2 = t;
+        }
+        if (y1 > y2) {
+            float t = y1;
+            y1 = y2;
+            y2 = t;
+        }
         float cx = (x1 + x2) * 0.5f;
         float cy = (y1 + y2) * 0.5f;
         float rx = (x2 - x1) * 0.5f;
@@ -115,30 +168,34 @@ static void Renderer_drawEllipse(Renderer* renderer, float x1, float y1, float x
     }
 }
 
-static void Renderer_drawSpriteStretched(Renderer* renderer, int32_t spriteIndex, int32_t subimg, float x, float y, float w, float h, uint32_t color, float alpha) {
-    DataWin* dw = renderer->dataWin;
+static void Renderer_drawSpriteStretched(Renderer *renderer, int32_t spriteIndex, int32_t subimg, float x, float y,
+                                         float w, float h, uint32_t color, float alpha) {
+    DataWin *dw = renderer->dataWin;
     int32_t tpagIndex = Renderer_resolveTPAGIndex(dw, spriteIndex, subimg);
     if (0 > tpagIndex) return;
 
-    TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
+    TexturePageItem *tpag = &dw->tpag.items[tpagIndex];
     float xscale = w / (float) tpag->boundingWidth;
     float yscale = h / (float) tpag->boundingHeight;
     renderer->vtable->drawSprite(renderer, tpagIndex, x, y, 0.0f, 0.0f, xscale, yscale, 0.0f, color, alpha);
 }
 
 // Full version: draw_sprite_ext(sprite, subimg, x, y, xscale, yscale, rot, color, alpha)
-static void Renderer_drawSpriteExt(Renderer* renderer, int32_t spriteIndex, int32_t subimg, float x, float y, float xscale, float yscale, float rot, uint32_t color, float alpha) {
-    DataWin* dw = renderer->dataWin;
+static void Renderer_drawSpriteExt(Renderer *renderer, int32_t spriteIndex, int32_t subimg, float x, float y,
+                                   float xscale, float yscale, float rot, uint32_t color, float alpha) {
+    DataWin *dw = renderer->dataWin;
     int32_t tpagIndex = Renderer_resolveTPAGIndex(dw, spriteIndex, subimg);
     if (0 > tpagIndex) return;
 
-    Sprite* sprite = &dw->sprt.sprites[spriteIndex];
-    renderer->vtable->drawSprite(renderer, tpagIndex, x, y, (float) sprite->originX, (float) sprite->originY, xscale, yscale, rot, color, alpha);
+    Sprite *sprite = &dw->sprt.sprites[spriteIndex];
+    renderer->vtable->drawSprite(renderer, tpagIndex, x, y, (float) sprite->originX, (float) sprite->originY, xscale,
+                                 yscale, rot, color, alpha);
 }
 
 
-static void Renderer_drawSpritePos(Renderer* renderer, int32_t spriteIndex, int32_t subimg, float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, float alpha) {
-    DataWin* dw = renderer->dataWin;
+static void Renderer_drawSpritePos(Renderer *renderer, int32_t spriteIndex, int32_t subimg, float x1, float y1,
+                                   float x2, float y2, float x3, float y3, float x4, float y4, float alpha) {
+    DataWin *dw = renderer->dataWin;
     int32_t tpagIndex = Renderer_resolveTPAGIndex(dw, spriteIndex, subimg);
     if (0 > tpagIndex) return;
     if (renderer->vtable->drawSpritePos == nullptr) return;
@@ -147,14 +204,14 @@ static void Renderer_drawSpritePos(Renderer* renderer, int32_t spriteIndex, int3
 }
 
 
-
 // Partial draw: draw_sprite_part(sprite, subimg, left, top, width, height, x, y)
-static void Renderer_drawSpritePart(Renderer* renderer, int32_t spriteIndex, int32_t subimg, int32_t left, int32_t top, int32_t width, int32_t height, float x, float y) {
-    DataWin* dw = renderer->dataWin;
+static void Renderer_drawSpritePart(Renderer *renderer, int32_t spriteIndex, int32_t subimg, int32_t left, int32_t top,
+                                    int32_t width, int32_t height, float x, float y) {
+    DataWin *dw = renderer->dataWin;
     int32_t tpagIndex = Renderer_resolveTPAGIndex(dw, spriteIndex, subimg);
     if (0 > tpagIndex) return;
 
-    TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
+    TexturePageItem *tpag = &dw->tpag.items[tpagIndex];
 
     // Clip region to TPAG bounds (matching HTML5 Graphics_DrawPart logic)
     // left/top are in original sprite space; targetX/targetY is where cropped data starts
@@ -180,16 +237,19 @@ static void Renderer_drawSpritePart(Renderer* renderer, int32_t spriteIndex, int
     if (height > tpag->sourceHeight - top) height = tpag->sourceHeight - top;
     if (0 >= width || 0 >= height) return;
 
-    renderer->vtable->drawSpritePart(renderer, tpagIndex, left, top, width, height, x, y, 1.0f, 1.0f, 0xFFFFFF, renderer->drawAlpha);
+    renderer->vtable->drawSpritePart(renderer, tpagIndex, left, top, width, height, x, y, 1.0f, 1.0f, 0xFFFFFF,
+                                     renderer->drawAlpha);
 }
 
 // Draws part of a sprite with extended parameters (scale, color, alpha)
-static void Renderer_drawSpritePartExt(Renderer* renderer, int32_t spriteIndex, int32_t subimg, int32_t left, int32_t top, int32_t width, int32_t height, float x, float y, float xscale, float yscale, uint32_t color, float alpha) {
-    DataWin* dw = renderer->dataWin;
+static void Renderer_drawSpritePartExt(Renderer *renderer, int32_t spriteIndex, int32_t subimg, int32_t left,
+                                       int32_t top, int32_t width, int32_t height, float x, float y, float xscale,
+                                       float yscale, uint32_t color, float alpha) {
+    DataWin *dw = renderer->dataWin;
     int32_t tpagIndex = Renderer_resolveTPAGIndex(dw, spriteIndex, subimg);
     if (0 > tpagIndex) return;
 
-    TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
+    TexturePageItem *tpag = &dw->tpag.items[tpagIndex];
 
     // Clip region to TPAG bounds (same as Renderer_drawSpritePart)
     if (left < tpag->targetX) {
@@ -218,22 +278,22 @@ static void Renderer_drawSpritePartExt(Renderer* renderer, int32_t spriteIndex, 
 }
 
 // Resolves a BGND index to its TPAG index.
-static int32_t Renderer_resolveBackgroundTPAGIndex(DataWin* dataWin, int32_t bgndIndex) {
+static int32_t Renderer_resolveBackgroundTPAGIndex(DataWin *dataWin, int32_t bgndIndex) {
     if (0 > bgndIndex || (uint32_t) bgndIndex >= dataWin->bgnd.count) return -1;
     return dataWin->bgnd.backgrounds[bgndIndex].tpagIndex;
 }
 
 // Resolves a SPRT index to the TPAG index of its first frame.
-static int32_t Renderer_resolveSpriteTPAGIndex(DataWin* dataWin, int32_t sprtIndex) {
+static int32_t Renderer_resolveSpriteTPAGIndex(DataWin *dataWin, int32_t sprtIndex) {
     if (0 > sprtIndex || (uint32_t) sprtIndex >= dataWin->sprt.count) return -1;
-    Sprite* spr = &dataWin->sprt.sprites[sprtIndex];
+    Sprite *spr = &dataWin->sprt.sprites[sprtIndex];
     if (spr->textureCount == 0) return -1;
     return spr->tpagIndices[0];
 }
 
 // Resolves a SPRT or BGND index to a TPAG index
-static int32_t Renderer_resolveObjectTPAGIndex(DataWin* dataWin, RoomTile *tile) {
-    if(!tile->useSpriteDefinition)
+static int32_t Renderer_resolveObjectTPAGIndex(DataWin *dataWin, RoomTile *tile) {
+    if (!tile->useSpriteDefinition)
         return Renderer_resolveBackgroundTPAGIndex(dataWin, tile->backgroundDefinition);
     else
         return Renderer_resolveSpriteTPAGIndex(dataWin, tile->backgroundDefinition);
@@ -241,8 +301,10 @@ static int32_t Renderer_resolveObjectTPAGIndex(DataWin* dataWin, RoomTile *tile)
 
 // Shared fallback for tiled draws.
 // Both Renderer_drawSpriteTiled and Renderer_drawBackgroundTiled call this when the platform doesn't expose a specialized vtable->drawTiled.
-static void Renderer_drawTiledFallback(Renderer* renderer, int32_t tpagIndex, float originX, float originY, float x, float y, float xscale, float yscale, bool tileX, bool tileY, float roomW, float roomH, uint32_t color, float alpha) {
-    TexturePageItem* tpag = &renderer->dataWin->tpag.items[tpagIndex];
+static void Renderer_drawTiledFallback(Renderer *renderer, int32_t tpagIndex, float originX, float originY, float x,
+                                       float y, float xscale, float yscale, bool tileX, bool tileY, float roomW,
+                                       float roomH, uint32_t color, float alpha) {
+    TexturePageItem *tpag = &renderer->dataWin->tpag.items[tpagIndex];
 
     float axScale = fabsf(xscale);
     float ayScale = fabsf(yscale);
@@ -270,42 +332,50 @@ static void Renderer_drawTiledFallback(Renderer* renderer, int32_t tpagIndex, fl
 
     for (float dy = startY; endY > dy; dy += tileH) {
         for (float dx = startX; endX > dx; dx += tileW) {
-            renderer->vtable->drawSprite(renderer, tpagIndex, dx + originX * axScale, dy + originY * ayScale, originX, originY, xscale, yscale, 0.0f, color, alpha);
+            renderer->vtable->drawSprite(renderer, tpagIndex, dx + originX * axScale, dy + originY * ayScale, originX,
+                                         originY, xscale, yscale, 0.0f, color, alpha);
         }
     }
 }
 
 // Draws a tiled background
-static void Renderer_drawBackgroundTiled(Renderer* renderer, int32_t tpagIndex, float bgX, float bgY, bool tileX, bool tileY, float roomW, float roomH, float alpha) {
-    DataWin* dw = renderer->dataWin;
+static void Renderer_drawBackgroundTiled(Renderer *renderer, int32_t tpagIndex, float bgX, float bgY, bool tileX,
+                                         bool tileY, float roomW, float roomH, float alpha) {
+    DataWin *dw = renderer->dataWin;
     if (0 > tpagIndex || (uint32_t) tpagIndex >= dw->tpag.count) return;
 
     if (renderer->vtable->drawTiled != nullptr) {
-        renderer->vtable->drawTiled(renderer, tpagIndex, 0.0f, 0.0f, bgX, bgY, 1.0f, 1.0f, tileX, tileY, roomW, roomH, 0xFFFFFFu, alpha);
+        renderer->vtable->drawTiled(renderer, tpagIndex, 0.0f, 0.0f, bgX, bgY, 1.0f, 1.0f, tileX, tileY, roomW, roomH,
+                                    0xFFFFFFu, alpha);
         return;
     }
-    Renderer_drawTiledFallback(renderer, tpagIndex, 0.0f, 0.0f, bgX, bgY, 1.0f, 1.0f, tileX, tileY, roomW, roomH, 0xFFFFFFu, alpha);
+    Renderer_drawTiledFallback(renderer, tpagIndex, 0.0f, 0.0f, bgX, bgY, 1.0f, 1.0f, tileX, tileY, roomW, roomH,
+                               0xFFFFFFu, alpha);
 }
 
 // Draws a tiled sprite across the room
-static void Renderer_drawSpriteTiled(Renderer* renderer, int32_t spriteIndex, int32_t subimg, float x, float y, float xscale, float yscale, float roomW, float roomH, uint32_t color, float alpha) {
-    DataWin* dw = renderer->dataWin;
+static void Renderer_drawSpriteTiled(Renderer *renderer, int32_t spriteIndex, int32_t subimg, float x, float y,
+                                     float xscale, float yscale, float roomW, float roomH, uint32_t color,
+                                     float alpha) {
+    DataWin *dw = renderer->dataWin;
     int32_t tpagIndex = Renderer_resolveTPAGIndex(dw, spriteIndex, subimg);
     if (0 > tpagIndex) return;
 
-    Sprite* sprite = &dw->sprt.sprites[spriteIndex];
+    Sprite *sprite = &dw->sprt.sprites[spriteIndex];
     float originX = (float) sprite->originX;
     float originY = (float) sprite->originY;
 
     if (renderer->vtable->drawTiled != nullptr) {
-        renderer->vtable->drawTiled(renderer, tpagIndex, originX, originY, x, y, xscale, yscale, true, true, roomW, roomH, color, alpha);
+        renderer->vtable->drawTiled(renderer, tpagIndex, originX, originY, x, y, xscale, yscale, true, true, roomW,
+                                    roomH, color, alpha);
         return;
     }
-    Renderer_drawTiledFallback(renderer, tpagIndex, originX, originY, x, y, xscale, yscale, true, true, roomW, roomH, color, alpha);
+    Renderer_drawTiledFallback(renderer, tpagIndex, originX, originY, x, y, xscale, yscale, true, true, roomW, roomH,
+                               color, alpha);
 }
 
 // Default draw: draws instance's sprite using its image_* properties
-static void Renderer_drawSelf(Renderer* renderer, Instance* instance) {
+static void Renderer_drawSelf(Renderer *renderer, Instance *instance) {
     if (0 > instance->spriteIndex) return;
 
     int32_t subimg = (int32_t) instance->imageIndex;
@@ -324,7 +394,7 @@ static void Renderer_drawSelf(Renderer* renderer, Instance* instance) {
 }
 
 // Draws a room tile with layer shift offset applied
-static void Renderer_drawTile(Renderer* renderer, RoomTile* tile, float offsetX, float offsetY) {
+static void Renderer_drawTile(Renderer *renderer, RoomTile *tile, float offsetX, float offsetY) {
     // If the platform has a dedicated tile renderer, use it (PS2 has separate tile atlas entries)
     if (renderer->vtable->drawTile != nullptr) {
         renderer->vtable->drawTile(renderer, tile, offsetX, offsetY);
@@ -334,7 +404,7 @@ static void Renderer_drawTile(Renderer* renderer, RoomTile* tile, float offsetX,
     int32_t tpagIndex = Renderer_resolveObjectTPAGIndex(renderer->dataWin, tile);
     if (0 > tpagIndex) return;
 
-    TexturePageItem* tpag = &renderer->dataWin->tpag.items[tpagIndex];
+    TexturePageItem *tpag = &renderer->dataWin->tpag.items[tpagIndex];
 
     // The tile's sourceX/Y are in the background image's coordinate space (bounding rect).
     // The TPAG may have been trimmed: actual content starts at (targetX, targetY) within the
@@ -384,7 +454,8 @@ static void Renderer_drawTile(Renderer* renderer, RoomTile* tile, float offsetX,
     float alpha = (alphaByte == 0) ? 1.0f : (float) alphaByte / 255.0f;
     uint32_t bgr = tile->color & 0x00FFFFFF;
 
-    renderer->vtable->drawSpritePart(renderer, tpagIndex, atlasOffX, atlasOffY, srcW, srcH, drawX, drawY, tile->scaleX, tile->scaleY, bgr, alpha);
+    renderer->vtable->drawSpritePart(renderer, tpagIndex, atlasOffX, atlasOffY, srcW, srcH, drawX, drawY, tile->scaleX,
+                                     tile->scaleY, bgr, alpha);
 }
 
 // Mixes 2 colors with a blend factor
@@ -394,9 +465,9 @@ static uint32_t Renderer_mixColors(uint32_t color1, uint32_t color2, float blend
     uint8_t r2 = BGR_R(color2), g2 = BGR_G(color2), b2 = BGR_B(color2);
 
     // mixes each color together using linear interpolation
-    uint8_t mixr = (uint8_t)(r1 * (1 - blending) + r2 * blending);
-    uint8_t mixg = (uint8_t)(g1 * (1 - blending) + g2 * blending);
-    uint8_t mixb = (uint8_t)(b1 * (1 - blending) + b2 * blending);
+    uint8_t mixr = (uint8_t) (r1 * (1 - blending) + r2 * blending);
+    uint8_t mixg = (uint8_t) (g1 * (1 - blending) + g2 * blending);
+    uint8_t mixb = (uint8_t) (b1 * (1 - blending) + b2 * blending);
 
     uint32_t resultColor = ((mixr << 0) | (mixg << 8) | (mixb << 16)) & 0x00FFFFFF;
     return resultColor;

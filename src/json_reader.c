@@ -9,14 +9,14 @@
 // ===[ Parser State ]===
 
 typedef struct {
-    const char* input;
+    const char *input;
     size_t position;
     size_t length;
 } JsonParser;
 
 // ===[ Internal Helpers ]===
 
-static void skipWhitespace(JsonParser* parser) {
+static void skipWhitespace(JsonParser *parser) {
     while (parser->position < parser->length) {
         char c = parser->input[parser->position];
         if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
@@ -27,18 +27,18 @@ static void skipWhitespace(JsonParser* parser) {
     }
 }
 
-static char peek(JsonParser* parser) {
+static char peek(JsonParser *parser) {
     if (parser->position >= parser->length) return '\0';
     return parser->input[parser->position];
 }
 
-static char advance(JsonParser* parser) {
+static char advance(JsonParser *parser) {
     if (parser->position >= parser->length) return '\0';
     return parser->input[parser->position++];
 }
 
-static JsonValue* makeValue(JsonValueType type) {
-    JsonValue* value = safeCalloc(1, sizeof(JsonValue));
+static JsonValue *makeValue(JsonValueType type) {
+    JsonValue *value = safeCalloc(1, sizeof(JsonValue));
     if (value == nullptr) {
         fprintf(stderr, "JsonReader: calloc failed\n");
         abort();
@@ -48,15 +48,15 @@ static JsonValue* makeValue(JsonValueType type) {
 }
 
 // Forward declaration for recursive parsing
-static JsonValue* parseValue(JsonParser* parser);
+static JsonValue *parseValue(JsonParser *parser);
 
-static JsonValue* parseString(JsonParser* parser) {
+static JsonValue *parseString(JsonParser *parser) {
     // Skip opening quote
     advance(parser);
 
     size_t capacity = 64;
     size_t length = 0;
-    char* buffer = safeMalloc(capacity);
+    char *buffer = safeMalloc(capacity);
     if (buffer == nullptr) {
         fprintf(stderr, "JsonReader: malloc failed\n");
         abort();
@@ -68,7 +68,7 @@ static JsonValue* parseString(JsonParser* parser) {
         if (c == '"') {
             // End of string
             buffer[length] = '\0';
-            JsonValue* value = makeValue(JSON_STRING);
+            JsonValue *value = makeValue(JSON_STRING);
             value->stringValue = buffer;
             return value;
         }
@@ -77,14 +77,22 @@ static JsonValue* parseString(JsonParser* parser) {
             // Escape sequence
             char escaped = advance(parser);
             switch (escaped) {
-                case '"':  c = '"';  break;
-                case '\\': c = '\\'; break;
-                case '/':  c = '/';  break;
-                case 'b':  c = '\b'; break;
-                case 'f':  c = '\f'; break;
-                case 'n':  c = '\n'; break;
-                case 'r':  c = '\r'; break;
-                case 't':  c = '\t'; break;
+                case '"': c = '"';
+                    break;
+                case '\\': c = '\\';
+                    break;
+                case '/': c = '/';
+                    break;
+                case 'b': c = '\b';
+                    break;
+                case 'f': c = '\f';
+                    break;
+                case 'n': c = '\n';
+                    break;
+                case 'r': c = '\r';
+                    break;
+                case 't': c = '\t';
+                    break;
                 case 'u': {
                     // Parse 4-digit hex code point
                     char hex[5] = {0};
@@ -139,9 +147,9 @@ static JsonValue* parseString(JsonParser* parser) {
     return nullptr;
 }
 
-static JsonValue* parseNumber(JsonParser* parser) {
-    const char* start = parser->input + parser->position;
-    char* end = nullptr;
+static JsonValue *parseNumber(JsonParser *parser) {
+    const char *start = parser->input + parser->position;
+    char *end = nullptr;
     double number = strtod(start, &end);
     if (end == start) {
         fprintf(stderr, "JsonReader: invalid number\n");
@@ -149,16 +157,16 @@ static JsonValue* parseNumber(JsonParser* parser) {
     }
     parser->position += (size_t) (end - start);
 
-    JsonValue* value = makeValue(JSON_NUMBER);
+    JsonValue *value = makeValue(JSON_NUMBER);
     value->numberValue = number;
     return value;
 }
 
-static JsonValue* parseArray(JsonParser* parser) {
+static JsonValue *parseArray(JsonParser *parser) {
     // Skip opening bracket
     advance(parser);
 
-    JsonValue* value = makeValue(JSON_ARRAY);
+    JsonValue *value = makeValue(JSON_ARRAY);
     value->array.items = nullptr;
     value->array.count = 0;
     value->array.capacity = 0;
@@ -171,7 +179,7 @@ static JsonValue* parseArray(JsonParser* parser) {
 
     while (true) {
         skipWhitespace(parser);
-        JsonValue* item = parseValue(parser);
+        JsonValue *item = parseValue(parser);
         if (item == nullptr) {
             JsonReader_free(value);
             return nullptr;
@@ -206,11 +214,11 @@ static JsonValue* parseArray(JsonParser* parser) {
     }
 }
 
-static JsonValue* parseObject(JsonParser* parser) {
+static JsonValue *parseObject(JsonParser *parser) {
     // Skip opening brace
     advance(parser);
 
-    JsonValue* value = makeValue(JSON_OBJECT);
+    JsonValue *value = makeValue(JSON_OBJECT);
     value->object.keys = nullptr;
     value->object.values = nullptr;
     value->object.count = 0;
@@ -230,12 +238,12 @@ static JsonValue* parseObject(JsonParser* parser) {
             return nullptr;
         }
 
-        JsonValue* keyValue = parseString(parser);
+        JsonValue *keyValue = parseString(parser);
         if (keyValue == nullptr) {
             JsonReader_free(value);
             return nullptr;
         }
-        char* key = keyValue->stringValue;
+        char *key = keyValue->stringValue;
         // Free just the JsonValue container, keep the string
         free(keyValue);
 
@@ -249,7 +257,7 @@ static JsonValue* parseObject(JsonParser* parser) {
         advance(parser);
 
         skipWhitespace(parser);
-        JsonValue* itemValue = parseValue(parser);
+        JsonValue *itemValue = parseValue(parser);
         if (itemValue == nullptr) {
             free(key);
             JsonReader_free(value);
@@ -287,7 +295,7 @@ static JsonValue* parseObject(JsonParser* parser) {
     }
 }
 
-static JsonValue* parseLiteral(JsonParser* parser, const char* literal, size_t literalLen) {
+static JsonValue *parseLiteral(JsonParser *parser, const char *literal, size_t literalLen) {
     if (parser->position + literalLen > parser->length) {
         return nullptr;
     }
@@ -298,7 +306,7 @@ static JsonValue* parseLiteral(JsonParser* parser, const char* literal, size_t l
     return makeValue(JSON_NULL); // Caller overrides type as needed
 }
 
-static JsonValue* parseValue(JsonParser* parser) {
+static JsonValue *parseValue(JsonParser *parser) {
     skipWhitespace(parser);
     char c = peek(parser);
 
@@ -310,7 +318,7 @@ static JsonValue* parseValue(JsonParser* parser) {
         case '[':
             return parseArray(parser);
         case 't': {
-            JsonValue* value = parseLiteral(parser, "true", 4);
+            JsonValue *value = parseLiteral(parser, "true", 4);
             if (value == nullptr) {
                 fprintf(stderr, "JsonReader: invalid literal\n");
                 return nullptr;
@@ -320,7 +328,7 @@ static JsonValue* parseValue(JsonParser* parser) {
             return value;
         }
         case 'f': {
-            JsonValue* value = parseLiteral(parser, "false", 5);
+            JsonValue *value = parseLiteral(parser, "false", 5);
             if (value == nullptr) {
                 fprintf(stderr, "JsonReader: invalid literal\n");
                 return nullptr;
@@ -330,7 +338,7 @@ static JsonValue* parseValue(JsonParser* parser) {
             return value;
         }
         case 'n': {
-            JsonValue* value = parseLiteral(parser, "null", 4);
+            JsonValue *value = parseLiteral(parser, "null", 4);
             if (value == nullptr) {
                 fprintf(stderr, "JsonReader: invalid literal\n");
                 return nullptr;
@@ -348,7 +356,7 @@ static JsonValue* parseValue(JsonParser* parser) {
 
 // ===[ Lifecycle ]===
 
-JsonValue* JsonReader_parse(const char* json) {
+JsonValue *JsonReader_parse(const char *json) {
     if (json == nullptr) return nullptr;
 
     JsonParser parser = {
@@ -357,7 +365,7 @@ JsonValue* JsonReader_parse(const char* json) {
         .length = strlen(json),
     };
 
-    JsonValue* result = parseValue(&parser);
+    JsonValue *result = parseValue(&parser);
 
     // Check for trailing non-whitespace
     if (result != nullptr) {
@@ -374,7 +382,7 @@ JsonValue* JsonReader_parse(const char* json) {
 
 // Frees the contents of a JsonValue without freeing the JsonValue struct itself.
 // Used for inline values (array items, object values stored by value).
-static void freeContents(JsonValue* value) {
+static void freeContents(JsonValue *value) {
     switch (value->type) {
         case JSON_STRING:
             free(value->stringValue);
@@ -398,7 +406,7 @@ static void freeContents(JsonValue* value) {
     }
 }
 
-void JsonReader_free(JsonValue* value) {
+void JsonReader_free(JsonValue *value) {
     if (value == nullptr) return;
     freeContents(value);
     free(value);
@@ -406,62 +414,62 @@ void JsonReader_free(JsonValue* value) {
 
 // ===[ Type Checks ]===
 
-bool JsonReader_isNull(const JsonValue* value) {
+bool JsonReader_isNull(const JsonValue *value) {
     return value != nullptr && value->type == JSON_NULL;
 }
 
-bool JsonReader_isBool(const JsonValue* value) {
+bool JsonReader_isBool(const JsonValue *value) {
     return value != nullptr && value->type == JSON_BOOL;
 }
 
-bool JsonReader_isNumber(const JsonValue* value) {
+bool JsonReader_isNumber(const JsonValue *value) {
     return value != nullptr && value->type == JSON_NUMBER;
 }
 
-bool JsonReader_isString(const JsonValue* value) {
+bool JsonReader_isString(const JsonValue *value) {
     return value != nullptr && value->type == JSON_STRING;
 }
 
-bool JsonReader_isArray(const JsonValue* value) {
+bool JsonReader_isArray(const JsonValue *value) {
     return value != nullptr && value->type == JSON_ARRAY;
 }
 
-bool JsonReader_isObject(const JsonValue* value) {
+bool JsonReader_isObject(const JsonValue *value) {
     return value != nullptr && value->type == JSON_OBJECT;
 }
 
 // ===[ Value Getters ]===
 
-bool JsonReader_getBool(const JsonValue* value) {
+bool JsonReader_getBool(const JsonValue *value) {
     return value->boolValue;
 }
 
-double JsonReader_getDouble(const JsonValue* value) {
+double JsonReader_getDouble(const JsonValue *value) {
     return value->numberValue;
 }
 
-int64_t JsonReader_getInt(const JsonValue* value) {
+int64_t JsonReader_getInt(const JsonValue *value) {
     return (int64_t) value->numberValue;
 }
 
-const char* JsonReader_getString(const JsonValue* value) {
+const char *JsonReader_getString(const JsonValue *value) {
     return value->stringValue;
 }
 
 // ===[ Array Access ]===
 
-int JsonReader_arrayLength(const JsonValue* value) {
+int JsonReader_arrayLength(const JsonValue *value) {
     return value->array.count;
 }
 
-JsonValue* JsonReader_getArrayElement(const JsonValue* value, int index) {
+JsonValue *JsonReader_getArrayElement(const JsonValue *value, int index) {
     if (0 > index || index >= value->array.count) return nullptr;
     return &value->array.items[index];
 }
 
 // ===[ Array Bulk Read ]===
 
-void JsonReader_readFloatArray(const JsonValue* value, float* out, int expectedLen) {
+void JsonReader_readFloatArray(const JsonValue *value, float *out, int expectedLen) {
     require(value != nullptr && value->type == JSON_ARRAY);
     require(value->array.count == expectedLen);
     repeat(expectedLen, i) {
@@ -469,7 +477,7 @@ void JsonReader_readFloatArray(const JsonValue* value, float* out, int expectedL
     }
 }
 
-void JsonReader_readInt32Array(const JsonValue* value, int32_t* out, int expectedLen) {
+void JsonReader_readInt32Array(const JsonValue *value, int32_t *out, int expectedLen) {
     require(value != nullptr && value->type == JSON_ARRAY);
     require(value->array.count == expectedLen);
     repeat(expectedLen, i) {
@@ -479,11 +487,11 @@ void JsonReader_readInt32Array(const JsonValue* value, int32_t* out, int expecte
 
 // ===[ Object Access ]===
 
-int JsonReader_objectLength(const JsonValue* value) {
+int JsonReader_objectLength(const JsonValue *value) {
     return value->object.count;
 }
 
-JsonValue* JsonReader_getObject(const JsonValue* value, const char* key) {
+JsonValue *JsonReader_getObject(const JsonValue *value, const char *key) {
     repeat(value->object.count, i) {
         if (strcmp(value->object.keys[i], key) == 0) {
             return &value->object.values[i];
@@ -492,12 +500,12 @@ JsonValue* JsonReader_getObject(const JsonValue* value, const char* key) {
     return nullptr;
 }
 
-const char* JsonReader_getObjectKey(const JsonValue* value, int index) {
+const char *JsonReader_getObjectKey(const JsonValue *value, int index) {
     if (0 > index || index >= value->object.count) return nullptr;
     return value->object.keys[index];
 }
 
-JsonValue* JsonReader_getObjectValue(const JsonValue* value, int index) {
+JsonValue *JsonReader_getObjectValue(const JsonValue *value, int index) {
     if (0 > index || index >= value->object.count) return nullptr;
     return &value->object.values[index];
 }

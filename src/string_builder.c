@@ -10,28 +10,28 @@
 
 StringBuilder StringBuilder_create(size_t initialCapacity) {
     if (STRING_BUILDER_MIN_CAPACITY > initialCapacity) initialCapacity = STRING_BUILDER_MIN_CAPACITY;
-    char* buffer = safeMalloc(initialCapacity);
+    char *buffer = safeMalloc(initialCapacity);
     buffer[0] = '\0';
-    return (StringBuilder) {
+    return (StringBuilder){
         .buffer = buffer,
         .length = 0,
         .capacity = initialCapacity,
     };
 }
 
-void StringBuilder_free(StringBuilder* sb) {
+void StringBuilder_free(StringBuilder *sb) {
     free(sb->buffer);
     sb->buffer = nullptr;
     sb->length = 0;
     sb->capacity = 0;
 }
 
-void StringBuilder_clear(StringBuilder* sb) {
+void StringBuilder_clear(StringBuilder *sb) {
     sb->length = 0;
     if (sb->buffer != nullptr) sb->buffer[0] = '\0';
 }
 
-void StringBuilder_ensureCapacity(StringBuilder* sb, size_t additionalBytes) {
+void StringBuilder_ensureCapacity(StringBuilder *sb, size_t additionalBytes) {
     size_t required = sb->length + additionalBytes + 1;
     if (sb->capacity >= required) return;
 
@@ -43,13 +43,13 @@ void StringBuilder_ensureCapacity(StringBuilder* sb, size_t additionalBytes) {
     sb->capacity = newCapacity;
 }
 
-void StringBuilder_appendChar(StringBuilder* sb, char c) {
+void StringBuilder_appendChar(StringBuilder *sb, char c) {
     StringBuilder_ensureCapacity(sb, 1);
     sb->buffer[sb->length++] = c;
     sb->buffer[sb->length] = '\0';
 }
 
-void StringBuilder_appendBytes(StringBuilder* sb, const char* data, size_t len) {
+void StringBuilder_appendBytes(StringBuilder *sb, const char *data, size_t len) {
     if (len == 0) return;
     StringBuilder_ensureCapacity(sb, len);
     memcpy(sb->buffer + sb->length, data, len);
@@ -57,12 +57,12 @@ void StringBuilder_appendBytes(StringBuilder* sb, const char* data, size_t len) 
     sb->buffer[sb->length] = '\0';
 }
 
-void StringBuilder_append(StringBuilder* sb, const char* str) {
+void StringBuilder_append(StringBuilder *sb, const char *str) {
     if (str == nullptr) return;
     StringBuilder_appendBytes(sb, str, strlen(str));
 }
 
-void StringBuilder_appendFormat(StringBuilder* sb, const char* fmt, ...) {
+void StringBuilder_appendFormat(StringBuilder *sb, const char *fmt, ...) {
     // First pass: measure required length with a throwaway vsnprintf on the existing tail.
     va_list ap;
     va_start(ap, fmt);
@@ -85,14 +85,14 @@ void StringBuilder_appendFormat(StringBuilder* sb, const char* fmt, ...) {
     sb->length += (size_t) needed;
 }
 
-const char* StringBuilder_data(const StringBuilder* sb) {
+const char *StringBuilder_data(const StringBuilder *sb) {
     return sb->buffer;
 }
 
-size_t StringBuilder_length(const StringBuilder* sb) {
+size_t StringBuilder_length(const StringBuilder *sb) {
     return sb->length;
 }
 
-char* StringBuilder_toString(const StringBuilder* sb) {
+char *StringBuilder_toString(const StringBuilder *sb) {
     return safeStrdup(sb->buffer);
 }

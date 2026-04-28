@@ -5,18 +5,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void ensureRowCapacity(GMLArray* arr, int32_t minRows) {
+static void ensureRowCapacity(GMLArray *arr, int32_t minRows) {
     if (arr->rowCapacity >= minRows) return;
     int32_t newCap = arr->rowCapacity > 0 ? arr->rowCapacity : 4;
     while (minRows > newCap) newCap *= 2;
     arr->rows = safeRealloc(arr->rows, (uint32_t) newCap * sizeof(GMLArrayRow));
     for (int32_t i = arr->rowCapacity; newCap > i; i++) {
-        arr->rows[i] = (GMLArrayRow){ .length = 0, .capacity = 0, .data = nullptr };
+        arr->rows[i] = (GMLArrayRow){.length = 0, .capacity = 0, .data = nullptr};
     }
     arr->rowCapacity = newCap;
 }
 
-static void growRow(GMLArrayRow* row, int32_t minLength) {
+static void growRow(GMLArrayRow *row, int32_t minLength) {
     if (row->length >= minLength) return;
     if (minLength > row->capacity) {
         int32_t newCap = row->capacity > 0 ? row->capacity : 4;
@@ -25,13 +25,13 @@ static void growRow(GMLArrayRow* row, int32_t minLength) {
         row->capacity = newCap;
     }
     for (int32_t i = row->length; minLength > i; i++) {
-        row->data[i] = (RValue){ .type = RVALUE_UNDEFINED };
+        row->data[i] = (RValue){.type = RVALUE_UNDEFINED};
     }
     row->length = minLength;
 }
 
-GMLArray* GMLArray_create(int32_t initialLength) {
-    GMLArray* arr = safeCalloc(1, sizeof(GMLArray));
+GMLArray *GMLArray_create(int32_t initialLength) {
+    GMLArray *arr = safeCalloc(1, sizeof(GMLArray));
     arr->refCount = 1;
     arr->owner = nullptr;
     if (initialLength > 0) {
@@ -42,19 +42,19 @@ GMLArray* GMLArray_create(int32_t initialLength) {
     return arr;
 }
 
-void GMLArray_incRef(GMLArray* arr) {
+void GMLArray_incRef(GMLArray *arr) {
     if (arr == nullptr) return;
     arr->refCount++;
 }
 
-void GMLArray_decRef(GMLArray* arr) {
+void GMLArray_decRef(GMLArray *arr) {
     if (arr == nullptr) return;
     require(arr->refCount > 0);
     arr->refCount--;
     if (arr->refCount > 0) return;
 
     repeat(arr->rowCount, r) {
-        GMLArrayRow* row = &arr->rows[r];
+        GMLArrayRow *row = &arr->rows[r];
         repeat(row->length, c) {
             RValue_free(&row->data[c]);
         }
@@ -64,17 +64,17 @@ void GMLArray_decRef(GMLArray* arr) {
     free(arr);
 }
 
-GMLArray* GMLArray_clone(GMLArray* src, void* newOwner) {
+GMLArray *GMLArray_clone(GMLArray *src, void *newOwner) {
     if (src == nullptr) return nullptr;
-    GMLArray* dst = safeCalloc(1, sizeof(GMLArray));
+    GMLArray *dst = safeCalloc(1, sizeof(GMLArray));
     dst->refCount = 1;
     dst->owner = newOwner;
     if (src->rowCount > 0) {
         ensureRowCapacity(dst, src->rowCount);
         dst->rowCount = src->rowCount;
         repeat(src->rowCount, r) {
-            GMLArrayRow* srcRow = &src->rows[r];
-            GMLArrayRow* dstRow = &dst->rows[r];
+            GMLArrayRow *srcRow = &src->rows[r];
+            GMLArrayRow *dstRow = &dst->rows[r];
             if (srcRow->length == 0) continue;
             growRow(dstRow, srcRow->length);
             repeat(srcRow->length, c) {
@@ -103,7 +103,7 @@ GMLArray* GMLArray_clone(GMLArray* src, void* newOwner) {
     return dst;
 }
 
-void GMLArray_growTo(GMLArray* arr, int32_t minLength) {
+void GMLArray_growTo(GMLArray *arr, int32_t minLength) {
     if (arr == nullptr || minLength <= 0) return;
     int32_t idx = minLength - 1;
     int32_t row = idx / GML_ARRAY_STRIDE;
@@ -112,4 +112,3 @@ void GMLArray_growTo(GMLArray* arr, int32_t minLength) {
     if (row + 1 > arr->rowCount) arr->rowCount = row + 1;
     growRow(&arr->rows[row], col + 1);
 }
-

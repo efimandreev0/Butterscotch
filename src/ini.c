@@ -9,7 +9,7 @@
 
 // ===[ Internal Helpers ]===
 
-static IniSection* findSection(const IniFile* ini, const char* name) {
+static IniSection *findSection(const IniFile *ini, const char *name) {
     repeat(ini->count, i) {
         if (strcmp(ini->sections[i].name, name) == 0) {
             return &ini->sections[i];
@@ -18,7 +18,7 @@ static IniSection* findSection(const IniFile* ini, const char* name) {
     return nullptr;
 }
 
-static int findKeyIndex(const IniSection* section, const char* key) {
+static int findKeyIndex(const IniSection *section, const char *key) {
     repeat(section->count, i) {
         if (strcmp(section->keys[i], key) == 0) {
             return i;
@@ -27,12 +27,12 @@ static int findKeyIndex(const IniSection* section, const char* key) {
     return -1;
 }
 
-static IniSection* addSection(IniFile* ini, const char* name) {
+static IniSection *addSection(IniFile *ini, const char *name) {
     if (ini->count >= ini->capacity) {
         ini->capacity = (ini->capacity == 0) ? 4 : ini->capacity * 2;
         ini->sections = safeRealloc(ini->sections, (size_t) ini->capacity * sizeof(IniSection));
     }
-    IniSection* section = &ini->sections[ini->count++];
+    IniSection *section = &ini->sections[ini->count++];
     section->name = safeStrdup(name);
     section->keys = nullptr;
     section->values = nullptr;
@@ -41,7 +41,7 @@ static IniSection* addSection(IniFile* ini, const char* name) {
     return section;
 }
 
-static void addKeyValue(IniSection* section, const char* key, const char* value) {
+static void addKeyValue(IniSection *section, const char *key, const char *value) {
     if (section->count >= section->capacity) {
         section->capacity = (section->capacity == 0) ? 4 : section->capacity * 2;
         section->keys = safeRealloc(section->keys, (size_t) section->capacity * sizeof(char*));
@@ -52,7 +52,7 @@ static void addKeyValue(IniSection* section, const char* key, const char* value)
     section->count++;
 }
 
-static const char* skipWhitespace(const char* p) {
+static const char *skipWhitespace(const char *p) {
     while (TextUtils_isWhitespaceChar(*p)) {
         p++;
     }
@@ -61,27 +61,27 @@ static const char* skipWhitespace(const char* p) {
 
 // ===[ Lifecycle ]===
 
-IniFile* Ini_parse(const char* text) {
-    IniFile* ini = safeCalloc(1, sizeof(IniFile));
+IniFile *Ini_parse(const char *text) {
+    IniFile *ini = safeCalloc(1, sizeof(IniFile));
 
     if (text == nullptr || *text == '\0') {
         return ini;
     }
 
     // Make a mutable copy to tokenize
-    char* data = safeStrdup(text);
-    IniSection* currentSection = nullptr;
+    char *data = safeStrdup(text);
+    IniSection *currentSection = nullptr;
 
-    char* line = data;
+    char *line = data;
     while (line != nullptr) {
         // Find end of line
-        char* eol = strchr(line, '\n');
+        char *eol = strchr(line, '\n');
         if (eol != nullptr) {
             *eol = '\0';
         }
 
         // Trim leading whitespace
-        const char* trimmed = skipWhitespace(line);
+        const char *trimmed = skipWhitespace(line);
 
         // Skip empty lines and comments
         if (*trimmed == '\0' || *trimmed == ';' || *trimmed == '#') {
@@ -90,13 +90,13 @@ IniFile* Ini_parse(const char* text) {
         }
 
         // Strip trailing whitespace/CR
-        char* mutableTrimmed = (char*) trimmed;
+        char *mutableTrimmed = (char *) trimmed;
         TextUtils_trimTrailingWhitespace(mutableTrimmed);
 
         if (*trimmed == '[') {
             // Section header
-            const char* nameStart = trimmed + 1;
-            char* closeBracket = strchr(mutableTrimmed, ']');
+            const char *nameStart = trimmed + 1;
+            char *closeBracket = strchr(mutableTrimmed, ']');
             if (closeBracket != nullptr) {
                 *closeBracket = '\0';
                 currentSection = findSection(ini, nameStart);
@@ -108,13 +108,13 @@ IniFile* Ini_parse(const char* text) {
             }
         } else {
             // Key=value pair
-            char* equals = strchr(mutableTrimmed, '=');
+            char *equals = strchr(mutableTrimmed, '=');
             if (equals != nullptr && currentSection != nullptr) {
                 *equals = '\0';
-                char* key = mutableTrimmed;
-                char* value = equals + 1;
+                char *key = mutableTrimmed;
+                char *value = equals + 1;
                 TextUtils_trimTrailingWhitespace(key);
-                value = (char*) skipWhitespace(value);
+                value = (char *) skipWhitespace(value);
 
                 // Check if key already exists - overwrite if so
                 int existingIndex = findKeyIndex(currentSection, key);
@@ -135,12 +135,12 @@ IniFile* Ini_parse(const char* text) {
     return ini;
 }
 
-void Ini_free(IniFile* ini) {
+void Ini_free(IniFile *ini) {
     if (ini == nullptr)
         return;
 
     repeat(ini->count, i) {
-        IniSection* section = &ini->sections[i];
+        IniSection *section = &ini->sections[i];
         repeat(section->count, j) {
             free(section->keys[j]);
             free(section->values[j]);
@@ -155,8 +155,8 @@ void Ini_free(IniFile* ini) {
 
 // ===[ Queries ]===
 
-const char* Ini_getString(const IniFile* ini, const char* section, const char* key) {
-    IniSection* sec = findSection(ini, section);
+const char *Ini_getString(const IniFile *ini, const char *section, const char *key) {
+    IniSection *sec = findSection(ini, section);
     if (sec == nullptr)
         return nullptr;
 
@@ -167,12 +167,12 @@ const char* Ini_getString(const IniFile* ini, const char* section, const char* k
     return sec->values[idx];
 }
 
-bool Ini_hasSection(const IniFile* ini, const char* section) {
+bool Ini_hasSection(const IniFile *ini, const char *section) {
     return findSection(ini, section) != nullptr;
 }
 
-bool Ini_hasKey(const IniFile* ini, const char* section, const char* key) {
-    IniSection* sec = findSection(ini, section);
+bool Ini_hasKey(const IniFile *ini, const char *section, const char *key) {
+    IniSection *sec = findSection(ini, section);
 
     if (sec == nullptr)
         return false;
@@ -182,14 +182,14 @@ bool Ini_hasKey(const IniFile* ini, const char* section, const char* key) {
 
 // ===[ Mutation ]===
 
-void Ini_setString(IniFile* ini, const char* section, const char* key, const char* value) {
+void Ini_setString(IniFile *ini, const char *section, const char *key, const char *value) {
     // If we are passing a null value, let's remove it!
     if (value == nullptr) {
         Ini_deleteKey(ini, section, key);
         return;
     }
 
-    IniSection* sec = findSection(ini, section);
+    IniSection *sec = findSection(ini, section);
     if (sec == nullptr) {
         sec = addSection(ini, section);
     }
@@ -203,8 +203,8 @@ void Ini_setString(IniFile* ini, const char* section, const char* key, const cha
     }
 }
 
-void Ini_deleteKey(IniFile* ini, const char* section, const char* key) {
-    IniSection* sec = findSection(ini, section);
+void Ini_deleteKey(IniFile *ini, const char *section, const char *key) {
+    IniSection *sec = findSection(ini, section);
     if (sec == nullptr)
         return;
 
@@ -223,7 +223,7 @@ void Ini_deleteKey(IniFile* ini, const char* section, const char* key) {
     sec->count--;
 }
 
-void Ini_deleteSection(IniFile* ini, const char* section) {
+void Ini_deleteSection(IniFile *ini, const char *section) {
     int sectionIndex = -1;
     repeat(ini->count, i) {
         if (strcmp(ini->sections[i].name, section) == 0) {
@@ -234,7 +234,7 @@ void Ini_deleteSection(IniFile* ini, const char* section) {
     if (0 > sectionIndex) return;
 
     // Free the section's contents
-    IniSection* sec = &ini->sections[sectionIndex];
+    IniSection *sec = &ini->sections[sectionIndex];
     repeat(sec->count, j) {
         free(sec->keys[j]);
         free(sec->values[j]);
@@ -252,18 +252,18 @@ void Ini_deleteSection(IniFile* ini, const char* section) {
 
 // ===[ Serialization ]===
 
-char* Ini_serialize(const IniFile* ini, size_t initialCapacity) {
+char *Ini_serialize(const IniFile *ini, size_t initialCapacity) {
     size_t capacity = initialCapacity;
     size_t length = 0;
-    char* buffer = safeMalloc(capacity);
+    char *buffer = safeMalloc(capacity);
     buffer[0] = '\0';
 
     repeat(ini->count, i) {
-        IniSection* section = &ini->sections[i];
+        IniSection *section = &ini->sections[i];
 
         // Blank line before section (unless at start of output)
         // Format: \n[name]\nkey=value\n...
-        const char* name = section->name;
+        const char *name = section->name;
         size_t nameLen = strlen(name);
 
         // Calculate space needed for section header
@@ -293,8 +293,8 @@ char* Ini_serialize(const IniFile* ini, size_t initialCapacity) {
 
         // Write key=value pairs
         repeat(section->count, j) {
-            const char* key = section->keys[j];
-            const char* value = section->values[j];
+            const char *key = section->keys[j];
+            const char *value = section->values[j];
             size_t keyLen = strlen(key);
             size_t valueLen = strlen(value);
 

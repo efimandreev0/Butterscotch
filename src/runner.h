@@ -110,8 +110,8 @@ typedef struct {
 typedef struct {
     bool visible;
     bool foreground;
-    int32_t backgroundIndex;  // BGND resource index (mutable at runtime)
-    float x, y;               // float for sub-pixel scrolling accumulation
+    int32_t backgroundIndex; // BGND resource index (mutable at runtime)
+    float x, y; // float for sub-pixel scrolling accumulation
     bool tileX, tileY;
     float speedX, speedY;
     bool stretch;
@@ -163,8 +163,8 @@ typedef enum {
 typedef struct {
     uint32_t id;
     RuntimeLayerElementType type;
-    RuntimeBackgroundElement* backgroundElement; // owned; nullptr if type != Background
-    RuntimeSpriteElement* spriteElement; // owned; nullptr if type != Sprite
+    RuntimeBackgroundElement *backgroundElement; // owned; nullptr if type != Background
+    RuntimeSpriteElement *spriteElement; // owned; nullptr if type != Sprite
 } RuntimeLayerElement;
 
 // Runtime-mutable state for a GMS2 room layer. Parsed layers are populated at room load from RoomLayer and share IDs with the parsed data.
@@ -178,8 +178,8 @@ typedef struct {
     float hSpeed;
     float vSpeed;
     bool dynamic; // true = created at runtime via layer_create
-    char* dynamicName; // owned; only populated for dynamic layers
-    RuntimeLayerElement* elements; // stb_ds array; only populated for dynamic layers
+    char *dynamicName; // owned; only populated for dynamic layers
+    RuntimeLayerElement *elements; // stb_ds array; only populated for dynamic layers
 } RuntimeLayer;
 
 // stb_ds hashmap entry: depth -> tile layer state
@@ -195,22 +195,23 @@ typedef enum { DRAWABLE_TILE, DRAWABLE_INSTANCE, DRAWABLE_LAYER } DrawableType;
 typedef struct {
     DrawableType type;
     int32_t depth;
+
     union {
-        Instance* instance;
+        Instance *instance;
         int32_t tileIndex;
-        RuntimeLayer* runtimeLayer;
+        RuntimeLayer *runtimeLayer;
     };
 } Drawable;
 
 // stb_ds hashmap entry for ds_map: string key -> RValue
 typedef struct {
-    char* key;
+    char *key;
     RValue value;
 } DsMapEntry;
 
 // ds_list: dynamic array of RValues
 typedef struct {
-    RValue* items; // stb_ds dynamic array of RValues
+    RValue *items; // stb_ds dynamic array of RValues
 } DsList;
 
 // ===[ GML Buffer System ]===
@@ -242,13 +243,13 @@ typedef struct {
 #define GML_BUFFER_SEEK_END      2
 
 typedef struct {
-    uint8_t* data;       // raw byte storage
-    int32_t size;        // allocated size in bytes
-    int32_t position;    // current read/write cursor
-    int32_t usedSize;    // high-water mark for grow buffers
-    int32_t alignment;   // byte alignment for read/write operations
-    int32_t type;        // GML_BUFFER_FIXED, _GROW, _WRAP, _FAST
-    bool isValid;        // false after buffer_delete (tombstone)
+    uint8_t *data; // raw byte storage
+    int32_t size; // allocated size in bytes
+    int32_t position; // current read/write cursor
+    int32_t usedSize; // high-water mark for grow buffers
+    int32_t alignment; // byte alignment for read/write operations
+    int32_t type; // GML_BUFFER_FIXED, _GROW, _WRAP, _FAST
+    bool isValid; // false after buffer_delete (tombstone)
 } GmlBuffer;
 
 // Motion planning grid used by mp_grid_* builtins. Cell value 1 = blocked.
@@ -260,15 +261,16 @@ typedef struct {
     int32_t vcells;
     GMLReal cellWidth;
     GMLReal cellHeight;
-    uint8_t* cells;
+    uint8_t *cells;
 } MpGrid;
 
 // Open text file handle for GML file_text_* functions
 #define MAX_OPEN_TEXT_FILES 32
+
 typedef struct {
-    char* content; // full file content (for read mode)
-    char* writeBuffer; // accumulated text (for write mode)
-    char* filePath; // relative path (for write mode, to flush on close)
+    char *content; // full file content (for read mode)
+    char *writeBuffer; // accumulated text (for write mode)
+    char *filePath; // relative path (for write mode, to flush on close)
     int32_t readPos; // current byte position in content (read mode)
     int32_t contentLen; // length of content string
     bool isWriteMode;
@@ -280,69 +282,80 @@ typedef struct {
 // of re-creating from the room definition.
 typedef struct {
     bool initialized;
-    Instance** instances; // stb_ds array of saved Instance*
+    Instance **instances; // stb_ds array of saved Instance*
     RuntimeBackground backgrounds[8];
     uint32_t backgroundColor;
     bool drawBackgroundColor;
-    TileLayerMapEntry* tileLayerMap; // stb_ds hashmap: depth -> tile layer state
-    RuntimeLayer* runtimeLayers; // stb_ds array, index-parallel to currentRoom->layers
+    TileLayerMapEntry *tileLayerMap; // stb_ds hashmap: depth -> tile layer state
+    RuntimeLayer *runtimeLayers; // stb_ds array, index-parallel to currentRoom->layers
     RuntimeView views[MAX_VIEWS];
 } SavedRoomState;
 
 typedef struct Runner {
-    DataWin* dataWin;
-    VMContext* vmContext;
-    Renderer* renderer;
-    FileSystem* fileSystem;
-    AudioSystem* audioSystem;
-    Room* currentRoom;
+    DataWin *dataWin;
+    VMContext *vmContext;
+    Renderer *renderer;
+    FileSystem *fileSystem;
+    AudioSystem *audioSystem;
+    Room *currentRoom;
     int32_t currentRoomIndex;
     int32_t currentRoomOrderPosition;
-    Instance** instances; // stb_ds array of Instance*
+    Instance **instances; // stb_ds array of Instance*
     // Per-object instance lists: for each object index, a stb_ds array of Instance*.
     // An instance appears in its own object's list AND in every ancestor object's list (descendant-inclusive).
     // This lets collision dispatch iterate only the instances of a target object (and its descendants) instead of scanning all instances in the room.
     // Must be kept in sync with any instance creation, change, or deletion.
-    Instance*** instancesByObject;
+    Instance ***instancesByObject;
     // Same as instancesByObject but each instance only appears in the bucket of its EXACT objectIndex (no ancestors). Used by event dispatch so we don't double-fire when both a child and its parent declare the same event.
-    Instance*** instancesByExactObject;
+    Instance ***instancesByExactObject;
     // Precomputed (eventType, eventSubtype) -> dense slot remap. Built once at Runner_create, never mutated.
     EventSlotMap eventSlotMap;
     // Precomputed per-object and per-slot CSR tables of resolved event handlers. Replaces the per-dispatch parent-chain walk in findEventCodeIdAndOwner.
     ResolvedEventTable eventTable;
     // For each event type, the deduplicated list of object indices that respond to ANY subtype of that event (including via inheritance). Derived from the event table; used by collision dispatch to skip non-collision objects in the outer loop.
     // Length = OBJT_EVENT_TYPE_COUNT.
-    int32_t** objectsWithAnyEventOfType;
+    int32_t **objectsWithAnyEventOfType;
     // Reusable scratch array for Runner_executeEventForAll. Pre-grown to avoid stb_ds arrput overhead and repeated allocations on the per-frame dispatch path. Owned via stb_ds; truncated at the start of each call.
-    Instance** eventDispatchInstances;
+    Instance **eventDispatchInstances;
     // LIFO arena used to snapshot per-object instance lists before iteration.
     // Any loop that might fire user code iterates a copy so that in-flight mutations (instance_change swap-remove, spawns, destroys) don't corrupt it.
     // Each call pushes its snapshot (append) and pops on normal loop exit; nesting is safe because pushes/pops are LIFO and outer ranges stay untouched under newer pushes.
-    Instance** instanceSnapshots;
-    SpatialGrid* spatialGrid;
+    Instance **instanceSnapshots;
+    SpatialGrid *spatialGrid;
     uint32_t collisionQueryCounter;
-    int32_t pendingRoom;  // -1 = none
+    int32_t pendingRoom; // -1 = none
     bool gameStartFired;
     int frameCount;
     uint32_t nextInstanceId;
-    RunnerKeyboardState* keyboard;
+    RunnerKeyboardState *keyboard;
     RuntimeView views[MAX_VIEWS];
-    RunnerGamepadState* gamepads;
+    RunnerGamepadState *gamepads;
     RuntimeBackground backgrounds[8];
-    uint32_t backgroundColor;      // runtime-mutable (BGR format)
+    uint32_t backgroundColor; // runtime-mutable (BGR format)
     bool drawBackgroundColor;
     bool shouldExit;
     bool debugMode;
-    void* nativeWindow;
-    void (*setWindowTitle)(void* window, const char* title);
-    bool (*windowHasFocus)(void* window);
-    TileLayerMapEntry* tileLayerMap; // stb_ds hashmap: depth -> tile layer state
-    RuntimeLayer* runtimeLayers; // stb_ds array, index-parallel to currentRoom->layers for parsed entries; dynamic entries appended
-    uint32_t nextLayerId;        // counter for IDs of layers/elements created at runtime
-    SavedRoomState* savedRoomStates; // array of size dataWin->room.count, for persistent room support
+    void *nativeWindow;
+
+    void (*setWindowTitle)(void *window, const char *title);
+
+    bool (*windowHasFocus)(void *window);
+
+    TileLayerMapEntry *tileLayerMap; // stb_ds hashmap: depth -> tile layer state
+    RuntimeLayer *runtimeLayers;
+    // stb_ds array, index-parallel to currentRoom->layers for parsed entries; dynamic entries appended
+    uint32_t nextLayerId; // counter for IDs of layers/elements created at runtime
+    SavedRoomState *savedRoomStates; // array of size dataWin->room.count, for persistent room support
     int32_t viewCurrent; // index of the view currently being drawn (for view_current)
-    struct { char* key; int value; }* disabledObjects; // stb_ds string hashmap, nullptr = no filtering
-    struct { int key; Instance* value; }* instancesToId;
+    struct {
+        char *key;
+        int value;
+    } *disabledObjects; // stb_ds string hashmap, nullptr = no filtering
+    struct {
+        int key;
+        Instance *value;
+    } *instancesToId;
+
     bool forceDrawDepth;
     // Depth-sorted unified list of all drawables (instances + tiles + runtime layers) for the current room.
     // Active/visible filtering happens at draw time, so toggling those flags does not invalidate the cache.
@@ -350,24 +363,24 @@ typedef struct Runner {
     // Two-tier invalidation:
     //   structureDirty - the SET of entries changed (instance/layer create or destroy, room change). Full rebuild.
     //   sortDirty      - the entries are the same but .depth values may have shifted. Refresh depths and only re-sort if order broke. Cheap when small depth shifts don't cross neighbors (typical depth=-y games).
-    Drawable* cachedDrawables; // stb_ds array
+    Drawable *cachedDrawables; // stb_ds array
     bool drawableListStructureDirty;
     bool drawableListSortDirty;
     // Dummy instance to serve as "self" during GLOB script execution
     // In bytecode version 17+, global init scripts store method values on "self" via Pop.v.v
     // The real runner uses a persistent YYObjectBase for this, the YYObjectBase is a "parent" of Instance
     // For now, we'll use a dummy Instance with objectIndex = -1 as a hack
-    Instance* globalScopeInstance;
+    Instance *globalScopeInstance;
     // Struct instances created by @@NewGMLObject@@. Reuses Instance with objectIndex=-1.
     // Tracked separately so event/step/draw iteration over runner->instances stays clean.
-    Instance** structInstances;
+    Instance **structInstances;
     int32_t forcedDepth;
 
     // ===[ Builtin function state ]===
-    DsMapEntry** dsMapPool; // stb_ds array of stb_ds hashmaps
-    DsList* dsListPool; // stb_ds array of DsList
-    GmlBuffer* gmlBufferPool; // stb_ds array of GmlBuffer
-    MpGrid* mpGridPool; // stb_ds array of motion-planning grids
+    DsMapEntry **dsMapPool; // stb_ds array of stb_ds hashmaps
+    DsList *dsListPool; // stb_ds array of DsList
+    GmlBuffer *gmlBufferPool; // stb_ds array of GmlBuffer
+    MpGrid *mpGridPool; // stb_ds array of motion-planning grids
 
     // Motion planning potential field settings
     GMLReal mpPotMaxrot;
@@ -379,14 +392,14 @@ typedef struct Runner {
     int32_t lastMusicInstance;
 
     // INI file state
-    IniFile* currentIni;
-    char* currentIniPath;
+    IniFile *currentIni;
+    char *currentIniPath;
     bool currentIniDirty;
     // Some games (like Undertale) open and close the same INI file EVERY SINGLE FRAME!
     // While on modern devices this isn't a huge deal, this WILL cause issues on devices that have less than stellar file systems (like the PlayStation 2)
     // To avoid unnecessary disk reads, we cache the last-closed INI and reuse it on reopen
-    IniFile* cachedIni; // Cache of last-closed INI (for fast reopen)
-    char* cachedIniPath;
+    IniFile *cachedIni; // Cache of last-closed INI (for fast reopen)
+    char *cachedIniPath;
 
     // Text file handles for file_text_* functions
     OpenTextFile openTextFiles[MAX_OPEN_TEXT_FILES];
@@ -402,46 +415,76 @@ typedef struct Runner {
     int32_t guiHeight;
 } Runner;
 
-const char* Runner_getEventName(int32_t eventType, int32_t eventSubtype);
-void Runner_reset(Runner* runner);
-Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileSystem* fileSystem, AudioSystem* audioSystem);
-void Runner_initFirstRoom(Runner* runner);
-void Runner_step(Runner* runner);
-void Runner_executeEvent(Runner* runner, Instance* instance, int32_t eventType, int32_t eventSubtype);
-void Runner_executeEventFromObject(Runner* runner, Instance* instance, int32_t startObjectIndex, int32_t eventType, int32_t eventSubtype);
-void Runner_executeEventForAll(Runner* runner, int32_t eventType, int32_t eventSubtype);
-void Runner_draw(Runner* runner);
-void Runner_drawGUI(Runner* runner);
-void Runner_drawBackgrounds(Runner* runner, bool foreground);
-void Runner_scrollBackgrounds(Runner* runner);
-Instance* Runner_createInstance(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex);
-Instance* Runner_createInstanceWithDepth(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex, int32_t depth);
-Instance* Runner_copyInstance(Runner* runner, Instance* source, bool performEvent);
-void Runner_destroyInstance(Runner* runner, Instance* inst);
-void Runner_cleanupDestroyedInstances(Runner* runner);
+const char *Runner_getEventName(int32_t eventType, int32_t eventSubtype);
+
+void Runner_reset(Runner *runner);
+
+Runner *Runner_create(DataWin *dataWin, VMContext *vm, Renderer *renderer, FileSystem *fileSystem,
+                      AudioSystem *audioSystem);
+
+void Runner_initFirstRoom(Runner *runner);
+
+void Runner_step(Runner *runner);
+
+void Runner_executeEvent(Runner *runner, Instance *instance, int32_t eventType, int32_t eventSubtype);
+
+void Runner_executeEventFromObject(Runner *runner, Instance *instance, int32_t startObjectIndex, int32_t eventType,
+                                   int32_t eventSubtype);
+
+void Runner_executeEventForAll(Runner *runner, int32_t eventType, int32_t eventSubtype);
+
+void Runner_draw(Runner *runner);
+
+void Runner_drawGUI(Runner *runner);
+
+void Runner_drawBackgrounds(Runner *runner, bool foreground);
+
+void Runner_scrollBackgrounds(Runner *runner);
+
+Instance *Runner_createInstance(Runner *runner, GMLReal x, GMLReal y, int32_t objectIndex);
+
+Instance *Runner_createInstanceWithDepth(Runner *runner, GMLReal x, GMLReal y, int32_t objectIndex, int32_t depth);
+
+Instance *Runner_copyInstance(Runner *runner, Instance *source, bool performEvent);
+
+void Runner_destroyInstance(Runner *runner, Instance *inst);
+
+void Runner_cleanupDestroyedInstances(Runner *runner);
+
 // Add inst to the per-object lists of its object and every ancestor.
-void Runner_addInstanceToObjectLists(Runner* runner, Instance* inst);
+void Runner_addInstanceToObjectLists(Runner *runner, Instance *inst);
+
 // Remove inst from the per-object lists of its object and every ancestor, preserving creation order (stable remove).
-void Runner_removeInstanceFromObjectLists(Runner* runner, Instance* inst);
+void Runner_removeInstanceFromObjectLists(Runner *runner, Instance *inst);
+
 // Reset every per-object list to length 0 without releasing the backing arrays.
-void Runner_clearAllObjectLists(Runner* runner);
+void Runner_clearAllObjectLists(Runner *runner);
 
 // Push a snapshot of instancesByObject[targetObjIndex] onto runner->instanceSnapshots. Returns the base offset where this snapshot begins.
 // The length is arrlen(runner->instanceSnapshots) - base.
 // Invalid indices or empty buckets push zero entries (base == current arena length).
 // Pair with Runner_popInstanceSnapshot(runner, base) when done.
-int32_t Runner_pushInstancesOfObject(Runner* runner, int32_t targetObjIndex);
+int32_t Runner_pushInstancesOfObject(Runner *runner, int32_t targetObjIndex);
+
 // Push a snapshot matching "target", which GML can pass in several forms: an object index (push the descendant-inclusive bucket), INSTANCE_ALL (push every instance in the room), or an instance ID >= 100000 (push that single instance if it exists).
 // Returns base offset for pairing with Runner_popInstanceSnapshot.
-int32_t Runner_pushInstancesForTarget(Runner* runner, int32_t target);
-// Truncate the snapshot arena back to "base", releasing everything pushed after it.
-void Runner_popInstanceSnapshot(Runner* runner, int32_t base);
+int32_t Runner_pushInstancesForTarget(Runner *runner, int32_t target);
 
-void Runner_dumpState(Runner* runner);
-char* Runner_dumpStateJson(Runner* runner);
-void Runner_free(Runner* runner);
-RuntimeLayer* Runner_findRuntimeLayerById(Runner* runner, int32_t id);
-RoomLayer* Runner_findRoomLayerById(Runner* runner, int32_t id);
-RuntimeLayerElement* Runner_findLayerElementById(Runner* runner, int32_t elementId, RuntimeLayer** outLayer);
-uint32_t Runner_getNextLayerId(Runner* runner);
-void Runner_freeRuntimeLayer(RuntimeLayer* runtimeLayer);
+// Truncate the snapshot arena back to "base", releasing everything pushed after it.
+void Runner_popInstanceSnapshot(Runner *runner, int32_t base);
+
+void Runner_dumpState(Runner *runner);
+
+char *Runner_dumpStateJson(Runner *runner);
+
+void Runner_free(Runner *runner);
+
+RuntimeLayer *Runner_findRuntimeLayerById(Runner *runner, int32_t id);
+
+RoomLayer *Runner_findRoomLayerById(Runner *runner, int32_t id);
+
+RuntimeLayerElement *Runner_findLayerElementById(Runner *runner, int32_t elementId, RuntimeLayer **outLayer);
+
+uint32_t Runner_getNextLayerId(Runner *runner);
+
+void Runner_freeRuntimeLayer(RuntimeLayer *runtimeLayer);

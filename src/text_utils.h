@@ -13,7 +13,7 @@
 // Platform-agnostic text measurement and processing helpers.
 // Used by both the renderer (for drawing text) and the VM (for string_width/string_height).
 
-static inline FontGlyph* TextUtils_findGlyph(Font* font, uint16_t ch) {
+static inline FontGlyph *TextUtils_findGlyph(Font *font, uint16_t ch) {
     // Fast path: ASCII codepoints go through a direct LUT, skipping the linear scan.
     if (128 > ch) return font->glyphLUT[ch];
     repeat(font->glyphCount, i) {
@@ -22,7 +22,7 @@ static inline FontGlyph* TextUtils_findGlyph(Font* font, uint16_t ch) {
     return nullptr;
 }
 
-static inline float TextUtils_getKerningOffset(FontGlyph* glyph, uint16_t nextCh) {
+static inline float TextUtils_getKerningOffset(FontGlyph *glyph, uint16_t nextCh) {
     repeat(glyph->kerningCount, k) {
         if (glyph->kerning[k].character == (int16_t) nextCh) {
             return glyph->kerning[k].shiftModifier;
@@ -33,7 +33,7 @@ static inline float TextUtils_getKerningOffset(FontGlyph* glyph, uint16_t nextCh
 
 // Decodes a single UTF-8 codepoint from str at *pos, advances *pos past the consumed bytes.
 // Returns the codepoint as uint16_t (sufficient for BMP glyphs). Returns 0xFFFD for invalid sequences.
-static inline uint16_t TextUtils_decodeUtf8(const char* str, int32_t len, int32_t* pos) {
+static inline uint16_t TextUtils_decodeUtf8(const char *str, int32_t len, int32_t *pos) {
     uint8_t b = (uint8_t) str[*pos];
     if (128 > b) {
         // ASCII (0xxxxxxx)
@@ -49,13 +49,15 @@ static inline uint16_t TextUtils_decodeUtf8(const char* str, int32_t len, int32_
     } else if ((b & 0xF0) == 0xE0) {
         // 3-byte sequence (1110xxxx 10xxxxxx 10xxxxxx)
         if (len > *pos + 2 && ((uint8_t) str[*pos + 1] & 0xC0) == 0x80 && ((uint8_t) str[*pos + 2] & 0xC0) == 0x80) {
-            uint16_t cp = ((b & 0x0F) << 12) | (((uint8_t) str[*pos + 1] & 0x3F) << 6) | ((uint8_t) str[*pos + 2] & 0x3F);
+            uint16_t cp = ((b & 0x0F) << 12) | (((uint8_t) str[*pos + 1] & 0x3F) << 6) | (
+                              (uint8_t) str[*pos + 2] & 0x3F);
             *pos += 3;
             return cp;
         }
     } else if ((b & 0xF8) == 0xF0) {
         // 4-byte sequence (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx) - truncated to uint16_t
-        if (len > *pos + 3 && ((uint8_t) str[*pos + 1] & 0xC0) == 0x80 && ((uint8_t) str[*pos + 2] & 0xC0) == 0x80 && ((uint8_t) str[*pos + 3] & 0xC0) == 0x80) {
+        if (len > *pos + 3 && ((uint8_t) str[*pos + 1] & 0xC0) == 0x80 && ((uint8_t) str[*pos + 2] & 0xC0) == 0x80 && (
+                (uint8_t) str[*pos + 3] & 0xC0) == 0x80) {
             *pos += 4;
             return 0xFFFD; // Beyond BMP, return replacement character
         }
@@ -65,11 +67,11 @@ static inline uint16_t TextUtils_decodeUtf8(const char* str, int32_t len, int32_
     return 0xFFFD;
 }
 
-static inline int32_t TextUtils_utf8AdvanceCodepoints(const char* str, int32_t byteLen, int32_t codepointsToSkip) {
+static inline int32_t TextUtils_utf8AdvanceCodepoints(const char *str, int32_t byteLen, int32_t codepointsToSkip) {
     int32_t pos = 0;
     while (pos < byteLen && codepointsToSkip > 0) {
         pos++;
-        while (pos < byteLen && ((uint8_t)str[pos] & 0xC0) == 0x80) {
+        while (pos < byteLen && ((uint8_t) str[pos] & 0xC0) == 0x80) {
             pos++;
         }
         codepointsToSkip--;
@@ -77,17 +79,17 @@ static inline int32_t TextUtils_utf8AdvanceCodepoints(const char* str, int32_t b
     return pos;
 }
 
-static inline int32_t TextUtils_utf8CodepointCount(const char* str, int32_t byteLen) {
+static inline int32_t TextUtils_utf8CodepointCount(const char *str, int32_t byteLen) {
     int32_t count = 0;
     for (int32_t i = 0; i < byteLen; i++) {
-        if (((uint8_t)str[i] & 0xC0) != 0x80) {
+        if (((uint8_t) str[i] & 0xC0) != 0x80) {
             count++;
         }
     }
     return count;
 }
 
-static inline int32_t TextUtils_utf8EncodeCodepoint(uint32_t cp, char* out) {
+static inline int32_t TextUtils_utf8EncodeCodepoint(uint32_t cp, char *out) {
     if (cp <= 0x7FU) {
         out[0] = (char) cp;
         return 1;
@@ -118,12 +120,12 @@ static inline int32_t TextUtils_utf8EncodeCodepoint(uint32_t cp, char* out) {
 //   which is `max_glyph_height * scaleY`. We apply scaleY via the transform matrix already,
 //   so we return the raw max glyph height here.
 // - Falls back to emSize only if the font has no glyphs recorded.
-static inline float TextUtils_lineStride(Font* font) {
+static inline float TextUtils_lineStride(Font *font) {
     if (font->maxGlyphHeight > 0) return (float) font->maxGlyphHeight;
     return font->emSize;
 }
 
-static inline float TextUtils_measureLineWidth(Font* font, const char* line, int32_t len) {
+static inline float TextUtils_measureLineWidth(Font *font, const char *line, int32_t len) {
     float width = 0;
     int32_t pos = 0;
     uint16_t ch = 0;
@@ -134,7 +136,7 @@ static inline float TextUtils_measureLineWidth(Font* font, const char* line, int
     }
 
     while (hasCh) {
-        FontGlyph* glyph = TextUtils_findGlyph(font, ch);
+        FontGlyph *glyph = TextUtils_findGlyph(font, ch);
 
         // Decode the next codepoint once - reused for kerning AND as next iteration's ch
         uint16_t nextCh = 0;
@@ -154,25 +156,25 @@ static inline float TextUtils_measureLineWidth(Font* font, const char* line, int
 
 // Result of GML text preprocessing. If owning is true, the caller must free the text pointer.
 typedef struct {
-    const char* text;
+    const char *text;
     bool owning;
 } PreprocessedText;
 
 // Frees the text pointer if it is owning.
 static inline void PreprocessedText_free(PreprocessedText pt) {
-    if (pt.owning) free((char*) pt.text);
+    if (pt.owning) free((char *) pt.text);
 }
 
 // Preprocesses GML text: converts unescaped # to \n, and \# to literal #.
 // Uses a fused single-pass approach: scans for # and only allocates if one is found.
-static inline PreprocessedText TextUtils_preprocessGmlText(const char* text) {
+static inline PreprocessedText TextUtils_preprocessGmlText(const char *text) {
     int32_t len = (int32_t) strlen(text);
 
     // Scan until we find a #
     for (int32_t i = 0; len > i; i++) {
         if (text[i] == '#') {
             // Found one - allocate and process from here
-            char* result = safeMalloc(len + 1);
+            char *result = safeMalloc(len + 1);
             memcpy(result, text, i);
             int32_t out = i;
 
@@ -196,18 +198,18 @@ static inline PreprocessedText TextUtils_preprocessGmlText(const char* text) {
                 }
             }
             result[out] = '\0';
-            return (PreprocessedText){ .text = result, .owning = true };
+            return (PreprocessedText){.text = result, .owning = true};
         }
     }
 
     // No # found, return original pointer without allocating
-    return (PreprocessedText){ .text = text, .owning = false };
+    return (PreprocessedText){.text = text, .owning = false};
 }
 
 // Preprocess GML text ONLY if the runner is not GameMaker: Studio 2
-static inline PreprocessedText TextUtils_preprocessGmlTextIfNeeded(Runner* runner, const char* text) {
+static inline PreprocessedText TextUtils_preprocessGmlTextIfNeeded(Runner *runner, const char *text) {
     if (DataWin_isVersionAtLeast(runner->dataWin, 2, 0, 0, 0))
-        return (PreprocessedText){ .text = text, .owning = false };
+        return (PreprocessedText){.text = text, .owning = false};
     return TextUtils_preprocessGmlText(text);
 }
 
@@ -222,7 +224,7 @@ static inline bool TextUtils_isWhitespaceChar(char c) {
 }
 
 // Counts the number of lines in preprocessed text, treating \r\n and \n\r as single breaks
-static inline int32_t TextUtils_countLines(const char* text, int32_t len) {
+static inline int32_t TextUtils_countLines(const char *text, int32_t len) {
     int32_t count = 1;
     for (int32_t i = 0; len > i; i++) {
         if (TextUtils_isNewlineChar(text[i])) {
@@ -237,7 +239,7 @@ static inline int32_t TextUtils_countLines(const char* text, int32_t len) {
 }
 
 // Advances lineStart past the newline at lineEnd, treating \r\n and \n\r as single breaks
-static inline int32_t TextUtils_skipNewline(const char* text, int32_t lineEnd, int32_t textLen) {
+static inline int32_t TextUtils_skipNewline(const char *text, int32_t lineEnd, int32_t textLen) {
     int32_t next = lineEnd + 1;
     if (textLen > next && TextUtils_isNewlineChar(text[next]) && text[lineEnd] != text[next]) {
         next++;
@@ -245,7 +247,7 @@ static inline int32_t TextUtils_skipNewline(const char* text, int32_t lineEnd, i
     return next;
 }
 
-static char* TextUtils_trimTrailingWhitespace(char* str) {
+static char *TextUtils_trimTrailingWhitespace(char *str) {
     size_t len = strlen(str);
     while (len > 0 && (TextUtils_isWhitespaceChar(str[len - 1]) || TextUtils_isNewlineChar(str[len - 1]))) {
         len--;

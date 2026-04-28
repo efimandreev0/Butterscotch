@@ -21,32 +21,32 @@ typedef struct {
 
 // All fields are public so iterators (debug overlay, JSON dump, Instance_copyFields, Instance_free) can scan the entries array directly. capacity is always 0 or a power of two; mask is capacity - 1.
 typedef struct {
-    IntRValueEntry* entries;
+    IntRValueEntry *entries;
     uint32_t capacity;
     uint32_t mask;
     uint32_t count;
 } IntRValueHashMap;
 
 // RValue_free's every occupied entry, then releases the entries buffer.
-void IntRValueHashMap_freeAllValues(IntRValueHashMap* map);
+void IntRValueHashMap_freeAllValues(IntRValueHashMap *map);
 
 // Returns a pointer to the value slot for key, or nullptr if absent. The pointer is valid until the next mutation of the map.
-RValue* IntRValueHashMap_findSlot(IntRValueHashMap* map, int32_t key);
+RValue *IntRValueHashMap_findSlot(IntRValueHashMap *map, int32_t key);
 
 // Returns a pointer to the existing value slot for key. If the key is absent, inserts an RVALUE_UNDEFINED entry first and returns that slot.
 // Replaces the hmgeti + hmput(UNDEFINED) + hmgeti pattern with a single lookup.
 // The pointer is valid until the next mutation of the map.
-RValue* IntRValueHashMap_getOrInsertUndefined(IntRValueHashMap* map, int32_t key);
+RValue *IntRValueHashMap_getOrInsertUndefined(IntRValueHashMap *map, int32_t key);
 
 // Returns the number of occupied slots.
-static inline uint32_t IntRValueHashMap_count(const IntRValueHashMap* map) {
+static inline uint32_t IntRValueHashMap_count(const IntRValueHashMap *map) {
     return map->count;
 }
 
 // Fast inline get. Returns a non-owning (weak) view of the value, or RVALUE_UNDEFINED if absent. Caller must NOT RValue_free the result without first strengthening it (strdup / incRef).
-static inline RValue IntRValueHashMap_get(const IntRValueHashMap* map, int32_t key) {
-    if (map->capacity == 0) return (RValue){ .type = RVALUE_UNDEFINED };
-    const IntRValueEntry* entries = map->entries;
+static inline RValue IntRValueHashMap_get(const IntRValueHashMap *map, int32_t key) {
+    if (map->capacity == 0) return (RValue){.type = RVALUE_UNDEFINED};
+    const IntRValueEntry *entries = map->entries;
     uint32_t mask = map->mask;
     uint32_t idx = ((uint32_t) key * 0x9E3779B9u) & mask;
     while (true) {
@@ -56,15 +56,15 @@ static inline RValue IntRValueHashMap_get(const IntRValueHashMap* map, int32_t k
             result.ownsString = false;
             return result;
         }
-        if (slotKey == INT_RVALUE_HASHMAP_EMPTY_KEY) return (RValue){ .type = RVALUE_UNDEFINED };
+        if (slotKey == INT_RVALUE_HASHMAP_EMPTY_KEY) return (RValue){.type = RVALUE_UNDEFINED};
         idx = (idx + 1) & mask;
     }
 }
 
 // Returns true if the map contains the given key. Used for variable_instance_exists() and similar existence checks.
-static inline bool IntRValueHashMap_contains(const IntRValueHashMap* map, int32_t key) {
+static inline bool IntRValueHashMap_contains(const IntRValueHashMap *map, int32_t key) {
     if (map->capacity == 0) return false;
-    const IntRValueEntry* entries = map->entries;
+    const IntRValueEntry *entries = map->entries;
     uint32_t mask = map->mask;
     uint32_t idx = ((uint32_t) key * 0x9E3779B9u) & mask;
     while (true) {

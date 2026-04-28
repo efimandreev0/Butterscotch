@@ -26,7 +26,7 @@ typedef struct {
     // denseLookup[eventType] is sized to (maxSubtypeByType[eventType] + 1) int16_t
     // entries; -1 marks unused subtypes. Fully self-contained per eventType, so
     // overall memory is the sum of (maxSubtype + 1) over event types actually used.
-    int16_t* denseLookup[OBJT_EVENT_TYPE_COUNT];
+    int16_t *denseLookup[OBJT_EVENT_TYPE_COUNT];
     int32_t maxSubtypeByType[OBJT_EVENT_TYPE_COUNT]; // -1 if eventType is not used by any object
     int32_t slotCount;
 } EventSlotMap;
@@ -49,26 +49,29 @@ typedef struct {
 
 typedef struct {
     // CSR per object: byObject[byObjectStart[obj] .. byObjectStart[obj + 1]) sorted by slot.
-    ObjectEventEntry* byObject;
-    uint32_t* byObjectStart; // length = objectCount + 1
+    ObjectEventEntry *byObject;
+    uint32_t *byObjectStart; // length = objectCount + 1
 
     // CSR per slot: bySlot[bySlotStart[slot] .. bySlotStart[slot + 1]) sorted by concreteObjectId.
-    SlotResponderEntry* bySlot;
-    uint32_t* bySlotStart; // length = slotCount + 1
+    SlotResponderEntry *bySlot;
+    uint32_t *bySlotStart; // length = slotCount + 1
 
     int32_t objectCount;
     int32_t slotCount;
     uint32_t totalEntries;
 } ResolvedEventTable;
 
-void EventSlotMap_build(EventSlotMap* outMap, DataWin* dw);
-void EventSlotMap_destroy(EventSlotMap* m);
+void EventSlotMap_build(EventSlotMap *outMap, DataWin *dw);
 
-void ResolvedEventTable_build(ResolvedEventTable* outTable, DataWin* dw, const EventSlotMap* slotMap);
-void ResolvedEventTable_free(ResolvedEventTable* t);
+void EventSlotMap_destroy(EventSlotMap *m);
+
+void ResolvedEventTable_build(ResolvedEventTable *outTable, DataWin *dw, const EventSlotMap *slotMap);
+
+void ResolvedEventTable_free(ResolvedEventTable *t);
 
 // Returns the responder entries for a slot. *outCount is set to the number of entries (0 if no object listens for this slot).
-static inline SlotResponderEntry* ResolvedEventTable_slotEntries(const ResolvedEventTable* t, int32_t slot, uint32_t* outCount) {
+static inline SlotResponderEntry *ResolvedEventTable_slotEntries(const ResolvedEventTable *t, int32_t slot,
+                                                                 uint32_t *outCount) {
     uint32_t lo = t->bySlotStart[slot];
     uint32_t hi = t->bySlotStart[slot + 1];
     *outCount = hi - lo;
@@ -76,7 +79,7 @@ static inline SlotResponderEntry* ResolvedEventTable_slotEntries(const ResolvedE
 }
 
 // O(1) slot lookup. Returns -1 if (eventType, eventSubtype) has no listeners in this DataWin. Inlined into hot dispatch paths.
-static inline int32_t EventSlotMap_lookup(const EventSlotMap* m, int32_t eventType, int32_t eventSubtype) {
+static inline int32_t EventSlotMap_lookup(const EventSlotMap *m, int32_t eventType, int32_t eventSubtype) {
     if ((uint32_t) eventType >= OBJT_EVENT_TYPE_COUNT) return -1;
     int32_t maxSub = m->maxSubtypeByType[eventType];
     if (0 > eventSubtype || eventSubtype > maxSub) return -1;
@@ -89,7 +92,8 @@ static inline int32_t EventSlotMap_lookup(const EventSlotMap* m, int32_t eventTy
 //
 // Linear scan over the object's CSR range. With ~3-4 entries per object on
 // real games, this fits in one D-cache line on PS2.
-static inline int32_t ResolvedEventTable_lookup(const ResolvedEventTable* t, int32_t obj, int32_t slot, int32_t* outOwner) {
+static inline int32_t ResolvedEventTable_lookup(const ResolvedEventTable *t, int32_t obj, int32_t slot,
+                                                int32_t *outOwner) {
     if ((uint32_t) obj >= (uint32_t) t->objectCount || 0 > slot) {
         if (outOwner != nullptr) *outOwner = -1;
         return -1;

@@ -125,6 +125,6 @@ shput((dst), (src)[i].key, (src)[i].value); \
 } while (0)
 
 typedef struct {
-    char* key;
+    char *key;
     bool value;
 } StringBooleanEntry;

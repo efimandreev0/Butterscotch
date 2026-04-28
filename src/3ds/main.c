@@ -1,4 +1,3 @@
-
 #include <3ds.h>
 #include <malloc.h>
 #include <NovaGL.h>
@@ -37,7 +36,7 @@ u32 __stacksize__ = 64 * 1024;
 #define BUTTERSCOTCH_NOVA_INDEX_BUF_SIZE    (256 * 1024)
 #define BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE  (256 * 1024)
 
-static void processCombinedKey(RunnerKeyboardState* kb, u32 kDown, u32 kUp, u32 kHeld, u32 mask, int32_t gmlKey) {
+static void processCombinedKey(RunnerKeyboardState *kb, u32 kDown, u32 kUp, u32 kHeld, u32 mask, int32_t gmlKey) {
     if (kDown & mask) {
         RunnerKeyboard_onKeyDown(kb, gmlKey);
     } else if ((kUp & mask) && !(kHeld & mask)) {
@@ -55,20 +54,22 @@ void initLogging() {
     printf("Logging initialized!\n");
     fprintf(stderr, "This goes to stderr!\n");
 }
+
 void printMemoryStats() {
     struct mallinfo mi = mallinfo();
 
     u32 linearFree = linearSpaceFree();
 
-    float heapUsedMB = (float)mi.uordblks / 1024.0f / 1024.0f;
-    float linearFreeMB = (float)linearFree / 1024.0f / 1024.0f;
+    float heapUsedMB = (float) mi.uordblks / 1024.0f / 1024.0f;
+    float linearFreeMB = (float) linearFree / 1024.0f / 1024.0f;
 
     fprintf(stderr, "[MEMORY] Heap Used: %.2f MB | LINEAR RAM FREE: %.2f MB\n",
-           heapUsedMB, linearFreeMB);
+            heapUsedMB, linearFreeMB);
 }
 
-int main(int argc, char* argv[]) {
-    (void) argc; (void) argv;
+int main(int argc, char *argv[]) {
+    (void) argc;
+    (void) argv;
     initLogging();
     cfguInit();
     gfxInitDefault();
@@ -82,15 +83,15 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "Loading %s\n", DATA_WIN_PATH);
 
     nova_init_ex(BUTTERSCOTCH_NOVA_CMD_BUF_SIZE,
-BUTTERSCOTCH_NOVA_CLIENT_BUF_SIZE,
-BUTTERSCOTCH_NOVA_INDEX_BUF_SIZE,
-BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
+                 BUTTERSCOTCH_NOVA_CLIENT_BUF_SIZE,
+                 BUTTERSCOTCH_NOVA_INDEX_BUF_SIZE,
+                 BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
     mkdir(NOVA_TEX_CACHE_PATH, 0777);
     nova_texture_cache_set_directory(NOVA_TEX_CACHE_PATH);
 
     bool isCacheReady = false;
     {
-        FILE* cacheFlagFile = fopen(NOVA_TEX_CACHE_PATH "/cache_ready.flag", "r");
+        FILE *cacheFlagFile = fopen(NOVA_TEX_CACHE_PATH "/cache_ready.flag", "r");
         if (cacheFlagFile) {
             isCacheReady = true;
             fclose(cacheFlagFile);
@@ -99,9 +100,9 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
 
     if (!isCacheReady) {
         fprintf(stderr, "=== STAGE 1: TEXTURE PRE-CACHING (first boot) ===\n");
-        DataWin* cacheWin = DataWin_parse(
+        DataWin *cacheWin = DataWin_parse(
             DATA_WIN_PATH,
-            (DataWinParserOptions) {
+            (DataWinParserOptions){
                 .parseGen8 = true,
                 .parseTpag = true,
                 .parseTxtr = true,
@@ -110,7 +111,7 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
         );
 
         if (cacheWin != NULL) {
-            Renderer* tempRenderer = CtrRenderer_create();
+            Renderer *tempRenderer = CtrRenderer_create();
             tempRenderer->vtable->init(tempRenderer, cacheWin);
             tempRenderer->vtable->destroy(tempRenderer);
             DataWin_free(cacheWin);
@@ -118,7 +119,7 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
         } else {
             fprintf(stderr, "WARNING: Stage 1 Cache pass failed to parse data.win!\n");
         }
-        FILE* cacheFlagFile = fopen(NOVA_TEX_CACHE_PATH "/cache_ready.flag", "r");
+        FILE *cacheFlagFile = fopen(NOVA_TEX_CACHE_PATH "/cache_ready.flag", "r");
         if (cacheFlagFile) {
             isCacheReady = true;
             fclose(cacheFlagFile);
@@ -129,9 +130,9 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
 
     fprintf(stderr, "=== STAGE 2: FULL GAME BOOT ===\n");
 
-    DataWin* dataWin = DataWin_parse(
+    DataWin *dataWin = DataWin_parse(
         DATA_WIN_PATH,
-        (DataWinParserOptions) {
+        (DataWinParserOptions){
             .parseGen8 = true,
             .parseOptn = true,
             .parseLang = true,
@@ -182,22 +183,22 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
         return 1;
     }
 
-    Gen8* gen8 = &dataWin->gen8;
+    Gen8 *gen8 = &dataWin->gen8;
     fprintf(stderr, "Loaded \"%s\" (%d) [BC%u]\n", gen8->name, gen8->gameID, gen8->bytecodeVersion);
 
-    VMContext* vm = VM_create(dataWin);
+    VMContext *vm = VM_create(dataWin);
 
-    N3dsFileSystem* fs = N3dsFileSystem_create(DATA_WIN_PATH);
-    Renderer* renderer = CtrRenderer_create();
-    AudioSystem* audio = (AudioSystem*) SdlMixerAudioSystem_create();
+    N3dsFileSystem *fs = N3dsFileSystem_create(DATA_WIN_PATH);
+    Renderer *renderer = CtrRenderer_create();
+    AudioSystem *audio = (AudioSystem *) SdlMixerAudioSystem_create();
     if (audio) {
         audio->dataWin = dataWin;
     }
 
-    Runner* runner = Runner_create(dataWin, vm, renderer, (FileSystem*) fs, audio);
+    Runner *runner = Runner_create(dataWin, vm, renderer, (FileSystem *) fs, audio);
     runner->osType = OS_3DS;
 
-    audio->vtable->init(audio, audio->dataWin, (FileSystem*) fs);
+    audio->vtable->init(audio, audio->dataWin, (FileSystem *) fs);
     renderer->vtable->init(renderer, dataWin);
     Runner_initFirstRoom(runner);
 
@@ -211,7 +212,7 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
 
         u32 kHeld = hidKeysHeld();
         u32 kDown = hidKeysDown();
-        u32 kUp   = hidKeysUp();
+        u32 kUp = hidKeysUp();
 
         RunnerKeyboard_beginFrame(runner->keyboard);
 
@@ -233,7 +234,7 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
             runner->audioSystem->vtable->update(runner->audioSystem, (float) targetFrameSec);
         }
 
-        Room* activeRoom = runner->currentRoom;
+        Room *activeRoom = runner->currentRoom;
 
         int32_t gameW = (int32_t) gen8->defaultWindowWidth;
         int32_t gameH = (int32_t) gen8->defaultWindowHeight;
@@ -242,7 +243,7 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
         if (viewsEnabled) {
             int32_t maxRight = 0, maxBottom = 0;
             for (int vi = 0; vi < MAX_VIEWS; vi++) {
-                RuntimeView* view = &runner->views[vi];
+                RuntimeView *view = &runner->views[vi];
                 if (!view->enabled) continue;
                 int32_t right = view->portX + view->portWidth;
                 int32_t bottom = view->portY + view->portHeight;
@@ -284,7 +285,7 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
             bool anyViewRendered = false;
             if (viewsEnabled) {
                 for (int vi = 0; vi < MAX_VIEWS; vi++) {
-                    RuntimeView* view = &runner->views[vi];
+                    RuntimeView *view = &runner->views[vi];
                     if (!view->enabled) continue;
 
                     int32_t viewX = view->viewX;
@@ -300,7 +301,8 @@ BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
                     runner->viewCurrent = vi;
 
                     novaSet3DDepth(0.05f);
-                    renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH, portX, portY, portW, portH, viewAngle);
+                    renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH, portX, portY, portW, portH,
+                                                viewAngle);
                     Runner_draw(runner);
                     renderer->vtable->endView(renderer);
                     int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : portW;

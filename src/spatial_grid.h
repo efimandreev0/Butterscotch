@@ -15,12 +15,12 @@ typedef struct {
     // The "end" of the grid is a stb_ds array
     int16_t gridWidth;
     int16_t gridHeight;
-    int32_t* dirtyInstances;
+    int32_t *dirtyInstances;
     // Flat 2D grid of Instance* stb_ds arrays
-    Instance*** grid;
+    Instance ***grid;
 } SpatialGrid;
 
-static inline int32_t SpatialGrid_cellIndex(SpatialGrid* grid, int32_t x, int32_t y) {
+static inline int32_t SpatialGrid_cellIndex(SpatialGrid *grid, int32_t x, int32_t y) {
     return (y * grid->gridWidth) + x;
 }
 
@@ -43,7 +43,8 @@ typedef struct {
     uint16_t maxGridY;
 } SpatialGridRange;
 
-static inline SpatialGridRange SpatialGrid_computeCellRange(SpatialGrid* grid, GMLReal left, GMLReal top, GMLReal right, GMLReal bottom) {
+static inline SpatialGridRange SpatialGrid_computeCellRange(SpatialGrid *grid, GMLReal left, GMLReal top, GMLReal right,
+                                                            GMLReal bottom) {
     int16_t minGridX = (int16_t) (left / SPATIAL_GRID_CELL_SIZE);
     int16_t minGridY = (int16_t) (top / SPATIAL_GRID_CELL_SIZE);
     int16_t maxGridX = (int16_t) (right / SPATIAL_GRID_CELL_SIZE);
@@ -56,10 +57,10 @@ static inline SpatialGridRange SpatialGrid_computeCellRange(SpatialGrid* grid, G
     if (minGridY > grid->gridHeight - 1) minGridY = grid->gridHeight - 1;
     if (maxGridX > grid->gridWidth - 1) maxGridX = grid->gridWidth - 1;
     if (maxGridY > grid->gridHeight - 1) maxGridY = grid->gridHeight - 1;
-    return (SpatialGridRange){ minGridX, minGridY, maxGridX, maxGridY };
+    return (SpatialGridRange){minGridX, minGridY, maxGridX, maxGridY};
 }
 
-static inline bool SpatialGrid_instanceOverlapsRange(Instance* instance, SpatialGridRange range) {
+static inline bool SpatialGrid_instanceOverlapsRange(Instance *instance, SpatialGridRange range) {
     repeat(arrlen(instance->collisionCells), i) {
         uint16_t cellX = SpatialGrid_unpackGridX(instance->collisionCells[i]);
         uint16_t cellY = SpatialGrid_unpackGridY(instance->collisionCells[i]);
@@ -69,8 +70,10 @@ static inline bool SpatialGrid_instanceOverlapsRange(Instance* instance, Spatial
     return false;
 }
 
-SpatialGrid* SpatialGrid_create(uint32_t gridWidth, uint32_t gridHeight);
-void SpatialGrid_free(SpatialGrid* grid);
+SpatialGrid *SpatialGrid_create(uint32_t gridWidth, uint32_t gridHeight);
 
-void SpatialGrid_syncGrid(Runner* runner, SpatialGrid* grid);
-void SpatialGrid_markInstanceAsDirty(SpatialGrid* grid, Instance* instance);
+void SpatialGrid_free(SpatialGrid *grid);
+
+void SpatialGrid_syncGrid(Runner *runner, SpatialGrid *grid);
+
+void SpatialGrid_markInstanceAsDirty(SpatialGrid *grid, Instance *instance);

@@ -5,7 +5,7 @@
 
 #define INITIAL_CAPACITY 8
 
-static void allocEmpty(IntRValueHashMap* map, uint32_t capacity) {
+static void allocEmpty(IntRValueHashMap *map, uint32_t capacity) {
     // memset 0xFF makes every key int32_t = -1 (the empty sentinel). The value bytes also become 0xFF but are unread for empty slots, so no harm.
     map->entries = safeMalloc(capacity * sizeof(IntRValueEntry));
     memset(map->entries, 0xFF, capacity * sizeof(IntRValueEntry));
@@ -15,7 +15,7 @@ static void allocEmpty(IntRValueHashMap* map, uint32_t capacity) {
 }
 
 // Reinserts an existing entry into a freshly-grown table. Skips the resize check and the count update because the caller already accounts for both.
-static void rawInsert(IntRValueHashMap* map, int32_t key, RValue value) {
+static void rawInsert(IntRValueHashMap *map, int32_t key, RValue value) {
     uint32_t idx = ((uint32_t) key * 0x9E3779B9u) & map->mask;
     while (map->entries[idx].key != INT_RVALUE_HASHMAP_EMPTY_KEY) {
         idx = (idx + 1) & map->mask;
@@ -24,9 +24,9 @@ static void rawInsert(IntRValueHashMap* map, int32_t key, RValue value) {
     map->entries[idx].value = value;
 }
 
-static void grow(IntRValueHashMap* map) {
+static void grow(IntRValueHashMap *map) {
     uint32_t oldCapacity = map->capacity;
-    IntRValueEntry* oldEntries = map->entries;
+    IntRValueEntry *oldEntries = map->entries;
     uint32_t newCapacity = oldCapacity == 0 ? INITIAL_CAPACITY : oldCapacity * 2;
     allocEmpty(map, newCapacity);
     if (oldEntries != nullptr) {
@@ -41,7 +41,7 @@ static void grow(IntRValueHashMap* map) {
     }
 }
 
-void IntRValueHashMap_freeAllValues(IntRValueHashMap* map) {
+void IntRValueHashMap_freeAllValues(IntRValueHashMap *map) {
     if (map->entries != nullptr) {
         repeat(map->capacity, i) {
             if (map->entries[i].key != INT_RVALUE_HASHMAP_EMPTY_KEY) {
@@ -56,7 +56,7 @@ void IntRValueHashMap_freeAllValues(IntRValueHashMap* map) {
     map->count = 0;
 }
 
-RValue* IntRValueHashMap_findSlot(IntRValueHashMap* map, int32_t key) {
+RValue *IntRValueHashMap_findSlot(IntRValueHashMap *map, int32_t key) {
     if (map->capacity == 0) return nullptr;
     uint32_t idx = ((uint32_t) key * 0x9E3779B9u) & map->mask;
     while (true) {
@@ -67,8 +67,9 @@ RValue* IntRValueHashMap_findSlot(IntRValueHashMap* map, int32_t key) {
     }
 }
 
-RValue* IntRValueHashMap_getOrInsertUndefined(IntRValueHashMap* map, int32_t key) {
-    requireMessage(key != INT_RVALUE_HASHMAP_EMPTY_KEY, "IntRValueHashMap_getOrInsertUndefined: key -1 collides with the empty-slot sentinel");
+RValue *IntRValueHashMap_getOrInsertUndefined(IntRValueHashMap *map, int32_t key) {
+    requireMessage(key != INT_RVALUE_HASHMAP_EMPTY_KEY,
+                   "IntRValueHashMap_getOrInsertUndefined: key -1 collides with the empty-slot sentinel");
 
     // Resize before probing so we are guaranteed to find an empty slot. Threshold: load factor 0.75.
     if ((map->count + 1) * 4 > map->capacity * 3) {
@@ -81,7 +82,7 @@ RValue* IntRValueHashMap_getOrInsertUndefined(IntRValueHashMap* map, int32_t key
         if (slotKey == key) return &map->entries[idx].value;
         if (slotKey == INT_RVALUE_HASHMAP_EMPTY_KEY) {
             map->entries[idx].key = key;
-            map->entries[idx].value = (RValue){ .type = RVALUE_UNDEFINED };
+            map->entries[idx].value = (RValue){.type = RVALUE_UNDEFINED};
             map->count++;
             return &map->entries[idx].value;
         }

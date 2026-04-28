@@ -11,7 +11,7 @@
 // target >= 100000: instance ID (match specific instance)
 // target == INSTANCE_ALL (-3): match any instance
 // target >= 0 && < 100000: object index (match via parent chain)
-static inline bool Collision_matchesTarget(DataWin* dataWin, Instance* inst, int32_t target) {
+static inline bool Collision_matchesTarget(DataWin *dataWin, Instance *inst, int32_t target) {
     if (target >= 100000) return inst->instanceId == target;
     if (target == INSTANCE_ALL) return true;
     return VM_isObjectOrDescendant(dataWin, inst->objectIndex, target);
@@ -23,15 +23,15 @@ typedef struct {
 } InstanceBBox;
 
 // Returns the collision sprite for an instance (mask sprite if set, else display sprite)
-static inline Sprite* Collision_getSprite(DataWin* dataWin, Instance* inst) {
+static inline Sprite *Collision_getSprite(DataWin *dataWin, Instance *inst) {
     int32_t sprIdx = (inst->maskIndex >= 0) ? inst->maskIndex : inst->spriteIndex;
     if (0 > sprIdx || (uint32_t) sprIdx >= dataWin->sprt.count) return nullptr;
     return &dataWin->sprt.sprites[sprIdx];
 }
 
 // Computes the axis-aligned bounding box for an instance using its collision sprite
-static inline InstanceBBox Collision_computeBBox(DataWin* dataWin, Instance* inst) {
-    Sprite* spr = Collision_getSprite(dataWin, inst);
+static inline InstanceBBox Collision_computeBBox(DataWin *dataWin, Instance *inst) {
+    Sprite *spr = Collision_getSprite(dataWin, inst);
     if (spr == nullptr) return (InstanceBBox){0, 0, 0, 0, false};
 
     GMLReal marginL = (GMLReal) spr->marginLeft;
@@ -55,10 +55,14 @@ static inline InstanceBBox Collision_computeBBox(DataWin* dataWin, Instance* ins
 
         // Rotate all 4 corners (CW rotation matching renderer's negated angle for Y-down screen coords)
         GMLReal cx[4], cy[4];
-        cx[0] = cs * lx0 + sn * ly0;  cy[0] = -sn * lx0 + cs * ly0;
-        cx[1] = cs * lx1 + sn * ly0;  cy[1] = -sn * lx1 + cs * ly0;
-        cx[2] = cs * lx0 + sn * ly1;  cy[2] = -sn * lx0 + cs * ly1;
-        cx[3] = cs * lx1 + sn * ly1;  cy[3] = -sn * lx1 + cs * ly1;
+        cx[0] = cs * lx0 + sn * ly0;
+        cy[0] = -sn * lx0 + cs * ly0;
+        cx[1] = cs * lx1 + sn * ly0;
+        cy[1] = -sn * lx1 + cs * ly0;
+        cx[2] = cs * lx0 + sn * ly1;
+        cy[2] = -sn * lx0 + cs * ly1;
+        cx[3] = cs * lx1 + sn * ly1;
+        cy[3] = -sn * lx1 + cs * ly1;
 
         GMLReal minX = cx[0], maxX = cx[0], minY = cy[0], maxY = cy[0];
         for (int c = 1; 4 > c; c++) {
@@ -69,35 +73,43 @@ static inline InstanceBBox Collision_computeBBox(DataWin* dataWin, Instance* ins
         }
 
         return (InstanceBBox){
-            .left   = inst->x + minX,
-            .right  = inst->x + maxX,
-            .top    = inst->y + minY,
+            .left = inst->x + minX,
+            .right = inst->x + maxX,
+            .top = inst->y + minY,
             .bottom = inst->y + maxY,
-            .valid  = true
+            .valid = true
         };
     }
 
     // No rotation fast path
-    GMLReal left   = inst->x + inst->imageXscale * (marginL - originX);
-    GMLReal right  = inst->x + inst->imageXscale * (marginR - originX);
-    GMLReal top    = inst->y + inst->imageYscale * (marginT - originY);
+    GMLReal left = inst->x + inst->imageXscale * (marginL - originX);
+    GMLReal right = inst->x + inst->imageXscale * (marginR - originX);
+    GMLReal top = inst->y + inst->imageYscale * (marginT - originY);
     GMLReal bottom = inst->y + inst->imageYscale * (marginB - originY);
 
     // Normalize if negative scale
-    if (left > right) { GMLReal tmp = left; left = right; right = tmp; }
-    if (top > bottom) { GMLReal tmp = top; top = bottom; bottom = tmp; }
+    if (left > right) {
+        GMLReal tmp = left;
+        left = right;
+        right = tmp;
+    }
+    if (top > bottom) {
+        GMLReal tmp = top;
+        top = bottom;
+        bottom = tmp;
+    }
 
     return (InstanceBBox){left, right, top, bottom, true};
 }
 
-static inline bool Collision_hasFrameMasks(Sprite* sprite) {
+static inline bool Collision_hasFrameMasks(Sprite *sprite) {
     return sprite != nullptr && sprite->sepMasks == 1 && sprite->masks != nullptr && sprite->maskCount > 0;
 }
 
 // Tests if world point (px, py) is inside the given instance's collision shape.
 // The point is inverse-transformed into sprite-local coords (translation, rotation, inverse scale, origin) and bounds-checked against the full sprite texture [0, spr.width) x [0, spr.height).
 // Precise sprites (sepMasks == 1) additionally require the mask bit at the resulting local pixel to be set.
-static inline bool Collision_pointInInstance(Sprite* spr, Instance* inst, GMLReal px, GMLReal py) {
+static inline bool Collision_pointInInstance(Sprite *spr, Instance *inst, GMLReal px, GMLReal py) {
     if (spr == nullptr) return false;
 
     // Reject degenerate scales to avoid divide-by-zero.
@@ -132,7 +144,7 @@ static inline bool Collision_pointInInstance(Sprite* spr, Instance* inst, GMLRea
     if (Collision_hasFrameMasks(spr)) {
         // Pick mask for current frame
         uint32_t frameIdx = ((uint32_t) inst->imageIndex) % spr->maskCount;
-        uint8_t* mask = spr->masks[frameIdx];
+        uint8_t *mask = spr->masks[frameIdx];
         uint32_t bytesPerRow = (spr->width + 7) / 8;
         return (mask[iy * bytesPerRow + (ix >> 3)] & (1 << (7 - (ix & 7)))) != 0;
     }
@@ -149,17 +161,18 @@ static inline bool Collision_pointInInstance(Sprite* spr, Instance* inst, GMLRea
 //      pixel via Collision_pointInInstance. Both sides get inverse-transformed
 //      regardless of whether they're individually precise, so a rotated
 //      non-precise sprite collides as an OBB as long as its partner is precise.
-static inline bool Collision_instancesOverlapPrecise(DataWin* dataWin, Instance* a, Instance* b, InstanceBBox bboxA, InstanceBBox bboxB) {
+static inline bool Collision_instancesOverlapPrecise(DataWin *dataWin, Instance *a, Instance *b, InstanceBBox bboxA,
+                                                     InstanceBBox bboxB) {
     // Compute world-space intersection of the two AABBs
-    GMLReal iLeft   = GMLReal_fmax(bboxA.left, bboxB.left);
-    GMLReal iRight  = GMLReal_fmin(bboxA.right, bboxB.right);
-    GMLReal iTop    = GMLReal_fmax(bboxA.top, bboxB.top);
+    GMLReal iLeft = GMLReal_fmax(bboxA.left, bboxB.left);
+    GMLReal iRight = GMLReal_fmin(bboxA.right, bboxB.right);
+    GMLReal iTop = GMLReal_fmax(bboxA.top, bboxB.top);
     GMLReal iBottom = GMLReal_fmin(bboxA.bottom, bboxB.bottom);
 
     if (iLeft >= iRight || iTop >= iBottom) return false;
 
-    Sprite* sprA = Collision_getSprite(dataWin, a);
-    Sprite* sprB = Collision_getSprite(dataWin, b);
+    Sprite *sprA = Collision_getSprite(dataWin, a);
+    Sprite *sprB = Collision_getSprite(dataWin, b);
     if (sprA == nullptr || sprB == nullptr) return false;
 
     // Neither sprite precise? AABB overlap alone is enough (matches native).
@@ -168,9 +181,9 @@ static inline bool Collision_instancesOverlapPrecise(DataWin* dataWin, Instance*
     if (!preciseA && !preciseB) return true;
 
     int32_t startX = (int32_t) GMLReal_floor(iLeft);
-    int32_t endX   = (int32_t) GMLReal_ceil(iRight);
+    int32_t endX = (int32_t) GMLReal_ceil(iRight);
     int32_t startY = (int32_t) GMLReal_floor(iTop);
-    int32_t endY   = (int32_t) GMLReal_ceil(iBottom);
+    int32_t endY = (int32_t) GMLReal_ceil(iBottom);
 
     for (int32_t py = startY; endY > py; py++) {
         for (int32_t px = startX; endX > px; px++) {

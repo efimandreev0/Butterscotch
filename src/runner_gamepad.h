@@ -52,26 +52,44 @@ typedef struct {
     int connectedCount;
 } RunnerGamepadState;
 
-RunnerGamepadState* RunnerGamepad_create(void);
-void RunnerGamepad_free(RunnerGamepadState* gp);
+RunnerGamepadState *RunnerGamepad_create(void);
 
-void RunnerGamepad_beginFrame(RunnerGamepadState* gp);
+void RunnerGamepad_free(RunnerGamepadState *gp);
+
+void RunnerGamepad_beginFrame(RunnerGamepadState *gp);
 
 int RawToGPUndertale(int32_t gmlButton);
-int RunnerGamepad_getDeviceCount(RunnerGamepadState* gp);
-bool RunnerGamepad_isConnected(RunnerGamepadState* gp, int device);
-bool RunnerGamepad_buttonCheck(RunnerGamepadState* gp, int device, int button);
-bool RunnerGamepad_buttonCheckPressed(RunnerGamepadState* gp, int device, int button);
-bool RunnerGamepad_buttonCheckReleased(RunnerGamepadState* gp, int device, int button);
-float RunnerGamepad_buttonValue(RunnerGamepadState* gp, int device, int button);
-float RunnerGamepad_axisValue(RunnerGamepadState* gp, int device, int axis);
-const char* RunnerGamepad_getDescription(RunnerGamepadState* gp, int device);
-const char* RunnerGamepad_getGuid(RunnerGamepadState* gp, int device);
-float RunnerGamepad_getButtonThreshold(RunnerGamepadState* gp, int device);
-void RunnerGamepad_setButtonThreshold(RunnerGamepadState* gp, int device, float threshold);
-float RunnerGamepad_getAxisDeadzone(RunnerGamepadState* gp, int device);
-void RunnerGamepad_setAxisDeadzone(RunnerGamepadState* gp, int device, float deadzone);
-int RunnerGamepad_getAxisCount(RunnerGamepadState* gp, int device);
-int RunnerGamepad_getButtonCount(RunnerGamepadState* gp, int device);
-int RunnerGamepad_getHatCount(RunnerGamepadState* gp, int device);
-int RunnerGamepad_getHatValue(RunnerGamepadState* gp, int device, int hat);
+
+int RunnerGamepad_getDeviceCount(RunnerGamepadState *gp);
+
+bool RunnerGamepad_isConnected(RunnerGamepadState *gp, int device);
+
+bool RunnerGamepad_buttonCheck(RunnerGamepadState *gp, int device, int button);
+
+bool RunnerGamepad_buttonCheckPressed(RunnerGamepadState *gp, int device, int button);
+
+bool RunnerGamepad_buttonCheckReleased(RunnerGamepadState *gp, int device, int button);
+
+float RunnerGamepad_buttonValue(RunnerGamepadState *gp, int device, int button);
+
+float RunnerGamepad_axisValue(RunnerGamepadState *gp, int device, int axis);
+
+const char *RunnerGamepad_getDescription(RunnerGamepadState *gp, int device);
+
+const char *RunnerGamepad_getGuid(RunnerGamepadState *gp, int device);
+
+float RunnerGamepad_getButtonThreshold(RunnerGamepadState *gp, int device);
+
+void RunnerGamepad_setButtonThreshold(RunnerGamepadState *gp, int device, float threshold);
+
+float RunnerGamepad_getAxisDeadzone(RunnerGamepadState *gp, int device);
+
+void RunnerGamepad_setAxisDeadzone(RunnerGamepadState *gp, int device, float deadzone);
+
+int RunnerGamepad_getAxisCount(RunnerGamepadState *gp, int device);
+
+int RunnerGamepad_getButtonCount(RunnerGamepadState *gp, int device);
+
+int RunnerGamepad_getHatCount(RunnerGamepadState *gp, int device);
+
+int RunnerGamepad_getHatValue(RunnerGamepadState *gp, int device, int hat);

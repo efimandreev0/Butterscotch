@@ -64,8 +64,8 @@ static int gmlAxisToIndex(int32_t gmlAxis) {
     }
 }
 
-RunnerGamepadState* RunnerGamepad_create(void) {
-    RunnerGamepadState* gp = safeCalloc(1, sizeof(RunnerGamepadState));
+RunnerGamepadState *RunnerGamepad_create(void) {
+    RunnerGamepadState *gp = safeCalloc(1, sizeof(RunnerGamepadState));
     for (int i = 0; MAX_GAMEPADS > i; i++) {
         gp->slots[i].deadzone = 0.15f;
         gp->slots[i].triggerThreshold = 0.5f;
@@ -73,29 +73,29 @@ RunnerGamepadState* RunnerGamepad_create(void) {
     return gp;
 }
 
-void RunnerGamepad_free(RunnerGamepadState* gp) {
+void RunnerGamepad_free(RunnerGamepadState *gp) {
     free(gp);
 }
 
-void RunnerGamepad_beginFrame(RunnerGamepadState* gp) {
+void RunnerGamepad_beginFrame(RunnerGamepadState *gp) {
     for (int i = 0; MAX_GAMEPADS > i; i++) {
         gp->slots[i].connectedPrev = gp->slots[i].connected;
-        memset(gp->slots[i].buttonPressed,  0, sizeof(gp->slots[i].buttonPressed));
+        memset(gp->slots[i].buttonPressed, 0, sizeof(gp->slots[i].buttonPressed));
         memset(gp->slots[i].buttonReleased, 0, sizeof(gp->slots[i].buttonReleased));
     }
     gp->connectedCount = 0;
 }
 
-int RunnerGamepad_getDeviceCount(RunnerGamepadState* gp) {
+int RunnerGamepad_getDeviceCount(RunnerGamepadState *gp) {
     return gp->connectedCount;
 }
 
-bool RunnerGamepad_isConnected(RunnerGamepadState* gp, int device) {
+bool RunnerGamepad_isConnected(RunnerGamepadState *gp, int device) {
     if (device < 0 || device >= MAX_GAMEPADS) return false;
     return gp->slots[device].connected;
 }
 
-bool RunnerGamepad_buttonCheck(RunnerGamepadState* gp, int device, int button) {
+bool RunnerGamepad_buttonCheck(RunnerGamepadState *gp, int device, int button) {
     if (device < 0 || device >= MAX_GAMEPADS) return false;
     if (!gp->slots[device].connected) return false;
     int idx = gmlButtonToIndex(button);
@@ -103,7 +103,7 @@ bool RunnerGamepad_buttonCheck(RunnerGamepadState* gp, int device, int button) {
     return gp->slots[device].buttonDown[idx];
 }
 
-bool RunnerGamepad_buttonCheckPressed(RunnerGamepadState* gp, int device, int button) {
+bool RunnerGamepad_buttonCheckPressed(RunnerGamepadState *gp, int device, int button) {
     if (device < 0 || device >= MAX_GAMEPADS) return false;
     if (!gp->slots[device].connected) return false;
     int idx = gmlButtonToIndex(button);
@@ -111,7 +111,7 @@ bool RunnerGamepad_buttonCheckPressed(RunnerGamepadState* gp, int device, int bu
     return gp->slots[device].buttonPressed[idx];
 }
 
-bool RunnerGamepad_buttonCheckReleased(RunnerGamepadState* gp, int device, int button) {
+bool RunnerGamepad_buttonCheckReleased(RunnerGamepadState *gp, int device, int button) {
     if (device < 0 || device >= MAX_GAMEPADS) return false;
     if (!gp->slots[device].connected) return false;
     int idx = gmlButtonToIndex(button);
@@ -119,7 +119,7 @@ bool RunnerGamepad_buttonCheckReleased(RunnerGamepadState* gp, int device, int b
     return gp->slots[device].buttonReleased[idx];
 }
 
-float RunnerGamepad_buttonValue(RunnerGamepadState* gp, int device, int button) {
+float RunnerGamepad_buttonValue(RunnerGamepadState *gp, int device, int button) {
     if (device < 0 || device >= MAX_GAMEPADS) return 0.0f;
     if (!gp->slots[device].connected) return 0.0f;
     int idx = gmlButtonToIndex(button);
@@ -127,7 +127,7 @@ float RunnerGamepad_buttonValue(RunnerGamepadState* gp, int device, int button) 
     return gp->slots[device].buttonValue[idx];
 }
 
-float RunnerGamepad_axisValue(RunnerGamepadState* gp, int device, int axis) {
+float RunnerGamepad_axisValue(RunnerGamepadState *gp, int device, int axis) {
     if (device < 0 || device >= MAX_GAMEPADS) return 0.0f;
     if (!gp->slots[device].connected) return 0.0f;
     int idx = gmlAxisToIndex(axis);
@@ -135,66 +135,66 @@ float RunnerGamepad_axisValue(RunnerGamepadState* gp, int device, int axis) {
     return gp->slots[device].axisValue[idx];
 }
 
-const char* RunnerGamepad_getDescription(RunnerGamepadState* gp, int device) {
+const char *RunnerGamepad_getDescription(RunnerGamepadState *gp, int device) {
     if (device < 0 || device >= MAX_GAMEPADS) return "";
     if (!gp->slots[device].connected) return "";
     return gp->slots[device].description;
 }
 
-const char* RunnerGamepad_getGuid(RunnerGamepadState* gp, int device) {
+const char *RunnerGamepad_getGuid(RunnerGamepadState *gp, int device) {
     if (device < 0 || device >= MAX_GAMEPADS) return "device index out of range";
     if (!gp->slots[device].connected) return "none";
-    const char* g = gp->slots[device].guid;
+    const char *g = gp->slots[device].guid;
     return (g[0] != '\0') ? g : "none";
 }
 
-float RunnerGamepad_getButtonThreshold(RunnerGamepadState* gp, int device) {
+float RunnerGamepad_getButtonThreshold(RunnerGamepadState *gp, int device) {
     if (device < 0 || device >= MAX_GAMEPADS) return 0.0f;
     return gp->slots[device].triggerThreshold;
 }
 
-void RunnerGamepad_setButtonThreshold(RunnerGamepadState* gp, int device, float threshold) {
+void RunnerGamepad_setButtonThreshold(RunnerGamepadState *gp, int device, float threshold) {
     if (device < 0 || device >= MAX_GAMEPADS) return;
     if (threshold < 0.0f) threshold = 0.0f;
     if (threshold > 1.0f) threshold = 1.0f;
     gp->slots[device].triggerThreshold = threshold;
 }
 
-float RunnerGamepad_getAxisDeadzone(RunnerGamepadState* gp, int device) {
+float RunnerGamepad_getAxisDeadzone(RunnerGamepadState *gp, int device) {
     if (device < 0 || device >= MAX_GAMEPADS) return 0.0f;
     return gp->slots[device].deadzone;
 }
 
-void RunnerGamepad_setAxisDeadzone(RunnerGamepadState* gp, int device, float deadzone) {
+void RunnerGamepad_setAxisDeadzone(RunnerGamepadState *gp, int device, float deadzone) {
     if (device < 0 || device >= MAX_GAMEPADS) return;
     if (deadzone < 0.0f) deadzone = 0.0f;
     if (deadzone > 1.0f) deadzone = 1.0f;
     gp->slots[device].deadzone = deadzone;
 }
 
-int RunnerGamepad_getAxisCount(RunnerGamepadState* gp, int device) {
+int RunnerGamepad_getAxisCount(RunnerGamepadState *gp, int device) {
     if (device < 0 || device >= MAX_GAMEPADS) return 0;
     if (!gp->slots[device].connected) return 0;
     return GP_AXIS_COUNT;
 }
 
-int RunnerGamepad_getButtonCount(RunnerGamepadState* gp, int device) {
+int RunnerGamepad_getButtonCount(RunnerGamepadState *gp, int device) {
     if (device < 0 || device >= MAX_GAMEPADS) return 0;
     if (!gp->slots[device].connected) return 0;
     return GP_BUTTON_COUNT;
 }
 
-int RunnerGamepad_getHatCount(RunnerGamepadState* gp, int device) {
+int RunnerGamepad_getHatCount(RunnerGamepadState *gp, int device) {
     if (device < 0 || device >= MAX_GAMEPADS) return 0;
     if (!gp->slots[device].connected) return 0;
     return 1;
 }
 
-int RunnerGamepad_getHatValue(RunnerGamepadState* gp, int device, int hat) {
+int RunnerGamepad_getHatValue(RunnerGamepadState *gp, int device, int hat) {
     if (device < 0 || device >= MAX_GAMEPADS) return 0;
     if (!gp->slots[device].connected) return 0;
     if (hat != 0) return 0;
-    const GamepadSlot* slot = &gp->slots[device];
+    const GamepadSlot *slot = &gp->slots[device];
     int mask = 0;
     if (slot->buttonDown[12]) mask |= 1;
     if (slot->buttonDown[15]) mask |= 2;

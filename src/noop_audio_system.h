@@ -10,4 +10,4 @@ typedef struct {
     AudioSystem base;
 } NoopAudioSystem;
 
-NoopAudioSystem* NoopAudioSystem_create(void);
+NoopAudioSystem *NoopAudioSystem_create(void);

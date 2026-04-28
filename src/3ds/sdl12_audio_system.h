@@ -8,23 +8,22 @@
 
 typedef struct {
     AudioSystem base;
-    FileSystem* fileSystem;
+    FileSystem *fileSystem;
 
-    FILE* dataWinFile;
-    FILE* sfxDataWinFile;
-    Mix_Chunk** chunks;
-    Mix_Music** music;
-    uint8_t** compressedMusicBuf;
-    void** decodedSfxBufs;
+    FILE *dataWinFile;
+    FILE *sfxDataWinFile;
+    Mix_Chunk **chunks;
+    Mix_Music **music;
+    uint8_t **compressedMusicBuf;
+    void **decodedSfxBufs;
 
-    char* archivePath;
+    char *archivePath;
 
-    int32_t* channelToSoundIndex;
+    int32_t *channelToSoundIndex;
     int32_t currentMusicSoundIndex;
 
-    uint32_t* chunkLastUsed;
+    uint32_t *chunkLastUsed;
     uint32_t audioFrameCounter;
-
 } SdlMixerAudioSystem;
 
-AudioSystem* SdlMixerAudioSystem_create(void);
+AudioSystem *SdlMixerAudioSystem_create(void);

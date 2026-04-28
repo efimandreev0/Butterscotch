@@ -6,7 +6,7 @@
 
 // ===[ EventSlotMap ]===
 
-void EventSlotMap_build(EventSlotMap* outMap, DataWin* dw) {
+void EventSlotMap_build(EventSlotMap *outMap, DataWin *dw) {
     requireNotNull(outMap);
     requireNotNull(dw);
 
@@ -21,9 +21,9 @@ void EventSlotMap_build(EventSlotMap* outMap, DataWin* dw) {
     // Pass 1: find max subtype seen per event type (across DECLARED events on every object, not parent-resolved).
     // The remap deliberately ignores inheritance: a parent's events end up declared on the parent itself, so we already see them.
     repeat(objectCount, oi) {
-        GameObject* go = &dw->objt.objects[oi];
+        GameObject *go = &dw->objt.objects[oi];
         repeat(OBJT_EVENT_TYPE_COUNT, t) {
-            ObjectEventList* el = &go->eventLists[t];
+            ObjectEventList *el = &go->eventLists[t];
             repeat(el->eventCount, ei) {
                 int32_t sub = (int32_t) el->events[ei].eventSubtype;
                 if (sub > outMap->maxSubtypeByType[t]) outMap->maxSubtypeByType[t] = sub;
@@ -35,7 +35,7 @@ void EventSlotMap_build(EventSlotMap* outMap, DataWin* dw) {
     repeat(OBJT_EVENT_TYPE_COUNT, t) {
         int32_t maxSub = outMap->maxSubtypeByType[t];
         if (0 > maxSub) continue;
-        size_t entryCount = (size_t)(maxSub + 1);
+        size_t entryCount = (size_t) (maxSub + 1);
         outMap->denseLookup[t] = safeMalloc(entryCount * sizeof(int16_t));
         repeat(entryCount, i) outMap->denseLookup[t][i] = -1;
     }
@@ -47,10 +47,10 @@ void EventSlotMap_build(EventSlotMap* outMap, DataWin* dw) {
     repeat(OBJT_EVENT_TYPE_COUNT, t) {
         int32_t maxSub = outMap->maxSubtypeByType[t];
         if (0 > maxSub) continue;
-        int16_t* table = outMap->denseLookup[t];
+        int16_t *table = outMap->denseLookup[t];
         repeat(objectCount, oi) {
-            GameObject* go = &dw->objt.objects[oi];
-            ObjectEventList* el = &go->eventLists[t];
+            GameObject *go = &dw->objt.objects[oi];
+            ObjectEventList *el = &go->eventLists[t];
             repeat(el->eventCount, ei) {
                 int32_t sub = (int32_t) el->events[ei].eventSubtype;
                 if (table[sub] >= 0) continue; // already assigned a slot
@@ -61,7 +61,7 @@ void EventSlotMap_build(EventSlotMap* outMap, DataWin* dw) {
     outMap->slotCount = nextSlot;
 }
 
-void EventSlotMap_destroy(EventSlotMap* m) {
+void EventSlotMap_destroy(EventSlotMap *m) {
     if (m == nullptr) return;
     repeat(OBJT_EVENT_TYPE_COUNT, t) {
         free(m->denseLookup[t]);
@@ -75,7 +75,8 @@ void EventSlotMap_destroy(EventSlotMap* m) {
 
 // Walk parent chain for one object and fill scratchCodeId / scratchOwner with the resolved handler for every slot the object responds to (-1 marks unused).
 // Closer descendants override ancestors (we visit child first and skip already-set slots).
-static void resolveHandlersForObject(DataWin* dw, const EventSlotMap* slotMap, int32_t startObj, int32_t* scratchCodeId, int16_t* scratchOwner) {
+static void resolveHandlersForObject(DataWin *dw, const EventSlotMap *slotMap, int32_t startObj, int32_t *scratchCodeId,
+                                     int16_t *scratchOwner) {
     int32_t slotCount = slotMap->slotCount;
     repeat(slotCount, s) scratchCodeId[s] = -1;
 
@@ -83,12 +84,12 @@ static void resolveHandlersForObject(DataWin* dw, const EventSlotMap* slotMap, i
     int32_t depth = 0;
     int32_t objectCount = (int32_t) dw->objt.count;
     while (cur >= 0 && objectCount > cur && 32 > depth) {
-        GameObject* go = &dw->objt.objects[cur];
+        GameObject *go = &dw->objt.objects[cur];
         repeat(OBJT_EVENT_TYPE_COUNT, t) {
-            int16_t* table = slotMap->denseLookup[t];
+            int16_t *table = slotMap->denseLookup[t];
             if (table == nullptr) continue;
             int32_t maxSub = slotMap->maxSubtypeByType[t];
-            ObjectEventList* el = &go->eventLists[t];
+            ObjectEventList *el = &go->eventLists[t];
             repeat(el->eventCount, ei) {
                 int32_t sub = (int32_t) el->events[ei].eventSubtype;
                 if (0 > sub || sub > maxSub) continue;
@@ -106,7 +107,7 @@ static void resolveHandlersForObject(DataWin* dw, const EventSlotMap* slotMap, i
     }
 }
 
-void ResolvedEventTable_build(ResolvedEventTable* outTable, DataWin* dw, const EventSlotMap* slotMap) {
+void ResolvedEventTable_build(ResolvedEventTable *outTable, DataWin *dw, const EventSlotMap *slotMap) {
     requireNotNull(outTable);
     requireNotNull(dw);
     requireNotNull(slotMap);
@@ -115,7 +116,8 @@ void ResolvedEventTable_build(ResolvedEventTable* outTable, DataWin* dw, const E
     int32_t slotCount = slotMap->slotCount;
 
     if (objectCount > MAX_EVENT_TABLE_OBJECT_COUNT) {
-        fprintf(stderr, "ResolvedEventTable: objectCount=%d exceeds max %d!\n", objectCount, MAX_EVENT_TABLE_OBJECT_COUNT);
+        fprintf(stderr, "ResolvedEventTable: objectCount=%d exceeds max %d!\n", objectCount,
+                MAX_EVENT_TABLE_OBJECT_COUNT);
         abort();
     }
 
@@ -128,8 +130,8 @@ void ResolvedEventTable_build(ResolvedEventTable* outTable, DataWin* dw, const E
     outTable->totalEntries = 0;
 
     // Pass 1: count resolved entries per object so we can allocate flat arrays.
-    int32_t* scratchCodeId = safeMalloc((size_t) slotCount * sizeof(int32_t));
-    int16_t* scratchOwner = safeMalloc((size_t) slotCount * sizeof(int16_t));
+    int32_t *scratchCodeId = safeMalloc((size_t) slotCount * sizeof(int32_t));
+    int16_t *scratchOwner = safeMalloc((size_t) slotCount * sizeof(int16_t));
 
     outTable->byObjectStart = safeMalloc((size_t)(objectCount + 1) * sizeof(uint32_t));
     outTable->byObjectStart[0] = 0;
@@ -173,14 +175,14 @@ void ResolvedEventTable_build(ResolvedEventTable* outTable, DataWin* dw, const E
     }
 
     outTable->bySlot = safeMalloc((size_t) totalEntries * sizeof(SlotResponderEntry));
-    uint32_t* slotCursor = safeMalloc((size_t) slotCount * sizeof(uint32_t));
+    uint32_t *slotCursor = safeMalloc((size_t) slotCount * sizeof(uint32_t));
     memset(slotCursor, 0, (size_t) slotCount * sizeof(uint32_t));
 
     repeat(objectCount, oi) {
         uint32_t lo = outTable->byObjectStart[oi];
         uint32_t hi = outTable->byObjectStart[oi + 1];
         for (uint32_t i = lo; hi > i; i++) {
-            ObjectEventEntry* e = &outTable->byObject[i];
+            ObjectEventEntry *e = &outTable->byObject[i];
             uint32_t dst = outTable->bySlotStart[e->slot] + slotCursor[e->slot]++;
             outTable->bySlot[dst].concreteObjectId = (int16_t) oi;
             outTable->bySlot[dst].ownerObjectId = e->ownerObjectId;
@@ -190,12 +192,16 @@ void ResolvedEventTable_build(ResolvedEventTable* outTable, DataWin* dw, const E
     free(slotCursor);
 }
 
-void ResolvedEventTable_free(ResolvedEventTable* t) {
+void ResolvedEventTable_free(ResolvedEventTable *t) {
     if (t == nullptr) return;
-    free(t->byObject); t->byObject = nullptr;
-    free(t->byObjectStart); t->byObjectStart = nullptr;
-    free(t->bySlot); t->bySlot = nullptr;
-    free(t->bySlotStart); t->bySlotStart = nullptr;
+    free(t->byObject);
+    t->byObject = nullptr;
+    free(t->byObjectStart);
+    t->byObjectStart = nullptr;
+    free(t->bySlot);
+    t->bySlot = nullptr;
+    free(t->bySlotStart);
+    t->bySlotStart = nullptr;
     t->objectCount = 0;
     t->slotCount = 0;
     t->totalEntries = 0;

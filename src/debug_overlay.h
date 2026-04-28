@@ -11,4 +11,4 @@
 // The drawing happens through the Renderer vtable, so this works on any platform that
 // implements drawRectangle. Must be called inside a beginView/endView pair so the
 // world-space coordinates project correctly.
-void DebugOverlay_drawCollisionMasks(Runner* runner);
+void DebugOverlay_drawCollisionMasks(Runner *runner);

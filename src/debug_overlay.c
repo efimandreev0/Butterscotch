@@ -11,18 +11,18 @@
 #define MASK_COLOR_AABB       0x00FF00 // green: bbox of an instance with a precise mask
 #define MASK_COLOR_PIXEL      0xFFFF00 // cyan: a set pixel inside the precise mask
 
-void DebugOverlay_drawCollisionMasks(Runner* runner) {
-    Renderer* renderer = runner->renderer;
+void DebugOverlay_drawCollisionMasks(Runner *runner) {
+    Renderer *renderer = runner->renderer;
     if (renderer == nullptr) return;
 
-    DataWin* dataWin = runner->dataWin;
+    DataWin *dataWin = runner->dataWin;
     int32_t instanceCount = (int32_t) arrlen(runner->instances);
 
     repeat(instanceCount, i) {
-        Instance* inst = runner->instances[i];
+        Instance *inst = runner->instances[i];
         if (!inst->active || !inst->visible) continue;
 
-        Sprite* spr = Collision_getSprite(dataWin, inst);
+        Sprite *spr = Collision_getSprite(dataWin, inst);
         if (spr == nullptr) continue;
 
         bool hasPreciseMask = Collision_hasFrameMasks(spr);
@@ -30,7 +30,7 @@ void DebugOverlay_drawCollisionMasks(Runner* runner) {
         // Draw the precise mask pixels (only when not rotated, to keep this simple)
         if (hasPreciseMask && 0.0001 > GMLReal_fabs(inst->imageAngle)) {
             uint32_t frameIdx = ((uint32_t) inst->imageIndex) % spr->maskCount;
-            uint8_t* mask = spr->masks[frameIdx];
+            uint8_t *mask = spr->masks[frameIdx];
             uint32_t bytesPerRow = (spr->width + 7) / 8;
 
             GMLReal originX = (GMLReal) spr->originX;
@@ -61,11 +61,20 @@ void DebugOverlay_drawCollisionMasks(Runner* runner) {
                     GMLReal wy2 = wy1 + inst->imageYscale;
 
                     // Normalize on negative scale
-                    if (wx1 > wx2) { GMLReal tmp = wx1; wx1 = wx2; wx2 = tmp; }
-                    if (wy1 > wy2) { GMLReal tmp = wy1; wy1 = wy2; wy2 = tmp; }
+                    if (wx1 > wx2) {
+                        GMLReal tmp = wx1;
+                        wx1 = wx2;
+                        wx2 = tmp;
+                    }
+                    if (wy1 > wy2) {
+                        GMLReal tmp = wy1;
+                        wy1 = wy2;
+                        wy2 = tmp;
+                    }
 
                     // The fill path adds +1 to (x2, y2), so subtract one pixel here
-                    renderer->vtable->drawRectangle(renderer, (float) wx1, (float) wy1, (float) wx2 - 1.0f, (float) wy2 - 1.0f, MASK_COLOR_PIXEL, 0.4f, false);
+                    renderer->vtable->drawRectangle(renderer, (float) wx1, (float) wy1, (float) wx2 - 1.0f,
+                                                    (float) wy2 - 1.0f, MASK_COLOR_PIXEL, 0.4f, false);
                 }
             }
         }
@@ -78,7 +87,8 @@ void DebugOverlay_drawCollisionMasks(Runner* runner) {
 
         // bbox.right / bbox.bottom are exclusive, but the outline path adds +1 to x2/y2 when
         // drawing the top/bottom edges, so we pass -1 to keep the outline aligned to the bbox
-        renderer->vtable->drawRectangle(renderer, (float) bbox.left, (float) bbox.top, (float) bbox.right - 1.0f, (float) bbox.bottom - 1.0f, outlineColor, 1.0f, true);
+        renderer->vtable->drawRectangle(renderer, (float) bbox.left, (float) bbox.top, (float) bbox.right - 1.0f,
+                                        (float) bbox.bottom - 1.0f, outlineColor, 1.0f, true);
     }
 
     // Flush so the overlay quads land on top of whatever Runner_draw queued

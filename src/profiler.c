@@ -46,21 +46,21 @@ static uint64_t nowNanos(void) {
 #endif
 }
 
-Profiler* Profiler_create(void) {
-    Profiler* p = safeMalloc(sizeof(Profiler));
+Profiler *Profiler_create(void) {
+    Profiler *p = safeMalloc(sizeof(Profiler));
     p->entries = nullptr;
     p->frameDepth = 0;
     p->instructionCount = 0;
     return p;
 }
 
-void Profiler_destroy(Profiler* p) {
+void Profiler_destroy(Profiler *p) {
     if (p == nullptr) return;
     shfree(p->entries);
     free(p);
 }
 
-void Profiler_setEnabled(Profiler** slot, bool enabled) {
+void Profiler_setEnabled(Profiler **slot, bool enabled) {
     if (enabled) {
         if (*slot == nullptr) *slot = Profiler_create();
     } else {
@@ -71,10 +71,10 @@ void Profiler_setEnabled(Profiler** slot, bool enabled) {
     }
 }
 
-void Profiler_enter(Profiler* p, const char* name) {
+void Profiler_enter(Profiler *p, const char *name) {
     if (p == nullptr) return;
     if (p->frameDepth >= PROFILER_MAX_DEPTH) return;
-    ProfilerFrame* f = &p->frameStack[p->frameDepth];
+    ProfilerFrame *f = &p->frameStack[p->frameDepth];
     f->startNanos = nowNanos();
     f->childNanos = 0;
     f->startOps = p->instructionCount;
@@ -83,11 +83,11 @@ void Profiler_enter(Profiler* p, const char* name) {
     p->frameDepth++;
 }
 
-void Profiler_exit(Profiler* p) {
+void Profiler_exit(Profiler *p) {
     if (p == nullptr) return;
     if (0 >= p->frameDepth) return;
     p->frameDepth--;
-    ProfilerFrame* f = &p->frameStack[p->frameDepth];
+    ProfilerFrame *f = &p->frameStack[p->frameDepth];
     uint64_t elapsed = nowNanos() - f->startNanos;
     uint64_t selfNanos = elapsed > f->childNanos ? elapsed - f->childNanos : 0;
     uint64_t totalOps = p->instructionCount - f->startOps;
@@ -95,7 +95,7 @@ void Profiler_exit(Profiler* p) {
 
     ptrdiff_t i = shgeti(p->entries, f->name);
     if (0 > i) {
-        ProfilerStats stats = { .nanos = selfNanos, .ops = selfOps };
+        ProfilerStats stats = {.nanos = selfNanos, .ops = selfOps};
         shput(p->entries, f->name, stats);
     } else {
         p->entries[i].value.nanos += selfNanos;
@@ -108,9 +108,9 @@ void Profiler_exit(Profiler* p) {
     }
 }
 
-static int compareEntriesDesc(const void* a, const void* b) {
-    uint64_t va = ((const ProfilerEntry*) a)->value.nanos;
-    uint64_t vb = ((const ProfilerEntry*) b)->value.nanos;
+static int compareEntriesDesc(const void *a, const void *b) {
+    uint64_t va = ((const ProfilerEntry *) a)->value.nanos;
+    uint64_t vb = ((const ProfilerEntry *) b)->value.nanos;
     if (vb > va) return 1;
     if (va > vb) return -1;
     return 0;
@@ -118,14 +118,14 @@ static int compareEntriesDesc(const void* a, const void* b) {
 
 // Sort entries into a caller-owned buffer. Returns entry count; 0 if nothing to report.
 // Also computes the grand total (across all entries, not just topN) in *outTotal.
-static size_t collectSorted(const Profiler* p, ProfilerEntry* outSorted, size_t outCap, ProfilerStats* outTotal) {
+static size_t collectSorted(const Profiler *p, ProfilerEntry *outSorted, size_t outCap, ProfilerStats *outTotal) {
     size_t count = shlen(p->entries);
     if (count == 0) return 0;
     if (count > outCap) count = outCap;
     memcpy(outSorted, p->entries, count * sizeof(ProfilerEntry));
     qsort(outSorted, count, sizeof(ProfilerEntry), compareEntriesDesc);
 
-    ProfilerStats total = { 0 };
+    ProfilerStats total = {0};
     size_t fullCount = shlen(p->entries);
     repeat(fullCount, i) {
         total.nanos += p->entries[i].value.nanos;
@@ -135,21 +135,21 @@ static size_t collectSorted(const Profiler* p, ProfilerEntry* outSorted, size_t 
     return count;
 }
 
-void Profiler_reset(Profiler* p) {
+void Profiler_reset(Profiler *p) {
     if (p == nullptr) return;
     shfree(p->entries);
     p->entries = nullptr;
 }
 
-char* Profiler_createReport(const Profiler* p, int topN, int framesInWindow) {
+char *Profiler_createReport(const Profiler *p, int topN, int framesInWindow) {
     if (p == nullptr) return nullptr;
     size_t count = shlen(p->entries);
     if (count == 0) return nullptr;
     if (0 >= framesInWindow) framesInWindow = 1;
 
-    ProfilerEntry* sorted = (ProfilerEntry*) malloc(count * sizeof(ProfilerEntry));
+    ProfilerEntry *sorted = (ProfilerEntry *) malloc(count * sizeof(ProfilerEntry));
     if (sorted == nullptr) return nullptr;
-    ProfilerStats total = { 0 };
+    ProfilerStats total = {0};
     size_t sortedEntriesCount = collectSorted(p, sorted, count, &total);
 
     size_t limit = sortedEntriesCount;
@@ -166,11 +166,15 @@ char* Profiler_createReport(const Profiler* p, int topN, int framesInWindow) {
     repeat(limit, i) {
         double perFrameMs = ((double) sorted[i].value.nanos / (double) 1000000) / frames;
         double opsPerFrame = (double) sorted[i].value.ops / frames;
-        double nsPerOp = sorted[i].value.ops > 0 ? (double) sorted[i].value.nanos / (double) sorted[i].value.ops : (double) 0;
-        StringBuilder_appendFormat(&stringBuilder, "%.2fms %.0f ops (%.0f ns/op) %s\n", perFrameMs, opsPerFrame, nsPerOp, sorted[i].key);
+        double nsPerOp = sorted[i].value.ops > 0
+                             ? (double) sorted[i].value.nanos / (double) sorted[i].value.ops
+                             : (double) 0;
+        StringBuilder_appendFormat(&stringBuilder, "%.2fms %.0f ops (%.0f ns/op) %s\n", perFrameMs, opsPerFrame,
+                                   nsPerOp, sorted[i].key);
     }
-    StringBuilder_appendFormat(&stringBuilder, "total %.2fms/frame, %.0f ops/frame (%zu scripts)", totalMs / frames, totalOpsPerFrame, sortedEntriesCount);
-    char* result = StringBuilder_toString(&stringBuilder);
+    StringBuilder_appendFormat(&stringBuilder, "total %.2fms/frame, %.0f ops/frame (%zu scripts)", totalMs / frames,
+                               totalOpsPerFrame, sortedEntriesCount);
+    char *result = StringBuilder_toString(&stringBuilder);
     StringBuilder_free(&stringBuilder);
     free(sorted);
     return result;

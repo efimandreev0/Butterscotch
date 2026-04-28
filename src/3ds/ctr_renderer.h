@@ -5,6 +5,7 @@
 
 #define CTR_MAX_CHUNKS_X 4
 #define CTR_MAX_CHUNKS_Y 4
+
 typedef struct {
     GLuint tex;
     int srcX;
@@ -31,12 +32,12 @@ typedef struct {
 typedef struct {
     Renderer base;
 
-    CtrTpagData* tpags;
+    CtrTpagData *tpags;
     uint32_t tpagCount;
 
     GLuint whiteTexture;
 
-    uint8_t* quadBatchVertices;
+    uint8_t *quadBatchVertices;
     uint32_t quadBatchCapacity;
     uint32_t quadBatchCount;
     GLuint quadBatchTexture;
@@ -47,5 +48,6 @@ typedef struct {
     int32_t gameH;
 } CtrRenderer;
 
-Renderer* CtrRenderer_create(void);
-void CtrRenderer_prefetchSprite(Renderer* renderer, int32_t spriteIndex);
+Renderer *CtrRenderer_create(void);
+
+void CtrRenderer_prefetchSprite(Renderer *renderer, int32_t spriteIndex);

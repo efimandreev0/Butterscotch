@@ -30,6 +30,7 @@
 // ===[ Room Constants ]===
 #define ROOM_RESTARTGAME (-200) // The reason why it is -200 is because the GameMaker-HTML5 runner uses -200 too (see Globals.js)
 
+
 // ===[ GML Math Epsilon (used for floating-point comparisons) ]===
 // The real GameMaker runner uses epsilon-based comparison for all numeric CMP operations.
 // Default value matches the HTML5 runner's g_GMLMathEpsilon (1e-5 for double precision).
@@ -108,7 +109,7 @@
 // Avoids per-call string hash lookups in both the builtin map and funcMap.
 // Resolved once during VM_create, then used directly by handleCall.
 typedef struct {
-    void* builtin; // cached BuiltinFunc pointer, or nullptr
+    void *builtin; // cached BuiltinFunc pointer, or nullptr
     int32_t scriptCodeIndex; // cached script code index, or -1 if not a script
 } FuncCallCache;
 
@@ -116,25 +117,25 @@ typedef struct {
 typedef struct CallFrame {
     uint32_t savedIP;
     uint32_t savedCodeEnd;
-    uint8_t* savedBytecodeBase;
-    RValue* savedLocals;
+    uint8_t *savedBytecodeBase;
+    RValue *savedLocals;
     uint32_t savedLocalsCount;
-    const char* savedCodeName;
+    const char *savedCodeName;
     int32_t savedSavearefBalance;
-    IntIntHashMap* savedCodeLocalsSlotMap;
-    RValue* savedScriptArgs;
+    IntIntHashMap *savedCodeLocalsSlotMap;
+    RValue *savedScriptArgs;
     int32_t savedScriptArgCount;
     int32_t savedCurrentCodeIndex;
-    struct CallFrame* parent;
+    struct CallFrame *parent;
 } CallFrame;
 
 // ===[ EnvFrame - Saved context for with-statement (PushEnv/PopEnv) ]===
 typedef struct EnvFrame {
-    struct Instance* savedInstance;
-    struct Instance* savedOtherInstance; // Saved otherInstance to restore on PopEnv
-    struct Instance** instanceList; // stb_ds array of matching instances (nullptr for single-instance)
-    int32_t currentIndex;           // Current position in instanceList
-    struct EnvFrame* parent;
+    struct Instance *savedInstance;
+    struct Instance *savedOtherInstance; // Saved otherInstance to restore on PopEnv
+    struct Instance **instanceList; // stb_ds array of matching instances (nullptr for single-instance)
+    int32_t currentIndex; // Current position in instanceList
+    struct EnvFrame *parent;
 } EnvFrame;
 
 // ===[ VMStack - Upward-growing array of RValue slots ]===
@@ -150,10 +151,10 @@ struct Runner;
 typedef struct VMContext VMContext;
 
 // ===[ Builtin Functions Manager ]===
-typedef RValue (*BuiltinFunc)(VMContext* ctx, RValue* args, int32_t argCount);
+typedef RValue (*BuiltinFunc)(VMContext *ctx, RValue *args, int32_t argCount);
 
 typedef struct {
-    char* key;
+    char *key;
     BuiltinFunc value;
 } BuiltinEntry;
 
@@ -162,30 +163,30 @@ typedef struct {
 // This way data can be kept "hot" in the CPU cache or, depending on the platform, in scratchpad RAM
 typedef struct VMContext {
     // Hot: touched every instruction in the dispatch loop
-    uint8_t* bytecodeBase;
+    uint8_t *bytecodeBase;
     uint32_t ip;
     uint32_t codeEnd;
-    RValue* localVars;
+    RValue *localVars;
     uint32_t localVarCount;
-    RValue* globalVars;
+    RValue *globalVars;
     uint32_t globalVarCount;
-    ArrayMapEntry* globalArrayMap;
-    struct Instance* currentInstance;
-    struct Instance* otherInstance; // "other" instance for collision events
-    DataWin* dataWin;
-    struct Runner* runner;
+    ArrayMapEntry *globalArrayMap;
+    struct Instance *currentInstance;
+    struct Instance *otherInstance; // "other" instance for collision events
+    DataWin *dataWin;
+    struct Runner *runner;
     // BC17+: varID -> localVars slot lookup for the current code. Points into codeLocalsSlotMaps[currentCodeIndex] for BC17+, nullptr for BC16.
-    IntIntHashMap* currentCodeLocalsSlotMap;
-    FuncCallCache* funcCallCache;
-    const char* currentCodeName;
+    IntIntHashMap *currentCodeLocalsSlotMap;
+    FuncCallCache *funcCallCache;
+    const char *currentCodeName;
     int32_t currentCodeIndex; // Index into code.entries for the currently executing code
 
     // Warm: touched on calls, variable resolution, event dispatch
-    CallFrame* callStack;
+    CallFrame *callStack;
     int32_t callDepth;
-    EnvFrame* envStack; // Environment stack for with-statements (PushEnv/PopEnv)
-    RValue* scriptArgs;       // Arguments passed to current script (nullptr for non-script code)
-    int32_t scriptArgCount;   // Number of arguments passed
+    EnvFrame *envStack; // Environment stack for with-statements (PushEnv/PopEnv)
+    RValue *scriptArgs; // Arguments passed to current script (nullptr for non-script code)
+    int32_t scriptArgCount; // Number of arguments passed
     int32_t selfId;
     int32_t otherId;
     // Current event context (set by Runner_executeEvent, -1 when not in an event)
@@ -200,74 +201,108 @@ typedef struct VMContext {
     bool actionRelativeFlag; // D&D action relative flag (set by action_set_relative)
 
     // V17+ extended BREAK opcode state
-    bool* staticInitialized; // Per-code-entry flag for isstaticok/setstatic (allocated in VM_create)
+    bool *staticInitialized; // Per-code-entry flag for isstaticok/setstatic (allocated in VM_create)
     // BC17+: owner token set by BREAK_SETOWNER. Arrays whose .owner mismatches fork on write.
-    void* currentArrayOwner;
+    void *currentArrayOwner;
     // SAVEAREF/RESTOREAREF balance tracker.
     int32_t savearefBalance;
 
     // Cold: init-only or rare lookups
-    BuiltinEntry* builtinMap;
+    BuiltinEntry *builtinMap;
     bool registeredBuiltinFunctions;
+
     // funcName -> codeIndex hash map (stb_ds)
-    struct { char* key; int32_t value; }* funcMap;
+    struct {
+        char *key;
+        int32_t value;
+    } *funcMap;
+
     // codeName -> CodeLocals* hash map (stb_ds)
-    struct { char* key; CodeLocals* value; }* codeLocalsMap;
+    struct {
+        char *key;
+        CodeLocals *value;
+    } *codeLocalsMap;
+
     // BC17+: A map of CODE indexes -> localVars slot lookup map
-    IntIntHashMap* codeLocalsSlotMaps;
+    IntIntHashMap *codeLocalsSlotMaps;
+
     // varName -> varID hash map for global variables (stb_ds)
-    struct { char* key; int32_t value; }* globalVarNameMap;
+    struct {
+        char *key;
+        int32_t value;
+    } *globalVarNameMap;
+
     // varName -> varID hash map for self/instance-scoped variables (stb_ds).
-    struct { char* key; int32_t value; }* selfVarNameMap;
+    struct {
+        char *key;
+        int32_t value;
+    } *selfVarNameMap;
+
     // "codeName\tfuncName" -> true, for deduplicating unknown function warnings
-    StringBooleanEntry* loggedUnknownFuncs;
+    StringBooleanEntry *loggedUnknownFuncs;
     // "codeName\tfuncName" -> true, for deduplicating stubbed function warnings
-    StringBooleanEntry* loggedStubbedFuncs;
+    StringBooleanEntry *loggedStubbedFuncs;
+
     // Cross-reference map for disassembler: targetCodeIndex -> stb_ds array of callerCodeIndex
-    struct { int32_t key; int32_t* value; }* crossRefMap;
+    struct {
+        int32_t key;
+        int32_t *value;
+    } *crossRefMap;
+
     bool alwaysLogUnknownFunctions;
     bool alwaysLogStubbedFunctions;
 #ifdef ENABLE_VM_TRACING
-    StringBooleanEntry* varReadsToBeTraced;
-    StringBooleanEntry* varWritesToBeTraced;
-    StringBooleanEntry* functionCallsToBeTraced;
-    StringBooleanEntry* alarmsToBeTraced;
-    StringBooleanEntry* instanceLifecyclesToBeTraced;
-    StringBooleanEntry* eventsToBeTraced;
-    StringBooleanEntry* opcodesToBeTraced;
-    StringBooleanEntry* stackToBeTraced;
-    StringBooleanEntry* tilesToBeTraced;
+    StringBooleanEntry *varReadsToBeTraced;
+    StringBooleanEntry *varWritesToBeTraced;
+    StringBooleanEntry *functionCallsToBeTraced;
+    StringBooleanEntry *alarmsToBeTraced;
+    StringBooleanEntry *instanceLifecyclesToBeTraced;
+    StringBooleanEntry *eventsToBeTraced;
+    StringBooleanEntry *opcodesToBeTraced;
+    StringBooleanEntry *stackToBeTraced;
+    StringBooleanEntry *tilesToBeTraced;
     // Minimum frameCount before opcode/stack traces are emitted (default 0)
     int traceBytecodeAfterFrame;
 #endif
-    Profiler* profiler;
+    Profiler *profiler;
 
     // Stack at the end because it is a big chunky boi (we don't want it pushing fields around)
     VMStack stack;
 } VMContext;
 
 // ===[ Public API ]===
-VMContext* VM_create(DataWin* dataWin);
-void VM_reset(VMContext* ctx);
-RValue VM_executeCode(VMContext* ctx, int32_t codeIndex);
-RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t argCount);
-void VM_free(VMContext* ctx);
-bool VM_isObjectOrDescendant(DataWin* dataWin, int32_t objectIndex, int32_t targetObjectIndex);
-void VM_buildCrossReferences(VMContext* ctx);
-void VM_disassemble(VMContext* ctx, int32_t codeIndex);
-void VM_registerBuiltin(VMContext* ctx, const char* name, BuiltinFunc func);
-BuiltinFunc VM_findBuiltin(VMContext* ctx, const char* name);
-RValue VM_createArray(VMContext* ctx);
-void VM_arraySet(VMContext* ctx, RValue* arrayRef, int32_t index, RValue val);
+VMContext *VM_create(DataWin *dataWin);
 
-static const char* VM_getCallerName(VMContext* ctx) {
+void VM_reset(VMContext *ctx);
+
+RValue VM_executeCode(VMContext *ctx, int32_t codeIndex);
+
+RValue VM_callCodeIndex(VMContext *ctx, int32_t codeIndex, RValue *args, int32_t argCount);
+
+void VM_free(VMContext *ctx);
+
+bool VM_isObjectOrDescendant(DataWin *dataWin, int32_t objectIndex, int32_t targetObjectIndex);
+
+void VM_buildCrossReferences(VMContext *ctx);
+
+void VM_disassemble(VMContext *ctx, int32_t codeIndex);
+
+void VM_registerBuiltin(VMContext *ctx, const char *name, BuiltinFunc func);
+
+BuiltinFunc VM_findBuiltin(VMContext *ctx, const char *name);
+
+RValue VM_createArray(VMContext *ctx);
+
+void VM_arraySet(VMContext *ctx, RValue *arrayRef, int32_t index, RValue val);
+
+static const char *VM_getCallerName(VMContext *ctx) {
     return ctx->currentCodeName != nullptr ? ctx->currentCodeName : "<unknown>";
 }
 
-static char* VM_createDedupKey(const char* callerName, const char* funcName) {
+static char *VM_createDedupKey(const char *callerName, const char *funcName) {
     // Build dedup key: "callerName\tfuncName"
     size_t keyLen = strlen(callerName) + 1 + strlen(funcName) + 1;
-    char* dedupKey = safeMalloc(keyLen);
+    char *dedupKey = safeMalloc(keyLen);
     snprintf(dedupKey, keyLen, "%s\t%s", callerName, funcName);
     return dedupKey;
 }

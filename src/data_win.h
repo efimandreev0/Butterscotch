@@ -43,12 +43,12 @@ typedef struct {
     bool lazyLoadRooms;
 
     // When lazyLoadRooms is true, this list indicates which rooms should be loaded during load time instead of demand. They will also not be freed.
-    StringBooleanEntry* eagerlyLoadedRooms;
+    StringBooleanEntry *eagerlyLoadedRooms;
 
     // 3DS / low-memory knobs
     bool skipTextureBlobData;
     bool skipAudioBlobData;
-    const char* codeCachePath;
+    const char *codeCachePath;
 
     // Optional progress callback, called before each chunk is parsed.
     // chunkName: 4-character chunk name (e.g. "GEN8", "SPRT")
@@ -56,21 +56,22 @@ typedef struct {
     // totalChunks: total number of chunks in the file
     // dataWin: the DataWin being populated (earlier chunks may already be parsed)
     // userData: user-provided pointer passed through from the options
-    void (*progressCallback)(const char* chunkName, int chunkIndex, int totalChunks, DataWin* dataWin, void* userData);
-    void* progressCallbackUserData;
+    void (*progressCallback)(const char *chunkName, int chunkIndex, int totalChunks, DataWin *dataWin, void *userData);
+
+    void *progressCallbackUserData;
 } DataWinParserOptions;
 
 // ===[ GEN8 - General Info ]===
 typedef struct {
     uint8_t isDebuggerDisabled;
     uint8_t bytecodeVersion;
-    const char* fileName;
-    const char* config;
+    const char *fileName;
+    const char *config;
     uint32_t lastObj;
     uint32_t lastTile;
     uint32_t gameID;
     uint8_t directPlayGuid[16];
-    const char* name;
+    const char *name;
     uint32_t major;
     uint32_t minor;
     uint32_t release;
@@ -81,20 +82,20 @@ typedef struct {
     uint32_t licenseCRC32;
     uint8_t licenseMD5[16];
     uint64_t timestamp;
-    const char* displayName;
+    const char *displayName;
     uint64_t activeTargets;
     uint64_t functionClassifications;
     int32_t steamAppID;
     uint32_t debuggerPort;
     uint32_t roomOrderCount;
-    int32_t* roomOrder;
+    int32_t *roomOrder;
     float gms2FPS;
 } Gen8;
 
 // ===[ OPTN - Options ]===
 typedef struct {
-    const char* name;
-    const char* value;
+    const char *name;
+    const char *value;
 } OptnConstant;
 
 typedef struct {
@@ -111,64 +112,64 @@ typedef struct {
     uint32_t loadImage;
     uint32_t loadAlpha;
     uint32_t constantCount;
-    OptnConstant* constants;
+    OptnConstant *constants;
 } Optn;
 
 // ===[ LANG - Languages ]===
 typedef struct {
-    const char* name;
-    const char* region;
+    const char *name;
+    const char *region;
     uint32_t entryCount;
-    const char** entries;
+    const char **entries;
 } Language;
 
 typedef struct {
     uint32_t unknown1;
     uint32_t languageCount;
     uint32_t entryCount;
-    const char** entryIds;
-    Language* languages;
+    const char **entryIds;
+    Language *languages;
 } Lang;
 
 // ===[ EXTN - Extensions ]===
 typedef struct {
-    const char* name;
+    const char *name;
     uint32_t id;
     uint32_t kind;
     uint32_t retType;
-    const char* extName;
+    const char *extName;
     uint32_t argumentCount;
-    uint32_t* arguments;
+    uint32_t *arguments;
 } ExtensionFunction;
 
 typedef struct {
-    const char* filename;
-    const char* cleanupScript;
-    const char* initScript;
+    const char *filename;
+    const char *cleanupScript;
+    const char *initScript;
     uint32_t kind;
     uint32_t functionCount;
-    ExtensionFunction* functions;
+    ExtensionFunction *functions;
 } ExtensionFile;
 
 typedef struct {
-    const char* folderName;
-    const char* name;
-    const char* className;
+    const char *folderName;
+    const char *name;
+    const char *className;
     uint32_t fileCount;
-    ExtensionFile* files;
+    ExtensionFile *files;
 } Extension;
 
 typedef struct {
     uint32_t count;
-    Extension* extensions;
+    Extension *extensions;
 } Extn;
 
 // ===[ SOND - Sounds ]===
 typedef struct {
-    const char* name;
+    const char *name;
     uint32_t flags;
-    const char* type;
-    const char* file;
+    const char *type;
+    const char *file;
     uint32_t effects;
     float volume;
     float pitch;
@@ -178,22 +179,22 @@ typedef struct {
 
 typedef struct {
     uint32_t count;
-    Sound* sounds;
+    Sound *sounds;
 } Sond;
 
 // ===[ AGRP - Audio Groups ]===
 typedef struct {
-    const char* name;
+    const char *name;
 } AudioGroup;
 
 typedef struct {
     uint32_t count;
-    AudioGroup* audioGroups;
+    AudioGroup *audioGroups;
 } Agrp;
 
 // ===[ SPRT - Sprites ]===
 typedef struct {
-    const char* name;
+    const char *name;
     uint32_t width;
     uint32_t height;
     int32_t marginLeft;
@@ -213,24 +214,25 @@ typedef struct {
     bool gms2PlaybackSpeedType;
     bool specialType;
     uint32_t textureCount;
-    int32_t* tpagIndices;    // resolved TPAG indices (one per frame); -1 for unresolved
-    uint32_t maskCount;       // number of collision masks (one per frame, or 0)
-    uint8_t** masks;          // array of maskCount packed bit arrays (nullptr if none)
+    int32_t *tpagIndices; // resolved TPAG indices (one per frame); -1 for unresolved
+    uint32_t maskCount; // number of collision masks (one per frame, or 0)
+    uint8_t **masks; // array of maskCount packed bit arrays (nullptr if none)
 } Sprite;
 
 typedef struct {
     uint32_t count;
-    uint32_t parsedCount; // number of sprites loaded from SPRT; slots >= parsedCount are runtime-allocated and own their `name`
-    Sprite* sprites;
+    uint32_t parsedCount;
+    // number of sprites loaded from SPRT; slots >= parsedCount are runtime-allocated and own their `name`
+    Sprite *sprites;
 } Sprt;
 
 // ===[ BGND - Backgrounds ]===
 typedef struct {
-    const char* name;
+    const char *name;
     bool transparent;
     bool smooth;
     bool preload;
-    int32_t tpagIndex;      // resolved TPAG index, -1 if unresolved
+    int32_t tpagIndex; // resolved TPAG index, -1 if unresolved
     uint32_t gms2UnknownAlways2;
     uint32_t gms2TileWidth;
     uint32_t gms2TileHeight;
@@ -248,7 +250,7 @@ typedef struct {
 
 typedef struct {
     uint32_t count;
-    Background* backgrounds;
+    Background *backgrounds;
 } Bgnd;
 
 // ===[ PATH - Paths ]===
@@ -272,53 +274,53 @@ typedef struct {
 } PathPositionResult;
 
 typedef struct {
-    const char* name;
+    const char *name;
     bool isSmooth;
     bool isClosed;
     uint32_t precision;
     uint32_t pointCount;
-    PathPoint* points;
+    PathPoint *points;
     uint32_t internalPointCount;
-    InternalPathPoint* internalPoints;
+    InternalPathPoint *internalPoints;
     float length; // total arc length
 } GamePath;
 
 typedef struct {
     uint32_t count;
-    GamePath* paths;
+    GamePath *paths;
 } PathChunk;
 
 // ===[ SCPT - Scripts ]===
 typedef struct {
-    const char* name;
+    const char *name;
     int32_t codeId;
 } Script;
 
 typedef struct {
     uint32_t count;
-    Script* scripts;
+    Script *scripts;
 } Scpt;
 
 // ===[ GLOB - Global Init Scripts ]===
 typedef struct {
     uint32_t count;
-    int32_t* codeIds;
+    int32_t *codeIds;
 } Glob;
 
 // ===[ SHDR - Shaders ]===
 typedef struct {
-    const char* name;
+    const char *name;
     uint32_t type;
-    const char* glslES_Vertex;
-    const char* glslES_Fragment;
-    const char* glsl_Vertex;
-    const char* glsl_Fragment;
-    const char* hlsl9_Vertex;
-    const char* hlsl9_Fragment;
+    const char *glslES_Vertex;
+    const char *glslES_Fragment;
+    const char *glsl_Vertex;
+    const char *glsl_Fragment;
+    const char *hlsl9_Vertex;
+    const char *hlsl9_Fragment;
     uint32_t hlsl11_VertexOffset;
     uint32_t hlsl11_PixelOffset;
     uint32_t vertexAttributeCount;
-    const char** vertexAttributes;
+    const char **vertexAttributes;
     int32_t version;
     uint32_t pssl_VertexOffset;
     uint32_t pssl_VertexLen;
@@ -336,7 +338,7 @@ typedef struct {
 
 typedef struct {
     uint32_t count;
-    Shader* shaders;
+    Shader *shaders;
 } Shdr;
 
 // ===[ FONT - Fonts ]===
@@ -354,12 +356,12 @@ typedef struct {
     int16_t shift;
     int16_t offset;
     uint16_t kerningCount;
-    KerningPair* kerning;
+    KerningPair *kerning;
 } FontGlyph;
 
 typedef struct {
-    const char* name;
-    const char* displayName;
+    const char *name;
+    const char *displayName;
     uint32_t emSize;
     bool bold;
     bool italic;
@@ -367,32 +369,33 @@ typedef struct {
     uint8_t charset;
     uint8_t antiAliasing;
     uint32_t rangeEnd;
-    int32_t tpagIndex;      // resolved TPAG index, -1 if unresolved
+    int32_t tpagIndex; // resolved TPAG index, -1 if unresolved
     float scaleX;
     float scaleY;
     int32_t ascenderOffset; // bytecodeVersion >= 17 only
-    uint32_t ascender;  // GMS 2022.2+ (0 when absent)
+    uint32_t ascender; // GMS 2022.2+ (0 when absent)
     uint32_t sdfSpread; // GMS 2023.2 nonLTS+ (0 when absent)
     uint32_t lineHeight; // GMS 2023.6+ (0 when absent)
     bool hasAscender;
     bool hasSDFSpread;
     bool hasLineHeight;
     uint32_t glyphCount;
-    FontGlyph* glyphs;
-    uint32_t maxGlyphHeight; // Computed after glyph parse: max sourceHeight across glyphs; HTML5 runner uses this for line stride (see yyFont.TextHeight)
+    FontGlyph *glyphs;
+    uint32_t maxGlyphHeight;
+    // Computed after glyph parse: max sourceHeight across glyphs; HTML5 runner uses this for line stride (see yyFont.TextHeight)
     // ASCII fast-path lookup: glyphLUT[ch] for ch < 128, populated by Font_buildGlyphLUT after glyphs[] is filled.
     // Lets TextUtils_findGlyph skip the linear scan over glyphs[] for the (overwhelmingly common) ASCII case.
-    FontGlyph* glyphLUT[128];
+    FontGlyph *glyphLUT[128];
     // Sprite font fields (only valid when isSpriteFont is true)
     bool isSpriteFont;
     int32_t spriteIndex; // source sprite index (-1 for regular fonts)
 } Font;
 
 // Builds the ASCII fast-path lookup table from font->glyphs. Call after glyphs[] is fully populated.
-static inline void Font_buildGlyphLUT(Font* font) {
+static inline void Font_buildGlyphLUT(Font *font) {
     memset(font->glyphLUT, 0, sizeof(font->glyphLUT));
     repeat(font->glyphCount, i) {
-        FontGlyph* g = &font->glyphs[i];
+        FontGlyph *g = &font->glyphs[i];
         if (128 > g->character && font->glyphLUT[g->character] == nullptr) {
             font->glyphLUT[g->character] = g;
         }
@@ -401,7 +404,7 @@ static inline void Font_buildGlyphLUT(Font* font) {
 
 typedef struct {
     uint32_t count;
-    Font* fonts;
+    Font *fonts;
 } FontChunk;
 
 // ===[ EventAction (shared by TMLN and OBJT) ]===
@@ -413,7 +416,7 @@ typedef struct {
     bool isQuestion;
     bool useApplyTo;
     uint32_t exeType;
-    const char* actionName;
+    const char *actionName;
     int32_t codeId;
     uint32_t argumentCount;
     int32_t who;
@@ -426,18 +429,18 @@ typedef struct {
 typedef struct {
     uint32_t step;
     uint32_t actionCount;
-    EventAction* actions;
+    EventAction *actions;
 } TimelineMoment;
 
 typedef struct {
-    const char* name;
+    const char *name;
     uint32_t momentCount;
-    TimelineMoment* moments;
+    TimelineMoment *moments;
 } Timeline;
 
 typedef struct {
     uint32_t count;
-    Timeline* timelines;
+    Timeline *timelines;
 } Tmln;
 
 // ===[ OBJT - Game Objects ]===
@@ -446,12 +449,12 @@ typedef struct {
 typedef struct {
     uint32_t eventSubtype;
     uint32_t actionCount;
-    EventAction* actions;
+    EventAction *actions;
 } ObjectEvent;
 
 typedef struct {
     uint32_t eventCount;
-    ObjectEvent* events;
+    ObjectEvent *events;
 } ObjectEventList;
 
 typedef struct {
@@ -460,7 +463,7 @@ typedef struct {
 } PhysicsVertex;
 
 typedef struct {
-    const char* name;
+    const char *name;
     int32_t spriteId;
     bool visible;
     bool managed; // GMS 2022.5+
@@ -481,13 +484,13 @@ typedef struct {
     float friction;
     bool awake;
     bool kinematic;
-    PhysicsVertex* physicsVertices;
+    PhysicsVertex *physicsVertices;
     ObjectEventList eventLists[OBJT_EVENT_TYPE_COUNT];
 } GameObject;
 
 typedef struct {
     uint32_t count;
-    GameObject* objects;
+    GameObject *objects;
 } Objt;
 
 // ===[ ROOM - Rooms ]===
@@ -552,8 +555,7 @@ typedef struct {
     uint32_t color;
 } RoomTile;
 
-enum RoomLayerType : uint32_t
-{
+enum RoomLayerType : uint32_t {
     RoomLayerType_Path = 0,
     RoomLayerType_Background = 1,
     RoomLayerType_Instances = 2,
@@ -564,7 +566,7 @@ enum RoomLayerType : uint32_t
 };
 
 typedef struct {
-    const char* name;
+    const char *name;
     int32_t spriteIndex; // Direct index into SPRT chunk
     int32_t x;
     int32_t y;
@@ -599,18 +601,18 @@ typedef struct {
 
 typedef struct {
     uint32_t instanceCount;
-    uint32_t* instanceIds;
+    uint32_t *instanceIds;
 } RoomLayerInstancesData;
 
 typedef struct {
     int32_t backgroundIndex; // tileset (BGND index)
     uint32_t tilesX; // grid width in tiles
     uint32_t tilesY; // grid height in tiles
-    uint32_t* tileData; // flat array of tilesX * tilesY tile values (row-major)
+    uint32_t *tileData; // flat array of tilesX * tilesY tile values (row-major)
 } RoomLayerTilesData;
 
 typedef struct {
-    const char* name;
+    const char *name;
     uint32_t id;
     uint32_t type;
     int32_t depth;
@@ -627,8 +629,8 @@ typedef struct {
 
 typedef struct {
     // Scalar header: always valid regardless of payloadLoaded.
-    const char* name;
-    const char* caption;
+    const char *name;
+    const char *caption;
     uint32_t width;
     uint32_t height;
     uint32_t speed;
@@ -654,22 +656,23 @@ typedef struct {
     uint32_t tilesFileOffset;
     uint32_t layersFileOffset; // 0 if pre-GMS2
     bool payloadLoaded;
-    bool eagerlyLoaded; // set if this room's name matched DataWinParserOptions.eagerlyLoadedRooms; payload is preserved across transitions
+    bool eagerlyLoaded;
+    // set if this room's name matched DataWinParserOptions.eagerlyLoadedRooms; payload is preserved across transitions
 
     // Payload: valid only when payloadLoaded is true. Zeroed/null otherwise. Backgrounds/views point to a heap array of 8 entries when loaded.
-    RoomBackground* backgrounds;
-    RoomView* views;
+    RoomBackground *backgrounds;
+    RoomView *views;
     uint32_t gameObjectCount;
-    RoomGameObject* gameObjects;
+    RoomGameObject *gameObjects;
     uint32_t tileCount;
-    RoomTile* tiles;
+    RoomTile *tiles;
     uint32_t layerCount;
-    RoomLayer* layers;
+    RoomLayer *layers;
 } Room;
 
 typedef struct {
     uint32_t count;
-    Room* rooms;
+    Room *rooms;
 } RoomChunk;
 
 // ===[ TPAG - Texture Page Items ]===
@@ -689,12 +692,12 @@ typedef struct {
 
 typedef struct {
     uint32_t count;
-    TexturePageItem* items;
+    TexturePageItem *items;
 } Tpag;
 
 // ===[ CODE - Code Entries ]===
 typedef struct {
-    const char* name;
+    const char *name;
     uint32_t length;
     uint16_t localsCount;
     uint16_t argumentsCount;
@@ -704,12 +707,12 @@ typedef struct {
 
 typedef struct {
     uint32_t count;
-    CodeEntry* entries;
+    CodeEntry *entries;
 } Code;
 
 // ===[ VARI - Variables ]===
 typedef struct {
-    const char* name;
+    const char *name;
     int32_t instanceType;
     int32_t varID;
     uint32_t occurrences;
@@ -722,12 +725,12 @@ typedef struct {
     uint32_t varCount2;
     uint32_t maxLocalVarCount;
     uint32_t variableCount;
-    Variable* variables;
+    Variable *variables;
 } Vari;
 
 // ===[ FUNC - Functions & Code Locals ]===
 typedef struct {
-    const char* name;
+    const char *name;
     uint32_t occurrences;
     uint32_t firstAddress;
 } Function;
@@ -736,26 +739,26 @@ typedef struct {
     // UndertaleModTool calls this field "Index", but that's because that's how it seemingly worked in pre-bytecode version 17
     // After bytecode version 17+, this has shown that this is actually the varID of the local variable (it matches the Variable.varID)
     uint32_t varID;
-    const char* name;
+    const char *name;
 } LocalVar;
 
 typedef struct {
-    const char* name;
+    const char *name;
     uint32_t localVarCount;
-    LocalVar* locals;
+    LocalVar *locals;
 } CodeLocals;
 
 typedef struct {
     uint32_t functionCount;
-    Function* functions;
+    Function *functions;
     uint32_t codeLocalsCount;
-    CodeLocals* codeLocals;
+    CodeLocals *codeLocals;
 } Func;
 
 // ===[ STRG - Strings ]===
 typedef struct {
     uint32_t count;
-    const char** strings; // pointers into strgBuffer
+    const char **strings; // pointers into strgBuffer
 } Strg;
 
 // ===[ TXTR - Embedded Textures ]===
@@ -763,29 +766,29 @@ typedef struct {
     uint32_t scaled;
     uint32_t generatedMips; // GMS 2.0.6+: number of generated mipmaps (0 for GMS 1.x)
     uint32_t textureBlockSize; // GMS 2022.3+: size of the texture block (0 for older versions)
-    int32_t textureWidth;  // GMS 2022.9+
+    int32_t textureWidth; // GMS 2022.9+
     int32_t textureHeight; // GMS 2022.9+
-    int32_t indexInGroup;  // GMS 2022.9+
+    int32_t indexInGroup; // GMS 2022.9+
     uint32_t blobOffset; // absolute file offset to PNG data
     uint32_t blobSize; // computed size of blob data
-    uint8_t* blobData; // owned copy of PNG data
+    uint8_t *blobData; // owned copy of PNG data
 } Texture;
 
 typedef struct {
     uint32_t count;
-    Texture* textures;
+    Texture *textures;
 } Txtr;
 
 // ===[ AUDO - Embedded Audio ]===
 typedef struct {
     uint32_t dataOffset; // absolute file offset to audio data
-    uint32_t dataSize;   // length of audio data
-    uint8_t* data;       // owned copy of audio data
+    uint32_t dataSize; // length of audio data
+    uint8_t *data; // owned copy of audio data
 } AudioEntry;
 
 typedef struct {
     uint32_t count;
-    AudioEntry* entries;
+    AudioEntry *entries;
 } Audo;
 
 // ===[ Detected Format ]===
@@ -800,11 +803,11 @@ typedef struct {
 
 // ===[ Top-level DataWin container ]===
 typedef struct DataWin {
-    uint8_t* strgBuffer;        // owned copy of STRG chunk raw data
+    uint8_t *strgBuffer; // owned copy of STRG chunk raw data
     // Absolute file offset of strgBuffer[0], we need this because data.win stores absolute offsets (from the beginning of the data.win file) instead of relative offsets
     size_t strgBufferBase;
 
-    uint8_t* bytecodeBuffer;     // owned copy of CODE bytecode blob
+    uint8_t *bytecodeBuffer; // owned copy of CODE bytecode blob
     // Absolute file offset of bytecodeBuffer[0], we need this because data.win stores absolute offsets (from the beginning of the data.win file) instead of relative offsets
     size_t bytecodeBufferBase;
 
@@ -838,26 +841,35 @@ typedef struct DataWin {
     // Held open across the whole session when DataWinParserOptions.lazyLoadRooms is true.
     // Used by DataWin_loadRoomPayload to satisfy on-demand room payload reads.
     // nullptr when lazy loading is disabled. Closed by DataWin_free.
-    FILE* lazyLoadFile;
-    char* lazyLoadFilePath;     // owned strdup of the original file path, for diagnostics
-    bool lazyLoadRooms;          // mirrors the parser option so Runner can branch without re-reading options
-    char* filePath;              // owned strdup of the original data.win path, used by 3DS-side caches
+    FILE *lazyLoadFile;
+    char *lazyLoadFilePath; // owned strdup of the original file path, for diagnostics
+    bool lazyLoadRooms; // mirrors the parser option so Runner can branch without re-reading options
+    char *filePath; // owned strdup of the original data.win path, used by 3DS-side caches
 } DataWin;
 
-DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options);
-void DataWin_free(DataWin* dataWin);
-void DataWin_printDebugSummary(DataWin* dataWin);
+DataWin *DataWin_parse(const char *filePath, DataWinParserOptions options);
+
+void DataWin_free(DataWin *dataWin);
+
+void DataWin_printDebugSummary(DataWin *dataWin);
+
 // Lazy room payload management. DataWin_loadRoomPayload is a no-op when the payload is already loaded.
-void DataWin_loadRoomPayload(DataWin* dw, int32_t roomIndex);
-void DataWin_freeRoomPayload(Room* room);
+void DataWin_loadRoomPayload(DataWin *dw, int32_t roomIndex);
+
+void DataWin_freeRoomPayload(Room *room);
+
 // Finds a reusable dynamic Sprite slot (textureCount == 0) at or above `startIndex`, or appends a new one.
-uint32_t DataWin_allocSpriteSlot(DataWin* dw, uint32_t startIndex);
+uint32_t DataWin_allocSpriteSlot(DataWin *dw, uint32_t startIndex);
+
 // Compares the detected effective GMS version (not the raw GEN8 version) against a lower bound.
 // Returns true if the detected version >= (major, minor, release, build).
 //
 // Mirrors UndertaleModTool's IsVersionAtLeast.
-bool DataWin_isVersionAtLeast(const DataWin* dw, uint32_t major, uint32_t minor, uint32_t release, uint32_t build);
+bool DataWin_isVersionAtLeast(const DataWin *dw, uint32_t major, uint32_t minor, uint32_t release, uint32_t build);
+
 // Raises the detected effective version to at least (major, minor, release, build). No-op if the detected version is already >= the target.
-void DataWin_bumpVersionTo(DataWin* dw, uint32_t major, uint32_t minor, uint32_t release, uint32_t build);
-void GamePath_computeInternal(GamePath* path);
-PathPositionResult GamePath_getPosition(GamePath* path, float t);
+void DataWin_bumpVersionTo(DataWin *dw, uint32_t major, uint32_t minor, uint32_t release, uint32_t build);
+
+void GamePath_computeInternal(GamePath *path);
+
+PathPositionResult GamePath_getPosition(GamePath *path, float t);

@@ -43,35 +43,40 @@
 #define VK_F12     123
 
 typedef struct RunnerKeyboardState {
-    bool keyDown[GML_KEY_COUNT];     // Currently held
-    bool keyPressed[GML_KEY_COUNT];  // Just pressed this frame
+    bool keyDown[GML_KEY_COUNT]; // Currently held
+    bool keyPressed[GML_KEY_COUNT]; // Just pressed this frame
     bool keyReleased[GML_KEY_COUNT]; // Just released this frame
-    int32_t lastKey;                 // Last key pressed (for keyboard_key variable)
-    char lastChar[2];                // Last character pressed (for keyboard_char variable)
+    int32_t lastKey; // Last key pressed (for keyboard_key variable)
+    char lastChar[2]; // Last character pressed (for keyboard_char variable)
 } RunnerKeyboardState;
 
 // Lifecycle
-RunnerKeyboardState* RunnerKeyboard_create(void);
-void RunnerKeyboard_free(RunnerKeyboardState* kb);
+RunnerKeyboardState *RunnerKeyboard_create(void);
+
+void RunnerKeyboard_free(RunnerKeyboardState *kb);
 
 // Called at the start of each frame to clear pressed/released arrays
-void RunnerKeyboard_beginFrame(RunnerKeyboardState* kb);
+void RunnerKeyboard_beginFrame(RunnerKeyboardState *kb);
 
 // Called by platform layer when a key is pressed/released (gmlKeyCode = GML vk_ code)
-void RunnerKeyboard_onKeyDown(RunnerKeyboardState* kb, int32_t gmlKeyCode);
-void RunnerKeyboard_onKeyUp(RunnerKeyboardState* kb, int32_t gmlKeyCode);
+void RunnerKeyboard_onKeyDown(RunnerKeyboardState *kb, int32_t gmlKeyCode);
+
+void RunnerKeyboard_onKeyUp(RunnerKeyboardState *kb, int32_t gmlKeyCode);
 
 // Called by platform layer when a character is typed
-void RunnerKeyboard_onCharacter(RunnerKeyboardState* kb, unsigned int character);
+void RunnerKeyboard_onCharacter(RunnerKeyboardState *kb, unsigned int character);
 
 // GML function queries
-bool RunnerKeyboard_check(RunnerKeyboardState* kb, int32_t gmlKeyCode);
-bool RunnerKeyboard_checkPressed(RunnerKeyboardState* kb, int32_t gmlKeyCode);
-bool RunnerKeyboard_checkReleased(RunnerKeyboardState* kb, int32_t gmlKeyCode);
+bool RunnerKeyboard_check(RunnerKeyboardState *kb, int32_t gmlKeyCode);
+
+bool RunnerKeyboard_checkPressed(RunnerKeyboardState *kb, int32_t gmlKeyCode);
+
+bool RunnerKeyboard_checkReleased(RunnerKeyboardState *kb, int32_t gmlKeyCode);
 
 // Simulated press/release (used by keyboard_key_press/keyboard_key_release GML functions)
-void RunnerKeyboard_simulatePress(RunnerKeyboardState* kb, int32_t gmlKeyCode);
-void RunnerKeyboard_simulateRelease(RunnerKeyboardState* kb, int32_t gmlKeyCode);
+void RunnerKeyboard_simulatePress(RunnerKeyboardState *kb, int32_t gmlKeyCode);
+
+void RunnerKeyboard_simulateRelease(RunnerKeyboardState *kb, int32_t gmlKeyCode);
 
 // Clear a specific key's state
-void RunnerKeyboard_clear(RunnerKeyboardState* kb, int32_t gmlKeyCode);
+void RunnerKeyboard_clear(RunnerKeyboardState *kb, int32_t gmlKeyCode);

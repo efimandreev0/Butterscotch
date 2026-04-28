@@ -27,7 +27,7 @@ static RValue cloneArrayMapValue(RValue val) {
     return val;
 }
 
-static void arrayMapPutOwned(ArrayMapEntry** map, int64_t key, RValue val) {
+static void arrayMapPutOwned(ArrayMapEntry **map, int64_t key, RValue val) {
     ptrdiff_t idx = hmgeti(*map, key);
     RValue copy = cloneArrayMapValue(val);
     if (idx >= 0) {
@@ -38,8 +38,8 @@ static void arrayMapPutOwned(ArrayMapEntry** map, int64_t key, RValue val) {
     }
 }
 
-Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, GMLReal x, GMLReal y) {
-    Instance* inst = safeCalloc(1, sizeof(Instance));
+Instance *Instance_create(uint32_t instanceId, int32_t objectIndex, GMLReal x, GMLReal y) {
+    Instance *inst = safeCalloc(1, sizeof(Instance));
     inst->instanceId = instanceId;
     inst->objectIndex = objectIndex;
     inst->x = (float) x;
@@ -83,7 +83,7 @@ Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, GMLReal x, G
     return inst;
 }
 
-void Instance_free(Instance* instance) {
+void Instance_free(Instance *instance) {
     if (instance == nullptr) return;
 
     // Free owned strings and decRef owned arrays in selfVars hashmap, then release the entries buffer.
@@ -98,7 +98,7 @@ void Instance_free(Instance* instance) {
     free(instance);
 }
 
-void Instance_copyFields(Instance* source, Instance* destination) {
+void Instance_copyFields(Instance *source, Instance *destination) {
     destination->x = source->x;
     destination->y = source->y;
     destination->xprevious = source->xprevious;
@@ -143,7 +143,7 @@ void Instance_copyFields(Instance* source, Instance* destination) {
 
     // Deep-copy self variables (Instance_setSelfVar handles string duplication + array incRef)
     repeat(source->selfVars.capacity, i) {
-        IntRValueEntry* entry = &source->selfVars.entries[i];
+        IntRValueEntry *entry = &source->selfVars.entries[i];
         if (entry->key != INT_RVALUE_HASHMAP_EMPTY_KEY) {
             Instance_setSelfVar(destination, entry->key, entry->value);
         }
@@ -155,7 +155,7 @@ void Instance_copyFields(Instance* source, Instance* destination) {
 }
 
 // Compute speed and direction from hspeed/vspeed (HTML5: Compute_Speed1)
-void Instance_computeSpeedFromComponents(Instance* inst) {
+void Instance_computeSpeedFromComponents(Instance *inst) {
     // Direction
     if (inst->hspeed == 0.0f) {
         if (inst->vspeed > 0.0f) {
@@ -187,7 +187,7 @@ void Instance_computeSpeedFromComponents(Instance* inst) {
 }
 
 // Compute hspeed/vspeed from speed and direction (HTML5: Compute_Speed2)
-void Instance_computeComponentsFromSpeed(Instance* inst) {
+void Instance_computeComponentsFromSpeed(Instance *inst) {
     inst->hspeed = (float) (inst->speed * clampFloat(GMLReal_cos(inst->direction * (M_PI / 180.0))));
     inst->vspeed = (float) (-inst->speed * clampFloat(GMLReal_sin(inst->direction * (M_PI / 180.0))));
 

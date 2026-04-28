@@ -20,60 +20,64 @@
 typedef struct GMLArrayRow {
     int32_t length;
     int32_t capacity;
-    RValue* data;
+    RValue *data;
 } GMLArrayRow;
 
 typedef struct GMLArray {
     int32_t refCount;
     int32_t rowCount; // Highest touched row index + 1.
     int32_t rowCapacity; // Allocated slots in rows[].
-    void* owner;
-    GMLArrayRow* rows;
+    void *owner;
+    GMLArrayRow *rows;
 } GMLArray;
 
-GMLArray* GMLArray_create(int32_t initialLength);
-void GMLArray_incRef(GMLArray* arr);
+GMLArray *GMLArray_create(int32_t initialLength);
+
+void GMLArray_incRef(GMLArray *arr);
+
 // Decrement refCount. If it reaches 0, free all inner RValues + row buffers + struct. Safe on nullptr.
-void GMLArray_decRef(GMLArray* arr);
+void GMLArray_decRef(GMLArray *arr);
+
 // Deep copy. Every inner owned-string is strdup'd. Nested arrays have their refCount bumped (shared by default).
 // New array starts at refCount=1, same shape as src, owner=newOwner.
-GMLArray* GMLArray_clone(GMLArray* src, void* newOwner);
+GMLArray *GMLArray_clone(GMLArray *src, void *newOwner);
+
 // Ensure flat index (minLength - 1) is writable: grow row (idx / STRIDE) to at least (col + 1) entries, filling gaps with RVALUE_UNDEFINED.
-void GMLArray_growTo(GMLArray* arr, int32_t minLength);
+void GMLArray_growTo(GMLArray *arr, int32_t minLength);
 
 // Pointer to the slot at flat index, or nullptr if out of range. Call GMLArray_growTo first if writing.
 
-static inline RValue* GMLArray_slot(GMLArray* arr, int32_t index) {
+static inline RValue *GMLArray_slot(GMLArray *arr, int32_t index) {
     if (arr == nullptr || 0 > index) return nullptr;
     if (GML_ARRAY_STRIDE > index) {
         // Fast path: For the common 32000 > idx (row 0), skip the div/mod entirely.
         if (arr->rowCount == 0) return nullptr;
-        GMLArrayRow* row0 = &arr->rows[0];
+        GMLArrayRow *row0 = &arr->rows[0];
         if (index >= row0->length) return nullptr;
         return &row0->data[index];
     }
     int32_t row = index / GML_ARRAY_STRIDE;
     int32_t col = index % GML_ARRAY_STRIDE;
     if (row >= arr->rowCount) return nullptr;
-    GMLArrayRow* r = &arr->rows[row];
+    GMLArrayRow *r = &arr->rows[row];
     if (col >= r->length) return nullptr;
     return &r->data[col];
 }
 
 // Length of row 0.
-static inline int32_t GMLArray_length1D(const GMLArray* arr) {
+static inline int32_t GMLArray_length1D(const GMLArray *arr) {
     if (arr == nullptr || arr->rowCount == 0) return 0;
     return arr->rows[0].length;
 }
 
 // Number of rows.
-static inline int32_t GMLArray_height2D(const GMLArray* arr) {
+static inline int32_t GMLArray_height2D(const GMLArray *arr) {
     if (arr == nullptr) return 0;
     return arr->rowCount;
 }
 
 // Length of a specific row.
-static inline int32_t GMLArray_rowLength(const GMLArray* arr, int32_t row) {
+static inline int32_t GMLArray_rowLength(const GMLArray *arr, int32_t row) {
     if (arr == nullptr || row < 0 || row >= arr->rowCount) return 0;
     return arr->rows[row].length;
 }
