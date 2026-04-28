@@ -22,10 +22,16 @@
 u32 __ctru_heap_size = 0;
 u32 __ctru_linear_heap_size = 25 * 1024 * 1024;
 u32 __stacksize__ = 64 * 1024;
-
+//#define DELTA
+#ifdef DELTA
+#define DATA_WIN_PATH "sdmc:/3ds/butterscotch/delta/data.orig.win"
+#define NOVA_TEX_CACHE_PATH "sdmc:/3ds/butterscotch/delta/cache"
+#define CODE_CACHE_PATH    "sdmc:/3ds/butterscotch/delta/cache/code.cache"
+#else
 #define DATA_WIN_PATH "sdmc:/3ds/butterscotch/data.win"
 #define NOVA_TEX_CACHE_PATH "sdmc:/3ds/butterscotch/cache"
 #define CODE_CACHE_PATH    "sdmc:/3ds/butterscotch/cache/code.cache"
+#endif
 #define BUTTERSCOTCH_NOVA_CMD_BUF_SIZE      (512 * 1024)
 #define BUTTERSCOTCH_NOVA_CLIENT_BUF_SIZE   (1024 * 1024)
 #define BUTTERSCOTCH_NOVA_INDEX_BUF_SIZE    (256 * 1024)

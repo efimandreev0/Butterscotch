@@ -505,6 +505,8 @@ typedef struct {
     int32_t creationCode;
     float scaleX;
     float scaleY;
+    float imageSpeed; // GMS >= 2.2.2.302 only, otherwise 0.0f
+    int32_t imageIndex; // GMS >= 2.2.2.302 only, otherwise 0
     uint32_t color;
     float rotation;
     int32_t preCreateCode;
@@ -725,6 +727,10 @@ typedef struct {
 typedef struct {
     uint32_t scaled;
     uint32_t generatedMips; // GMS 2.0.6+: number of generated mipmaps (0 for GMS 1.x)
+    uint32_t textureBlockSize; // GMS 2022.3+: size of the texture block (0 for older versions)
+    int32_t textureWidth;  // GMS 2022.9+
+    int32_t textureHeight; // GMS 2022.9+
+    int32_t indexInGroup;  // GMS 2022.9+
     uint32_t blobOffset; // absolute file offset to PNG data
     uint32_t blobSize; // computed size of blob data
     uint8_t* blobData; // owned copy of PNG data
@@ -746,6 +752,13 @@ typedef struct {
     uint32_t count;
     AudioEntry* entries;
 } Audo;
+
+typedef struct {
+    uint32_t major;
+    uint32_t minor;
+    uint32_t release;
+    uint32_t build;
+} DetectedFormat;
 
 // ===[ Top-level DataWin container ]===
 typedef struct DataWin {
@@ -790,6 +803,8 @@ typedef struct DataWin {
     // Lookup map: absolute file offset -> SPRT index (built during SPRT parsing)
     struct { uint32_t key; int32_t value; }* sprtOffsetMap;
 
+    DetectedFormat detectedFormat;
+
     char* filePath;
     size_t roomChunkOffset;
     uint32_t roomChunkLength;
@@ -804,3 +819,5 @@ void GamePath_computeInternal(GamePath* path);
 PathPositionResult GamePath_getPosition(GamePath* path, double t);
 void DataWin_loadRoom(DataWin* dw, int32_t roomIndex);
 void DataWin_unloadRoom(DataWin* dw, int32_t roomIndex);
+bool DataWin_isVersionAtLeast(const DataWin* dw, uint32_t major, uint32_t minor, uint32_t release, uint32_t build);
+void DataWin_bumpVersionTo(DataWin* dw, uint32_t major, uint32_t minor, uint32_t release, uint32_t build);

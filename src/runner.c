@@ -1295,7 +1295,9 @@ Runner* Runner_create(DataWin* dataWin, VMContext* vm, FileSystem* fileSystem) {
     vm->runner = (struct Runner*) runner;
 
     
-    NativeScripts_init(vm, runner);
+    if (dataWin->gen8.name != NULL && strstr(dataWin->gen8.name, "UNDERTALE") != NULL) {
+        NativeScripts_init(vm, runner);
+    }
 
     return runner;
 }
