@@ -26,10 +26,7 @@
 uint32_t g_writerTimeUs = 0;
 int32_t g_writerCalls = 0;
 
-
 static Instance* findInstanceByObject(Runner* runner, int32_t objIdx);
-
-
 
 static struct { char* key; NativeCodeFunc value; }* nativeOverrideMap = nullptr;
 
@@ -46,7 +43,6 @@ NativeCodeFunc NativeScripts_find(const char* codeName) {
     if (0 > idx) return nullptr;
     return nativeOverrideMap[idx].value;
 }
-
 
 static int32_t findSelfVarId(DataWin* dw, const char* name) {
     forEach(Variable, v, dw->vari.variables, dw->vari.variableCount) {
@@ -3342,15 +3338,8 @@ static void native_time_Draw77(VMContext* ctx, Runner* runner, Instance* inst) {
     if (cachedYofs >= 0) { RValue_free(&ctx->globalVars[cachedYofs]); ctx->globalVars[cachedYofs] = RValue_makeReal(0.0); }
 }
 
-
-
-
-
-
-
 static void native_screen_Step1(VMContext* ctx, Runner* runner, Instance* inst) {
     (void)ctx; (void)runner; (void)inst;
-    
 }
 
 

@@ -1910,17 +1910,21 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd, DataWi
     //   pre-2022.3: scaled+generatedMips+blobOffset = 12 bytes
     //   2022.3+: ... + textureBlockSize = 16 bytes
     //   2022.9+: ... + width + height + indexInGroup = 28 bytes
-    bool has2022_3 = DataWin_isVersionAtLeast(dw, 2022, 3, 0, 0);
-    bool has2022_9 = DataWin_isVersionAtLeast(dw, 2022, 9, 0, 0);
-    if (count >= 2 && hasGeneratedMips && !has2022_9) {
+    bool has2022_3 = false;
+    bool has2022_9 = false;
+    if (count >= 2 && hasGeneratedMips) {
         uint32_t diff = ptrs[1] - ptrs[0];
         if (diff == 28) {
             DataWin_bumpVersionTo(dw, 2022, 9, 0, 0);
             has2022_3 = true;
             has2022_9 = true;
-        } else if (diff == 16 && !has2022_3) {
+        } else if (diff == 16) {
             DataWin_bumpVersionTo(dw, 2022, 3, 0, 0);
             has2022_3 = true;
+        } else if (diff == 12) {
+            // pre-2022.3 format: do not bump version, override any global version bump
+            has2022_3 = false;
+            has2022_9 = false;
         }
     }
 

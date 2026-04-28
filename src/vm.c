@@ -526,19 +526,15 @@ static uint32_t resolveLocalSlot(VMContext* ctx, int32_t varID) {
         return (uint32_t) varID;
     }
 
-    // For BC17, we'll allocate the slot dynamically because the data.win CANNOT be trusted to know how localVars the script has
     uint32_t slot = IntIntHashMap_getOrInsertSequential(ctx->currentCodeLocalsSlotMap, varID);
-    // Even though we are dynamically allocating the slots, we are still bound to whatever localVars is allocated to
-    // So, if a script goes over the MAX_CODE_LOCALS, it would cause unforeseen consequences...
-    requireMessage(MAX_CODE_LOCALS > slot, "resolveLocalSlot: exceeded MAX_CODE_LOCALS while allocating a slot for an array-only local");
 
-    // Grow this frame's localVars window to cover `slot` whether the entry is pre-existing or freshly allocated.
-    // Pre-existing entries can still be past ctx->localVarCount if a nested call to the same code extended the slot map while the outer frame was suspended (the outer frame's localVarCount is captured at call entry and doesn't follow later growth).
     if (slot >= ctx->localVarCount) {
-        for (uint32_t i = ctx->localVarCount; slot >= i; i++) {
+        uint32_t newCount = slot + 1;
+        ctx->localVars = safeRealloc(ctx->localVars, newCount * sizeof(RValue));
+        for (uint32_t i = ctx->localVarCount; newCount > i; i++) {
             ctx->localVars[i] = (RValue){ .type = RVALUE_UNDEFINED };
         }
-        ctx->localVarCount = slot + 1;
+        ctx->localVarCount = newCount;
     }
     return slot;
 }
@@ -891,12 +887,14 @@ static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t 
         } else {
             fprintf(stderr, "VM: [%s] INSTANCE_ARG write on unknown variable '%s' (builtinVarId=%d)\n", ctx->currentCodeName, varDef->name, bid);
         }
-        if (writeIndex >= 0 && GML_MAX_ARGUMENTS > writeIndex && ctx->scriptArgs != nullptr) {
+
+        int32_t allocArgs = ctx->scriptArgCount > GML_MAX_ARGUMENTS ? ctx->scriptArgCount : GML_MAX_ARGUMENTS;
+
+        if (writeIndex >= 0 && writeIndex < allocArgs && ctx->scriptArgs != nullptr) {
             RValue_free(&ctx->scriptArgs[writeIndex]);
             if (val.type == RVALUE_STRING && val.string != nullptr) {
                 ctx->scriptArgs[writeIndex] = RValue_makeOwnedString(safeStrdup(val.string));
             } else {
-                // Transfer ownership from val into scriptArgs: copy the tagged union as-is and neutralize val so the RValue_free below is a no-op for arrays/methods.
                 ctx->scriptArgs[writeIndex] = val;
                 val.ownsString = false;
             }
@@ -2015,12 +2013,9 @@ static void handleCall(VMContext* ctx, uint32_t instr, const uint8_t* extraData)
     uint32_t funcIndex = resolveFuncOperand(extraData);
     require(ctx->dataWin->func.functionCount > funcIndex);
 
-    // Pop arguments from stack (args pushed right-to-left, so first arg is on top)
-    // Use stack-allocated buffer for small arg counts (GMS 1.4 supports up to 16 arguments)
-    RValue stackArgs[GML_MAX_ARGUMENTS];
     RValue* args = nullptr;
     if (argCount > 0) {
-        args = (GML_MAX_ARGUMENTS >= argCount) ? stackArgs : safeMalloc(argCount * sizeof(RValue));
+        args = safeMalloc(argCount * sizeof(RValue));
         repeat(argCount, i) {
             args[i] = stackPop(ctx);
         }
@@ -2058,12 +2053,9 @@ static void handleCall(VMContext* ctx, uint32_t instr, const uint8_t* extraData)
     if (cache->builtin != nullptr) {
         BuiltinFunc builtin = (BuiltinFunc) cache->builtin;
         RValue result = builtin(ctx, args, argCount);
-        // Free arguments
         if (args != nullptr) {
-            repeat(argCount, i) {
-                RValue_free(&args[i]);
-            }
-            if (args != stackArgs) free(args);
+            repeat(argCount, i) RValue_free(&args[i]);
+            free(args);
         }
 
 #ifdef ENABLE_VM_TRACING
@@ -2094,10 +2086,8 @@ static void handleCall(VMContext* ctx, uint32_t instr, const uint8_t* extraData)
 
         // Free arguments (VM_callCodeIndex copies what it needs)
         if (args != nullptr) {
-            repeat(argCount, i) {
-                RValue_free(&args[i]);
-            }
-            if (args != stackArgs) free(args);
+            repeat(argCount, i) RValue_free(&args[i]);
+            free(args);
         }
 
         stackPushTyped(ctx, result, GML_TYPE_VARIABLE);
@@ -2122,10 +2112,8 @@ static void handleCall(VMContext* ctx, uint32_t instr, const uint8_t* extraData)
 
     // Free arguments and push undefined
     if (args != nullptr) {
-        repeat(argCount, i) {
-            RValue_free(&args[i]);
-        }
-        if (args != stackArgs) free(args);
+        repeat(argCount, i) RValue_free(&args[i]);
+        free(args);
     }
 
 #ifdef ENABLE_VM_TRACING
@@ -2147,10 +2135,9 @@ static void handleCallV(VMContext* ctx, uint32_t instr) {
     RValue function = stackPop(ctx);
     RValue instance = stackPop(ctx);
 
-    RValue stackArgs[GML_MAX_ARGUMENTS];
     RValue* args = nullptr;
     if (argCount > 0) {
-        args = (GML_MAX_ARGUMENTS >= argCount) ? stackArgs : safeMalloc(argCount * sizeof(RValue));
+        args = safeMalloc(argCount * sizeof(RValue));
         repeat(argCount, i) {
             args[i] = stackPop(ctx);
         }
@@ -2202,10 +2189,8 @@ static void handleCallV(VMContext* ctx, uint32_t instr) {
     RValue_free(&function);
     RValue_free(&instance);
     if (args != nullptr) {
-        repeat(argCount, i) {
-            RValue_free(&args[i]);
-        }
-        if (args != stackArgs) free(args);
+        repeat(argCount, i) RValue_free(&args[i]);
+        free(args);
     }
 
     stackPushTyped(ctx, result, GML_TYPE_VARIABLE);
@@ -2734,11 +2719,11 @@ VMContext* VM_create(DataWin* dataWin) {
 
     ctx->profiler = nullptr; // lazily allocated by Profiler_setEnabled(&ctx->profiler, true)
 
-    // Validate that no code entry exceeds MAX_CODE_LOCALS (the VM uses stack-allocated arrays of this size)
-    repeat(dataWin->code.count, i) {
-        CodeEntry* entry = &dataWin->code.entries[i];
-        requireMessageFormatted(MAX_CODE_LOCALS > entry->localsCount, "Code %s has too many locals!", entry->name);
-    }
+    //// Validate that no code entry exceeds MAX_CODE_LOCALS (the VM uses stack-allocated arrays of this size)
+    //repeat(dataWin->code.count, i) {
+    //    CodeEntry* entry = &dataWin->code.entries[i];
+    //    requireMessageFormatted(MAX_CODE_LOCALS > entry->localsCount, "Code %s has too many locals!", entry->name);
+    //}
 
     VMBuiltins_checkIfBuiltinVarTableIsSorted();
 
@@ -2981,8 +2966,7 @@ RValue VM_executeCode(VMContext* ctx, int32_t codeIndex) {
     setCurrentCodeLocalsSlotMap(ctx);
 
     uint32_t localsCount = computeLocalsCount(ctx, code);
-    RValue localVars[MAX_CODE_LOCALS];
-    ctx->localVars = localVars;
+    ctx->localVars = localsCount > 0 ? safeMalloc(localsCount * sizeof(RValue)) : nullptr;
     ctx->localVarCount = localsCount;
     repeat(localsCount, i) {
         ctx->localVars[i].type = RVALUE_UNDEFINED;
@@ -3008,6 +2992,9 @@ RValue VM_executeCode(VMContext* ctx, int32_t codeIndex) {
     // Free locals (decRefs owned arrays, frees owned strings)
     repeat(ctx->localVarCount, i) {
         RValue_free(&ctx->localVars[i]);
+    }
+    if (ctx->localVars) {
+        free(ctx->localVars);
     }
     ctx->localVars = nullptr;
     ctx->localVarCount = 0;
@@ -3048,19 +3035,18 @@ RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t
     setCurrentCodeLocalsSlotMap(ctx);
 
     uint32_t localsCount = computeLocalsCount(ctx, code);
-    // We use fixed-size arrays instead of VLAs because it seems that using multiple VLAs in a single function things get corrupted somehow?
-    // So when you see this MAX_CODE_LOCALS and GML_MAX_ARGUMENTS, you can shake your fist in the air and say "damn you MIPS!!1"
-    RValue localVars[MAX_CODE_LOCALS];
-    ctx->localVars = localVars;
+    ctx->localVars = localsCount > 0 ? safeMalloc(localsCount * sizeof(RValue)) : nullptr;
     ctx->localVarCount = localsCount;
     repeat(localsCount, i) {
         ctx->localVars[i].type = RVALUE_UNDEFINED;
     }
 
-    // Store arguments in scriptArgs (mirrors GMS 1.4's global argument stack).
-    // Callee takes an INDEPENDENT reference for strings (strdup) and arrays (incRef) so
-    // the caller's original args remain valid and owner-tracked by the caller.
-    RValue scriptArgs[GML_MAX_ARGUMENTS];
+    int32_t allocArgs = argCount > GML_MAX_ARGUMENTS ? argCount : GML_MAX_ARGUMENTS;
+    RValue* scriptArgs = safeMalloc(allocArgs * sizeof(RValue));
+    repeat(allocArgs, i) {
+        scriptArgs[i].type = RVALUE_UNDEFINED;
+    }
+
     ctx->scriptArgs = scriptArgs;
     ctx->scriptArgCount = argCount;
     if (argCount > 0 && args != nullptr) {
@@ -3118,10 +3104,17 @@ RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t
     repeat(ctx->localVarCount, i) {
         RValue_free(&ctx->localVars[i]);
     }
+    if (ctx->localVars) {
+        free(ctx->localVars);
+    }
 
     // Free callee script args
-    repeat(ctx->scriptArgCount, i) {
+    int32_t currentAllocArgs = ctx->scriptArgCount > GML_MAX_ARGUMENTS ? ctx->scriptArgCount : GML_MAX_ARGUMENTS;
+    repeat(currentAllocArgs, i) {
         RValue_free(&ctx->scriptArgs[i]);
+    }
+    if (ctx->scriptArgs) {
+        free(ctx->scriptArgs);
     }
 
     ctx->localVars = saved->savedLocals;

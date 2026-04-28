@@ -62,7 +62,7 @@ static uint8_t* ctrReadPngBlobFromFile(FILE* fp, uint32_t blobOffset, uint32_t b
 
 static void ctrBuildFullTextureCache(CtrRenderer* gl) {
     DataWin* dw = gl->base.dataWin;
-    const char* flagPath = "sdmc:/3ds/butterscotch/delta/cache/cache_ready.flag";
+    const char* flagPath = "sdmc:/3ds/butterscotch/cache/cache_ready.flag";
 
     FILE* flagFile = fopen(flagPath, "r");
     if (flagFile) { fclose(flagFile); return; }
@@ -73,7 +73,7 @@ static void ctrBuildFullTextureCache(CtrRenderer* gl) {
 
     for (uint32_t pId = 0; pId < dw->txtr.count; pId++) {
         char outPath[256];
-        snprintf(outPath, sizeof(outPath), "sdmc:/3ds/butterscotch/delta/cache/page_%u.atlas", pId);
+        snprintf(outPath, sizeof(outPath), "sdmc:/3ds/butterscotch/cache/page_%u.atlas", pId);
 
         FILE* check = fopen(outPath, "r");
         if (check) { fclose(check); continue; }
@@ -523,7 +523,7 @@ static void loadDynamicSprite(CtrRenderer* gl, DataWin* dw, int32_t tpagIndex) {
     }
 
     char path[256];
-    snprintf(path, sizeof(path), "sdmc:/3ds/butterscotch/delta/cache/page_%u.atlas", pageId);
+    snprintf(path, sizeof(path), "sdmc:/3ds/butterscotch/cache/page_%u.atlas", pageId);
 
     FILE* f = fopen(path, "rb");
     if (!f) return;
@@ -627,7 +627,7 @@ static void ctrOnRoomChanged(Renderer* renderer, int32_t roomIndex) {
         }
 
         char path[256];
-        snprintf(path, sizeof(path), "sdmc:/3ds/butterscotch/delta/cache/page_%d.atlas", pid);
+        snprintf(path, sizeof(path), "sdmc:/3ds/butterscotch/cache/page_%d.atlas", pid);
 
         FILE* f = fopen(path, "rb");
         if (!f) continue;
