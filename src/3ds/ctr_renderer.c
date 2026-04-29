@@ -644,8 +644,9 @@ static void markSpriteResident(CtrRenderer *gl, DataWin *dw, int32_t spriteIndex
 }
 
 static void markBackgroundResident(CtrRenderer *gl, DataWin *dw, int32_t bgndIndex) {
-    if (bgndIndex >= 0 && (uint32_t) bgndIndex < dw->bgnd.count) markTpagResident(
-        gl, dw->bgnd.backgrounds[bgndIndex].tpagIndex);
+    if (bgndIndex >= 0 && (uint32_t) bgndIndex < dw->bgnd.count)
+        markTpagResident(
+            gl, dw->bgnd.backgrounds[bgndIndex].tpagIndex);
 }
 
 void CtrRenderer_prefetchSprite(Renderer *renderer, int32_t spriteIndex) {
@@ -1426,11 +1427,48 @@ static int32_t ctrCreateSpriteFromSurface(Renderer *renderer, int32_t x, int32_t
 static void ctrDeleteSprite(Renderer *renderer, int32_t spriteIndex) {
 }
 
+static void ctrDrawRectangleColor(Renderer *renderer, float x1, float y1, float x2, float y2, uint32_t col1,
+                                  uint32_t col2, uint32_t col3, uint32_t col4, float alpha, bool outline) {
+    CtrRenderer *gl = (CtrRenderer *) renderer;
+    uint8_t a = ctrAlphaToByte(alpha);
+    if (a == 0) return;
+
+    float left = roundf(fminf(x1, x2));
+    float right = roundf(fmaxf(x1, x2));
+    float top = roundf(fminf(y1, y2));
+    float bottom = roundf(fmaxf(y1, y2));
+
+    uint8_t r1 = BGR_R(col1), g1 = BGR_G(col1), b1 = BGR_B(col1);
+    uint8_t r2 = BGR_R(col2), g2 = BGR_G(col2), b2 = BGR_B(col2);
+    uint8_t r3 = BGR_R(col3), g3 = BGR_G(col3), b3 = BGR_B(col3);
+    uint8_t r4 = BGR_R(col4), g4 = BGR_G(col4), b4 = BGR_B(col4);
+
+    if (outline) {
+        float thick = 2.0f;
+        ctrPushQuadGradient(gl, gl->whiteTexture, left, top, right + 1.0f, top, right + 1.0f, top + thick, left,
+                            top + thick, 0.5f, 0.5f, 0.5f, 0.5f, r1, g1, b1, a, r2, g2, b2, a, r2, g2, b2, a, r1, g1,
+                            b1, a);
+        ctrPushQuadGradient(gl, gl->whiteTexture, left, bottom - thick + 1.0f, right + 1.0f, bottom - thick + 1.0f,
+                            right + 1.0f, bottom + 1.0f, left, bottom + 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, r4, g4, b4, a, r3,
+                            g3, b3, a, r3, g3, b3, a, r4, g4, b4, a);
+        ctrPushQuadGradient(gl, gl->whiteTexture, left, top + thick, left + thick, top + thick, left + thick,
+                            bottom - thick + 1.0f, left, bottom - thick + 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, r1, g1, b1, a,
+                            r1, g1, b1, a, r4, g4, b4, a, r4, g4, b4, a);
+        ctrPushQuadGradient(gl, gl->whiteTexture, right - thick + 1.0f, top + thick, right + 1.0f, top + thick,
+                            right + 1.0f, bottom - thick + 1.0f, right - thick + 1.0f, bottom - thick + 1.0f, 0.5f,
+                            0.5f, 0.5f, 0.5f, r2, g2, b2, a, r2, g2, b2, a, r3, g3, b3, a, r3, g3, b3, a);
+    } else {
+        ctrPushQuadGradient(gl, gl->whiteTexture, left, top, right + 1.0f, top, right + 1.0f, bottom + 1.0f, left,
+                            bottom + 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, r1, g1, b1, a, r2, g2, b2, a, r3, g3, b3, a, r4, g4,
+                            b4, a);
+    }
+}
+
 static RendererVtable ctrVtable = {
     .init = ctrInit, .destroy = ctrDestroy, .beginFrame = ctrBeginFrame, .endFrame = ctrEndFrame,
     .beginView = ctrBeginView, .endView = ctrEndView, .beginGUI = ctrBeginGUI, .endGUI = ctrEndGUI,
     .drawSprite = ctrDrawSprite, .drawSpritePart = ctrDrawSpritePart, .drawSpritePos = ctrDrawSpritePos,
-    .drawRectangle = ctrDrawRectangle,
+    .drawRectangle = ctrDrawRectangle, .drawRectangleColor = ctrDrawRectangleColor,
     .drawLine = ctrDrawLine, .drawLineColor = ctrDrawLineColor, .drawTriangle = ctrDrawTriangle,
     .drawText = ctrDrawText, .drawTextColor = ctrDrawTextColor, .flush = ctrRendererFlush,
     .createSpriteFromSurface = ctrCreateSpriteFromSurface, .deleteSprite = ctrDeleteSprite,

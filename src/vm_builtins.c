@@ -607,96 +607,117 @@ RValue VMBuiltins_getVariable(VMContext *ctx, int16_t builtinVarId, const char *
         case BUILTIN_VAR_VIEW_CURRENT:
             return RValue_makeReal((GMLReal) runner->viewCurrent);
         case BUILTIN_VAR_VIEW_XVIEW:
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->views[arrayIndex].viewX);
+            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->views[arrayIndex].viewX);
             return RValue_makeReal(0.0);
         case BUILTIN_VAR_VIEW_YVIEW:
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->views[arrayIndex].viewY);
+            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->views[arrayIndex].viewY);
             return RValue_makeReal(0.0);
         case BUILTIN_VAR_VIEW_WVIEW:
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->views[arrayIndex].viewWidth);
+            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->views[arrayIndex].viewWidth);
             return RValue_makeReal(0.0);
         case BUILTIN_VAR_VIEW_HVIEW:
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->views[arrayIndex].viewHeight);
+            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->views[arrayIndex].viewHeight);
             return RValue_makeReal(0.0);
         case BUILTIN_VAR_VIEW_XPORT:
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->views[arrayIndex].portX);
+            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->views[arrayIndex].portX);
             return RValue_makeReal(0.0);
         case BUILTIN_VAR_VIEW_YPORT:
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->views[arrayIndex].portY);
+            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->views[arrayIndex].portY);
             return RValue_makeReal(0.0);
         case BUILTIN_VAR_VIEW_WPORT:
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->views[arrayIndex].portWidth);
+            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->views[arrayIndex].portWidth);
             return RValue_makeReal(0.0);
         case BUILTIN_VAR_VIEW_HPORT:
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->views[arrayIndex].portHeight);
+            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->views[arrayIndex].portHeight);
             return RValue_makeReal(0.0);
         case BUILTIN_VAR_VIEW_VISIBLE:
             if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) return RValue_makeBool(runner->views[arrayIndex].enabled);
             return RValue_makeBool(false);
         case BUILTIN_VAR_VIEW_ANGLE:
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->views[arrayIndex].viewAngle);
+            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->views[arrayIndex].viewAngle);
             return RValue_makeReal(0.0);
         case BUILTIN_VAR_VIEW_HBORDER:
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->views[arrayIndex].borderX);
+            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->views[arrayIndex].borderX);
             return RValue_makeReal(0.0);
         case BUILTIN_VAR_VIEW_VBORDER:
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->views[arrayIndex].borderY);
+            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->views[arrayIndex].borderY);
             return RValue_makeReal(0.0);
         case BUILTIN_VAR_VIEW_OBJECT:
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->views[arrayIndex].objectId);
+            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->views[arrayIndex].objectId);
             return RValue_makeReal(INSTANCE_NOONE);
         case BUILTIN_VAR_VIEW_HSPEED:
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->views[arrayIndex].speedX);
+            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->views[arrayIndex].speedX);
             return RValue_makeReal(0.0);
         case BUILTIN_VAR_VIEW_VSPEED:
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->views[arrayIndex].speedY);
+            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->views[arrayIndex].speedY);
             return RValue_makeReal(0.0);
 
         // Background properties
         case BUILTIN_VAR_BACKGROUND_VISIBLE:
-            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex) return RValue_makeBool(
-                runner->backgrounds[arrayIndex].visible);
+            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex)
+                return RValue_makeBool(
+                    runner->backgrounds[arrayIndex].visible);
             return RValue_makeBool(false);
         case BUILTIN_VAR_BACKGROUND_INDEX:
-            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->backgrounds[arrayIndex].backgroundIndex);
+            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->backgrounds[arrayIndex].backgroundIndex);
             return RValue_makeReal(-1.0);
         case BUILTIN_VAR_BACKGROUND_X:
-            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->backgrounds[arrayIndex].x);
+            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->backgrounds[arrayIndex].x);
             return RValue_makeReal(0.0);
         case BUILTIN_VAR_BACKGROUND_Y:
-            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->backgrounds[arrayIndex].y);
+            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->backgrounds[arrayIndex].y);
             return RValue_makeReal(0.0);
         case BUILTIN_VAR_BACKGROUND_HSPEED:
-            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->backgrounds[arrayIndex].speedX);
+            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->backgrounds[arrayIndex].speedX);
             return RValue_makeReal(0.0);
         case BUILTIN_VAR_BACKGROUND_VSPEED:
-            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->backgrounds[arrayIndex].speedY);
+            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->backgrounds[arrayIndex].speedY);
             return RValue_makeReal(0.0);
         case BUILTIN_VAR_BACKGROUND_WIDTH: {
             if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex) {
                 int32_t tpagIndex = Renderer_resolveBackgroundTPAGIndex(
                     runner->dataWin, runner->backgrounds[arrayIndex].backgroundIndex);
-                if (tpagIndex >= 0) return RValue_makeReal(
-                    (GMLReal) runner->dataWin->tpag.items[tpagIndex].boundingWidth);
+                if (tpagIndex >= 0)
+                    return RValue_makeReal(
+                        (GMLReal) runner->dataWin->tpag.items[tpagIndex].boundingWidth);
             }
             return RValue_makeReal(0.0);
         }
@@ -704,14 +725,16 @@ RValue VMBuiltins_getVariable(VMContext *ctx, int16_t builtinVarId, const char *
             if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex) {
                 int32_t tpagIndex = Renderer_resolveBackgroundTPAGIndex(
                     runner->dataWin, runner->backgrounds[arrayIndex].backgroundIndex);
-                if (tpagIndex >= 0) return RValue_makeReal(
-                    (GMLReal) runner->dataWin->tpag.items[tpagIndex].boundingHeight);
+                if (tpagIndex >= 0)
+                    return RValue_makeReal(
+                        (GMLReal) runner->dataWin->tpag.items[tpagIndex].boundingHeight);
             }
             return RValue_makeReal(0.0);
         }
         case BUILTIN_VAR_BACKGROUND_ALPHA:
-            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex) return RValue_makeReal(
-                (GMLReal) runner->backgrounds[arrayIndex].alpha);
+            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex)
+                return RValue_makeReal(
+                    (GMLReal) runner->backgrounds[arrayIndex].alpha);
             return RValue_makeReal(1.0);
         case BUILTIN_VAR_BACKGROUND_COLOR:
         case BUILTIN_VAR_BACKGROUND_COLOUR:
@@ -3762,8 +3785,9 @@ static RValue builtinFileTextClose(VMContext *ctx, RValue *args, int32_t argCoun
     if (1 > argCount) return RValue_makeUndefined();
     Runner *runner = (Runner *) ctx->runner;
     int32_t handle = RValue_toInt32(args[0]);
-    if (0 > handle || handle >= MAX_OPEN_TEXT_FILES || !runner->openTextFiles[handle].isOpen) return
-            RValue_makeUndefined();
+    if (0 > handle || handle >= MAX_OPEN_TEXT_FILES || !runner->openTextFiles[handle].isOpen)
+        return
+                RValue_makeUndefined();
 
     OpenTextFile *file = &runner->openTextFiles[handle];
     if (file->isWriteMode && file->writeBuffer != nullptr && file->filePath != nullptr) {
@@ -3782,8 +3806,9 @@ static RValue builtinFileTextReadString(VMContext *ctx, RValue *args, int32_t ar
     if (1 > argCount) return RValue_makeOwnedString(safeStrdup(""));
     Runner *runner = (Runner *) ctx->runner;
     int32_t handle = RValue_toInt32(args[0]);
-    if (0 > handle || handle >= MAX_OPEN_TEXT_FILES || !runner->openTextFiles[handle].isOpen) return
-            RValue_makeOwnedString(safeStrdup(""));
+    if (0 > handle || handle >= MAX_OPEN_TEXT_FILES || !runner->openTextFiles[handle].isOpen)
+        return
+                RValue_makeOwnedString(safeStrdup(""));
 
     OpenTextFile *file = &runner->openTextFiles[handle];
     if (file->readPos >= file->contentLen) return RValue_makeOwnedString(safeStrdup(""));
@@ -3808,8 +3833,9 @@ static RValue builtinFileTextReadln(VMContext *ctx, RValue *args, int32_t argCou
     if (1 > argCount) return RValue_makeOwnedString(safeStrdup(""));
     Runner *runner = (Runner *) ctx->runner;
     int32_t handle = RValue_toInt32(args[0]);
-    if (0 > handle || MAX_OPEN_TEXT_FILES <= handle || !runner->openTextFiles[handle].isOpen) return
-            RValue_makeOwnedString(safeStrdup(""));
+    if (0 > handle || MAX_OPEN_TEXT_FILES <= handle || !runner->openTextFiles[handle].isOpen)
+        return
+                RValue_makeOwnedString(safeStrdup(""));
 
     OpenTextFile *file = &runner->openTextFiles[handle];
 
@@ -3845,8 +3871,9 @@ static RValue builtinFileTextReadReal(VMContext *ctx, RValue *args, int32_t argC
     if (1 > argCount) return RValue_makeReal(0.0);
     Runner *runner = (Runner *) ctx->runner;
     int32_t handle = RValue_toInt32(args[0]);
-    if (0 > handle || handle >= MAX_OPEN_TEXT_FILES || !runner->openTextFiles[handle].isOpen) return
-            RValue_makeReal(0.0);
+    if (0 > handle || handle >= MAX_OPEN_TEXT_FILES || !runner->openTextFiles[handle].isOpen)
+        return
+                RValue_makeReal(0.0);
 
     OpenTextFile *file = &runner->openTextFiles[handle];
     if (file->readPos >= file->contentLen) return RValue_makeReal(0.0);
@@ -3865,8 +3892,9 @@ static RValue builtinFileTextWriteString(VMContext *ctx, RValue *args, int32_t a
     if (2 > argCount) return RValue_makeUndefined();
     Runner *runner = (Runner *) ctx->runner;
     int32_t handle = RValue_toInt32(args[0]);
-    if (0 > handle || handle >= MAX_OPEN_TEXT_FILES || !runner->openTextFiles[handle].isOpen) return
-            RValue_makeUndefined();
+    if (0 > handle || handle >= MAX_OPEN_TEXT_FILES || !runner->openTextFiles[handle].isOpen)
+        return
+                RValue_makeUndefined();
 
     OpenTextFile *file = &runner->openTextFiles[handle];
     if (!file->isWriteMode) return RValue_makeUndefined();
@@ -3886,8 +3914,9 @@ static RValue builtinFileTextWriteln(VMContext *ctx, RValue *args, int32_t argCo
     if (1 > argCount) return RValue_makeUndefined();
     Runner *runner = (Runner *) ctx->runner;
     int32_t handle = RValue_toInt32(args[0]);
-    if (0 > handle || handle >= MAX_OPEN_TEXT_FILES || !runner->openTextFiles[handle].isOpen) return
-            RValue_makeUndefined();
+    if (0 > handle || handle >= MAX_OPEN_TEXT_FILES || !runner->openTextFiles[handle].isOpen)
+        return
+                RValue_makeUndefined();
 
     OpenTextFile *file = &runner->openTextFiles[handle];
     if (!file->isWriteMode) return RValue_makeUndefined();
@@ -3904,8 +3933,9 @@ static RValue builtinFileTextWriteReal(VMContext *ctx, RValue *args, int32_t arg
     if (2 > argCount) return RValue_makeUndefined();
     Runner *runner = (Runner *) ctx->runner;
     int32_t handle = RValue_toInt32(args[0]);
-    if (0 > handle || handle >= MAX_OPEN_TEXT_FILES || !runner->openTextFiles[handle].isOpen) return
-            RValue_makeUndefined();
+    if (0 > handle || handle >= MAX_OPEN_TEXT_FILES || !runner->openTextFiles[handle].isOpen)
+        return
+                RValue_makeUndefined();
 
     OpenTextFile *file = &runner->openTextFiles[handle];
     if (!file->isWriteMode) return RValue_makeUndefined();
@@ -3925,8 +3955,9 @@ static RValue builtinFileTextEof(VMContext *ctx, RValue *args, int32_t argCount)
     if (1 > argCount) return RValue_makeBool(true);
     Runner *runner = (Runner *) ctx->runner;
     int32_t handle = RValue_toInt32(args[0]);
-    if (0 > handle || handle >= MAX_OPEN_TEXT_FILES || !runner->openTextFiles[handle].isOpen) return
-            RValue_makeBool(true);
+    if (0 > handle || handle >= MAX_OPEN_TEXT_FILES || !runner->openTextFiles[handle].isOpen)
+        return
+                RValue_makeBool(true);
 
     OpenTextFile *file = &runner->openTextFiles[handle];
     return RValue_makeBool(file->readPos >= file->contentLen);
@@ -5270,6 +5301,7 @@ static RValue builtin_drawRectangle(VMContext *ctx, RValue *args, MAYBE_UNUSED i
 }
 
 static RValue builtin_drawRectangleColor(VMContext *ctx, RValue *args, MAYBE_UNUSED int32_t argCount) {
+    if (9 > argCount) return RValue_makeUndefined();
     Runner *runner = (Runner *) ctx->runner;
     if (runner->renderer == nullptr) return RValue_makeUndefined();
 
@@ -5277,11 +5309,19 @@ static RValue builtin_drawRectangleColor(VMContext *ctx, RValue *args, MAYBE_UNU
     float y1 = (float) RValue_toReal(args[1]);
     float x2 = (float) RValue_toReal(args[2]);
     float y2 = (float) RValue_toReal(args[3]);
-    uint32_t color = (uint32_t) RValue_toInt32(args[4]);
+    uint32_t c1 = (uint32_t) RValue_toInt32(args[4]);
+    uint32_t c2 = (uint32_t) RValue_toInt32(args[5]);
+    uint32_t c3 = (uint32_t) RValue_toInt32(args[6]);
+    uint32_t c4 = (uint32_t) RValue_toInt32(args[7]);
     bool outline = RValue_toBool(args[8]);
 
-    runner->renderer->vtable->drawRectangle(runner->renderer, x1, y1, x2, y2, color, runner->renderer->drawAlpha,
-                                            outline);
+    if (runner->renderer->vtable->drawRectangleColor != nullptr) {
+        runner->renderer->vtable->drawRectangleColor(runner->renderer, x1, y1, x2, y2, c1, c2, c3, c4,
+                                                     runner->renderer->drawAlpha, outline);
+    } else {
+        runner->renderer->vtable->drawRectangle(runner->renderer, x1, y1, x2, y2, c1, runner->renderer->drawAlpha,
+                                                outline);
+    }
     return RValue_makeUndefined();
 }
 
@@ -5315,6 +5355,7 @@ static RValue builtin_drawHealthbar(VMContext *ctx, RValue *args, MAYBE_UNUSED i
 
     runner->renderer->vtable->drawRectangle(runner->renderer, x1, y1, healthbarX, y2, intermediateColor,
                                             runner->renderer->drawAlpha, false);
+    return RValue_makeUndefined();
 }
 
 static RValue builtin_drawSetColor(VMContext *ctx, RValue *args, MAYBE_UNUSED int32_t argCount) {
@@ -5773,8 +5814,9 @@ static RValue builtin_spriteSetOffset(VMContext *ctx, RValue *args, MAYBE_UNUSED
 // sprite_create_from_surface(surface_id, x, y, w, h, removeback, smooth, xorig, yorig)
 static RValue builtin_spriteCreateFromSurface(VMContext *ctx, RValue *args, MAYBE_UNUSED int32_t argCount) {
     Runner *runner = (Runner *) ctx->runner;
-    if (runner->renderer == nullptr || runner->renderer->vtable->createSpriteFromSurface == nullptr) return
-            RValue_makeReal(-1);
+    if (runner->renderer == nullptr || runner->renderer->vtable->createSpriteFromSurface == nullptr)
+        return
+                RValue_makeReal(-1);
 
     // surface_id (arg0) is ignored - we always capture from the application surface (FBO)
     int32_t x = RValue_toInt32(args[1]);
@@ -8041,6 +8083,11 @@ static RValue builtinAssetGetIndex(VMContext *ctx, RValue *args, int32_t argCoun
 STUB_RETURN_ZERO(draw_enable_alphablend)
 STUB_RETURN_UNDEFINED(draw_clear_alpha)
 STUB_RETURN_UNDEFINED(draw_point_color)
+STUB_RETURN_UNDEFINED(draw_clear)
+STUB_RETURN_UNDEFINED(draw_set_blend_mode)
+STUB_RETURN_UNDEFINED(draw_set_blend_mode_ext)
+STUB_RETURN_UNDEFINED(draw_set_alpha_test)
+STUB_RETURN_UNDEFINED(draw_set_alpha_test_ref_value)
 STUB_RETURN_ZERO(steam_file_delete)
 STUB_RETURN_ZERO(sprite_prefetch)
 STUB_RETURN_UNDEFINED(ds_map_set_post)
@@ -8129,6 +8176,33 @@ static RValue builtin_collision_circle(VMContext *ctx, RValue *args, int32_t arg
         if (dx * dx + dy * dy <= r2) return RValue_makeReal((GMLReal) it->instanceId);
     }
     return RValue_makeReal(-4.0);
+}
+
+static RValue builtin_draw_circle_color(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (6 > argCount) return RValue_makeUndefined();
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer == nullptr) return RValue_makeUndefined();
+    uint32_t prevColor = runner->renderer->drawColor;
+    runner->renderer->drawColor = (uint32_t) RValue_toInt32(args[3]);
+    Renderer_drawCircle(runner->renderer,
+                        (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]),
+                        (float) RValue_toReal(args[2]), RValue_toBool(args[5]));
+    runner->renderer->drawColor = prevColor;
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_roundrect_color(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (7 > argCount) return RValue_makeUndefined();
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer == nullptr) return RValue_makeUndefined();
+    uint32_t prevColor = runner->renderer->drawColor;
+    runner->renderer->drawColor = (uint32_t) RValue_toInt32(args[4]);
+    Renderer_drawRoundrect(runner->renderer,
+                           (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]),
+                           (float) RValue_toReal(args[2]), (float) RValue_toReal(args[3]),
+                           RValue_toBool(args[6]));
+    runner->renderer->drawColor = prevColor;
+    return RValue_makeUndefined();
 }
 
 static RValue builtin_draw_circle(VMContext *ctx, RValue *args, int32_t argCount) {
@@ -8595,7 +8669,16 @@ void VMBuiltins_registerAll(VMContext *ctx) {
     VM_registerBuiltin(ctx, "draw_sprite_part_ext", builtin_drawSpritePartExt);
     VM_registerBuiltin(ctx, "draw_sprite_pos", builtin_drawSpritePos);
     VM_registerBuiltin(ctx, "draw_rectangle", builtin_drawRectangle);
-    VM_registerBuiltin(ctx, "draw_rectangle_color", builtin_drawRectangleColor);
+    VM_registerBuiltin(ctx, "draw_rectangle_colour", builtin_drawRectangleColor);
+    VM_registerBuiltin(ctx, "draw_circle_color", builtin_draw_circle_color);
+    VM_registerBuiltin(ctx, "draw_circle_colour", builtin_draw_circle_color);
+    VM_registerBuiltin(ctx, "draw_roundrect_color", builtin_draw_roundrect_color);
+    VM_registerBuiltin(ctx, "draw_roundrect_colour", builtin_draw_roundrect_color);
+    VM_registerBuiltin(ctx, "draw_clear", builtin_draw_clear);
+    VM_registerBuiltin(ctx, "draw_set_blend_mode", builtin_draw_set_blend_mode);
+    VM_registerBuiltin(ctx, "draw_set_blend_mode_ext", builtin_draw_set_blend_mode_ext);
+    VM_registerBuiltin(ctx, "draw_set_alpha_test", builtin_draw_set_alpha_test);
+    VM_registerBuiltin(ctx, "draw_set_alpha_test_ref_value", builtin_draw_set_alpha_test_ref_value);
     VM_registerBuiltin(ctx, "draw_healthbar", builtin_drawHealthbar);
     VM_registerBuiltin(ctx, "draw_set_color", builtin_drawSetColor);
     VM_registerBuiltin(ctx, "draw_set_alpha", builtin_drawSetAlpha);

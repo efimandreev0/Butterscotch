@@ -43,6 +43,9 @@ typedef struct {
     void (*drawRectangle)(Renderer *renderer, float x1, float y1, float x2, float y2, uint32_t color, float alpha,
                           bool outline);
 
+    void (*drawRectangleColor)(Renderer *renderer, float x1, float y1, float x2, float y2, uint32_t col1, uint32_t col2,
+                               uint32_t col3, uint32_t col4, float alpha, bool outline);
+
     void (*drawLine)(Renderer *renderer, float x1, float y1, float x2, float y2, float width, uint32_t color,
                      float alpha);
 
@@ -175,6 +178,9 @@ static void Renderer_drawSpriteStretched(Renderer *renderer, int32_t spriteIndex
     if (0 > tpagIndex) return;
 
     TexturePageItem *tpag = &dw->tpag.items[tpagIndex];
+    // ДОБАВИТЬ ЭТУ ПРОВЕРКУ:
+    if (tpag->boundingWidth <= 0 || tpag->boundingHeight <= 0) return;
+
     float xscale = w / (float) tpag->boundingWidth;
     float yscale = h / (float) tpag->boundingHeight;
     renderer->vtable->drawSprite(renderer, tpagIndex, x, y, 0.0f, 0.0f, xscale, yscale, 0.0f, color, alpha);
