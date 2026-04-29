@@ -8036,6 +8036,194 @@ static RValue builtinAssetGetIndex(VMContext *ctx, RValue *args, int32_t argCoun
     return RValue_makeReal(-1);
 }
 
+// ===[ STUBS / MINIMAL IMPLS FOR PREVIOUSLY-UNRESOLVED BUILTINS ]===
+
+STUB_RETURN_ZERO(draw_enable_alphablend)
+STUB_RETURN_UNDEFINED(draw_clear_alpha)
+STUB_RETURN_UNDEFINED(draw_point_color)
+STUB_RETURN_ZERO(steam_file_delete)
+STUB_RETURN_ZERO(sprite_prefetch)
+STUB_RETURN_UNDEFINED(ds_map_set_post)
+STUB_RETURN_VALUE(ini_open_from_string, 0)
+STUB_RETURN_VALUE(buffer_async_group_begin, -1)
+STUB_RETURN_UNDEFINED(buffer_async_group_option)
+STUB_RETURN_VALUE(buffer_load_async, -1)
+STUB_RETURN_VALUE(buffer_async_group_end, -1)
+STUB_RETURN_VALUE(buffer_save_async, -1)
+STUB_RETURN_ZERO(draw_getpixel)
+STUB_RETURN_ZERO(extension_stubfunc_real)
+STUB_RETURN_VALUE(get_string_async, -1)
+STUB_RETURN_ZERO(steam_file_write_file)
+STUB_RETURN_UNDEFINED(action_previous_room)
+STUB_RETURN_UNDEFINED(texture_set_interpolation)
+STUB_RETURN_ZERO(os_is_paused)
+STUB_RETURN_VALUE(sprite_replace, -1)
+STUB_RETURN_UNDEFINED(sprite_collision_mask)
+STUB_RETURN_ZERO(window_get_x)
+STUB_RETURN_ZERO(window_get_y)
+STUB_RETURN_UNDEFINED(window_set_position)
+
+static RValue builtin_date_current_datetime(MAYBE_UNUSED VMContext *ctx, MAYBE_UNUSED RValue *args,
+                                            MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeReal((GMLReal) time(NULL) / 86400.0 + 25569.0);
+}
+
+static RValue builtin_ds_map_delete(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (2 > argCount) return RValue_makeUndefined();
+    Runner *runner = (Runner *) ctx->runner;
+    int32_t id = RValue_toInt32(args[0]);
+    DsMapEntry **mapPtr = dsMapGet(runner, id);
+    if (mapPtr == nullptr) return RValue_makeUndefined();
+    ptrdiff_t idx = getValueIndexInMap(mapPtr, args[1]);
+    if (idx >= 0) {
+        char *ownedKey = (*mapPtr)[idx].key;
+        RValue_free(&(*mapPtr)[idx].value);
+        shdel(*mapPtr, ownedKey);
+        free(ownedKey);
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_json_encode(MAYBE_UNUSED VMContext *ctx, MAYBE_UNUSED RValue *args,
+                                  MAYBE_UNUSED int32_t argCount) {
+    logStubbedFunction(ctx, "json_encode");
+    return RValue_makeOwnedString(safeStrdup("{}"));
+}
+
+static RValue builtin_file_rename(MAYBE_UNUSED VMContext *ctx, RValue *args, int32_t argCount) {
+    if (2 > argCount) return RValue_makeBool(false);
+    char *src = RValue_toString(args[0]);
+    char *dst = RValue_toString(args[1]);
+    int rc = rename(src, dst);
+    free(src);
+    free(dst);
+    return RValue_makeBool(rc == 0);
+}
+
+static RValue builtin_action_set_motion(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (2 > argCount || ctx->currentInstance == nullptr) return RValue_makeUndefined();
+    Instance *inst = (Instance *) ctx->currentInstance;
+    inst->direction = (float) RValue_toReal(args[0]);
+    inst->speed = (float) RValue_toReal(args[1]);
+    Instance_computeComponentsFromSpeed(inst);
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_collision_circle(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (5 > argCount) return RValue_makeReal(-4.0);
+    Runner *runner = (Runner *) ctx->runner;
+    GMLReal cx = RValue_toReal(args[0]);
+    GMLReal cy = RValue_toReal(args[1]);
+    GMLReal radius = RValue_toReal(args[2]);
+    int32_t targetObj = RValue_toInt32(args[3]);
+    bool notme = (argCount > 5) ? RValue_toBool(args[5]) : false;
+    GMLReal r2 = radius * radius;
+    int32_t n = (int32_t) arrlen(runner->instances);
+    for (int32_t i = 0; i < n; i++) {
+        Instance *it = runner->instances[i];
+        if (!it->active) continue;
+        if (notme && (Instance *) ctx->currentInstance == it) continue;
+        if (targetObj >= 0 && it->objectIndex != targetObj) continue;
+        GMLReal dx = (GMLReal) it->x - cx;
+        GMLReal dy = (GMLReal) it->y - cy;
+        if (dx * dx + dy * dy <= r2) return RValue_makeReal((GMLReal) it->instanceId);
+    }
+    return RValue_makeReal(-4.0);
+}
+
+static RValue builtin_draw_circle(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (4 > argCount) return RValue_makeUndefined();
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer == nullptr) return RValue_makeUndefined();
+    Renderer_drawCircle(runner->renderer, (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]),
+                        (float) RValue_toReal(args[2]), RValue_toBool(args[3]));
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_set_circle_precision(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (1 > argCount) return RValue_makeUndefined();
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer != nullptr) {
+        runner->renderer->circlePrecision = RValue_toInt32(args[0]);
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_line_color(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (6 > argCount) return RValue_makeUndefined();
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer == nullptr || runner->renderer->vtable->drawLineColor == nullptr)
+        return RValue_makeUndefined();
+    runner->renderer->vtable->drawLineColor(runner->renderer,
+                                            (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]),
+                                            (float) RValue_toReal(args[2]), (float) RValue_toReal(args[3]),
+                                            1.0f,
+                                            (uint32_t) RValue_toInt32(args[4]),
+                                            (uint32_t) RValue_toInt32(args[5]),
+                                            runner->renderer->drawAlpha);
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_triangle_color(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (10 > argCount) return RValue_makeUndefined();
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer == nullptr || runner->renderer->vtable->drawTriangleColor == nullptr)
+        return RValue_makeUndefined();
+    runner->renderer->vtable->drawTriangleColor(runner->renderer,
+                                                (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]),
+                                                (float) RValue_toReal(args[2]), (float) RValue_toReal(args[3]),
+                                                (float) RValue_toReal(args[4]), (float) RValue_toReal(args[5]),
+                                                (uint32_t) RValue_toInt32(args[6]),
+                                                (uint32_t) RValue_toInt32(args[7]),
+                                                (uint32_t) RValue_toInt32(args[8]),
+                                                runner->renderer->drawAlpha,
+                                                RValue_toBool(args[9]));
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_ellipse_color(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (7 > argCount) return RValue_makeUndefined();
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer == nullptr) return RValue_makeUndefined();
+    uint32_t prevColor = runner->renderer->drawColor;
+    runner->renderer->drawColor = (uint32_t) RValue_toInt32(args[4]);
+    Renderer_drawEllipse(runner->renderer,
+                         (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]),
+                         (float) RValue_toReal(args[2]), (float) RValue_toReal(args[3]),
+                         RValue_toBool(args[6]));
+    runner->renderer->drawColor = prevColor;
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_roundrect(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (5 > argCount) return RValue_makeUndefined();
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer == nullptr) return RValue_makeUndefined();
+    Renderer_drawRoundrect(runner->renderer,
+                           (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]),
+                           (float) RValue_toReal(args[2]), (float) RValue_toReal(args[3]),
+                           RValue_toBool(args[4]));
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_text_transformed_color(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (10 > argCount) return RValue_makeUndefined();
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer == nullptr) return RValue_makeUndefined();
+    char *text = RValue_toString(args[2]);
+    if (runner->renderer->vtable->drawTextColor != nullptr) {
+        runner->renderer->vtable->drawTextColor(runner->renderer, text,
+                                                (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]),
+                                                (float) RValue_toReal(args[3]), (float) RValue_toReal(args[4]),
+                                                (float) RValue_toReal(args[5]),
+                                                RValue_toInt32(args[6]), RValue_toInt32(args[7]),
+                                                RValue_toInt32(args[8]), RValue_toInt32(args[9]),
+                                                runner->renderer->drawAlpha);
+    }
+    free(text);
+    return RValue_makeUndefined();
+}
+
 // ===[ REGISTRATION ]===
 
 void VMBuiltins_registerAll(VMContext *ctx) {
@@ -8167,6 +8355,49 @@ void VMBuiltins_registerAll(VMContext *ctx) {
     VM_registerBuiltin(ctx, "ds_map_find_next", builtinDsMapFindNext);
     VM_registerBuiltin(ctx, "ds_map_size", builtinDsMapSize);
     VM_registerBuiltin(ctx, "ds_map_destroy", builtinDsMapDestroy);
+    VM_registerBuiltin(ctx, "ds_map_delete", builtin_ds_map_delete);
+    VM_registerBuiltin(ctx, "ds_map_set_post", builtin_ds_map_set_post);
+
+    VM_registerBuiltin(ctx, "date_current_datetime", builtin_date_current_datetime);
+    VM_registerBuiltin(ctx, "json_encode", builtin_json_encode);
+    VM_registerBuiltin(ctx, "file_rename", builtin_file_rename);
+    VM_registerBuiltin(ctx, "action_set_motion", builtin_action_set_motion);
+    VM_registerBuiltin(ctx, "action_previous_room", builtin_action_previous_room);
+    VM_registerBuiltin(ctx, "collision_circle", builtin_collision_circle);
+    VM_registerBuiltin(ctx, "draw_circle", builtin_draw_circle);
+    VM_registerBuiltin(ctx, "draw_set_circle_precision", builtin_draw_set_circle_precision);
+    VM_registerBuiltin(ctx, "draw_line_color", builtin_draw_line_color);
+    VM_registerBuiltin(ctx, "draw_line_colour", builtin_draw_line_color);
+    VM_registerBuiltin(ctx, "draw_triangle_color", builtin_draw_triangle_color);
+    VM_registerBuiltin(ctx, "draw_triangle_colour", builtin_draw_triangle_color);
+    VM_registerBuiltin(ctx, "draw_ellipse_color", builtin_draw_ellipse_color);
+    VM_registerBuiltin(ctx, "draw_ellipse_colour", builtin_draw_ellipse_color);
+    VM_registerBuiltin(ctx, "draw_roundrect", builtin_draw_roundrect);
+    VM_registerBuiltin(ctx, "draw_text_transformed_color", builtin_draw_text_transformed_color);
+    VM_registerBuiltin(ctx, "draw_text_transformed_colour", builtin_draw_text_transformed_color);
+    VM_registerBuiltin(ctx, "draw_enable_alphablend", builtin_draw_enable_alphablend);
+    VM_registerBuiltin(ctx, "draw_clear_alpha", builtin_draw_clear_alpha);
+    VM_registerBuiltin(ctx, "draw_point_color", builtin_draw_point_color);
+    VM_registerBuiltin(ctx, "draw_point_colour", builtin_draw_point_color);
+    VM_registerBuiltin(ctx, "draw_getpixel", builtin_draw_getpixel);
+    VM_registerBuiltin(ctx, "texture_set_interpolation", builtin_texture_set_interpolation);
+    VM_registerBuiltin(ctx, "sprite_prefetch", builtin_sprite_prefetch);
+    VM_registerBuiltin(ctx, "sprite_replace", builtin_sprite_replace);
+    VM_registerBuiltin(ctx, "sprite_collision_mask", builtin_sprite_collision_mask);
+    VM_registerBuiltin(ctx, "ini_open_from_string", builtin_ini_open_from_string);
+    VM_registerBuiltin(ctx, "buffer_async_group_begin", builtin_buffer_async_group_begin);
+    VM_registerBuiltin(ctx, "buffer_async_group_option", builtin_buffer_async_group_option);
+    VM_registerBuiltin(ctx, "buffer_async_group_end", builtin_buffer_async_group_end);
+    VM_registerBuiltin(ctx, "buffer_load_async", builtin_buffer_load_async);
+    VM_registerBuiltin(ctx, "buffer_save_async", builtin_buffer_save_async);
+    VM_registerBuiltin(ctx, "get_string_async", builtin_get_string_async);
+    VM_registerBuiltin(ctx, "extension_stubfunc_real", builtin_extension_stubfunc_real);
+    VM_registerBuiltin(ctx, "steam_file_delete", builtin_steam_file_delete);
+    VM_registerBuiltin(ctx, "steam_file_write_file", builtin_steam_file_write_file);
+    VM_registerBuiltin(ctx, "window_get_x", builtin_window_get_x);
+    VM_registerBuiltin(ctx, "window_get_y", builtin_window_get_y);
+    VM_registerBuiltin(ctx, "window_set_position", builtin_window_set_position);
+    VM_registerBuiltin(ctx, "os_is_paused", builtin_os_is_paused);
 
     // ds_list stubs
     VM_registerBuiltin(ctx, "ds_list_create", builtinDsListCreate);

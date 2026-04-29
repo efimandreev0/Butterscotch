@@ -3072,6 +3072,7 @@ VMContext *VM_create(DataWin *dataWin) {
     // This eliminates per-call string hash lookups in handleCall.
     ctx->funcCallCacheCount = dataWin->func.functionCount;
     ctx->funcCallCache = safeMalloc(dataWin->func.functionCount * sizeof(FuncCallCache));
+    uint32_t unresolvedCount = 0;
     repeat(dataWin->func.functionCount, i) {
         const char *name = dataWin->func.functions[i].name;
         BuiltinFunc builtin = VM_findBuiltin(ctx, name);
@@ -3081,11 +3082,15 @@ VMContext *VM_create(DataWin *dataWin) {
         } else {
             ptrdiff_t mapIdx = shgeti(ctx->funcMap, (char*) name);
             ctx->funcCallCache[i].scriptCodeIndex = (mapIdx >= 0) ? ctx->funcMap[mapIdx].value : -1;
+            if (mapIdx < 0) {
+                fprintf(stderr, "VM: Unresolved builtin/script: %s\n", name);
+                unresolvedCount++;
+            }
         }
     }
 
-    fprintf(stderr, "VM: Initialized with %u global vars, sparse self vars (hashmap), %u functions mapped\n",
-            ctx->globalVarCount, (uint32_t) shlen(ctx->funcMap));
+    fprintf(stderr, "VM: Initialized with %u global vars, sparse self vars (hashmap), %u functions mapped (%u unresolved)\n",
+            ctx->globalVarCount, (uint32_t) shlen(ctx->funcMap), unresolvedCount);
 
     return ctx;
 }

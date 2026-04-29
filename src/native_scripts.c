@@ -102,6 +102,12 @@ static void setDirection(Instance *inst, GMLReal value) {
     Instance_computeComponentsFromSpeed(inst);
 }
 
+static inline void setAlarm(Instance *inst, int32_t index, int32_t value) {
+    inst->alarm[index] = value;
+    if (value > 0) inst->activeAlarmMask |= (uint16_t) (1u << index);
+    else inst->activeAlarmMask &= (uint16_t) ~(1u << index);
+}
+
 
 static GMLReal selfReal(Instance *inst, int32_t varId) {
     return RValue_toReal(Instance_getSelfVar(inst, varId));
@@ -368,7 +374,6 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
 
     DataWin *dw = ctx->dataWin;
 
-
     int32_t vtext = selfInt(inst, writerCache.vtext);
     GMLReal writingxend = selfReal(inst, writerCache.writingxend);
     GMLReal vspacing = selfReal(inst, writerCache.vspacing);
@@ -383,9 +388,7 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
     GMLReal htextscale = selfReal(inst, writerCache.htextscale);
     GMLReal vtextscale = selfReal(inst, writerCache.vtextscale);
 
-
     bool papdateExists = (writerCache.objPapdate >= 0 && findInstanceByObject(runner, writerCache.objPapdate) != NULL);
-
 
     static BuiltinFunc cachedInstanceExists = NULL;
     if (!cachedInstanceExists) cachedInstanceExists = VMBuiltins_find("instance_exists");
@@ -405,7 +408,6 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
     bool isEnglish = (strcmp(language, "en") == 0);
     bool isJapanese = (strcmp(language, "ja") == 0);
 
-
     char *ownedOriginalString = nullptr;
     int32_t origStrLen = (int32_t) strlen(originalstring);
 
@@ -413,13 +415,11 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
         char ch = nativeStringCharAtBuf(originalstring, origStrLen, n);
         if (ch == '\0') break;
 
-
         if (ch >= ' ' && ch != '/' && ch != '\\' && ch != '^' && ch != '&' &&
             ch != 'z' && ch != '*' && ch != '>' && ch != '%' &&
             isEnglish && !vtext && (int32_t) shake < 39) {
             GMLReal hs = halfsize ? 0.5 : 1.0;
             GMLReal offsetx = 0, offsety = 0;
-
 
             if (myx > writingxend) {
                 myx = writingx;
@@ -428,9 +428,7 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
 
             GMLReal letterx = myx;
 
-
             if (halfsize) offsety += (vspacing * 0.33);
-
 
             if ((int32_t) globalReal(ctx, writerCache.gTyper) == 18) {
                 if (ch == 'l' || ch == 'i') letterx += 2;
@@ -441,7 +439,6 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
                 if (ch == '\'') letterx += 1;
             }
 
-            // Standard random shake (shake > 0 && shake < 39)
             if ((int32_t) shake != 0) {
                 offsetx += ((GMLReal) rand() / (GMLReal) RAND_MAX) * shake - (shake / 2.0f);
                 offsety += ((GMLReal) rand() / (GMLReal) RAND_MAX) * shake - (shake / 2.0f);
@@ -460,7 +457,6 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
                                        (float) (htextscale * hs), (float) (vtextscale * hs), 0.f);
 
             letterx += spacing;
-            // Font-specific kerning
             if (myfont == writerCache.fntComicsans) {
                 if (ch == 'w' || ch == 'm') letterx += 2;
                 else if (ch == 'i' || ch == 'l') letterx -= 2;
@@ -500,7 +496,6 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
                 }
             }
 
-
             if (halfsize)
                 myx = GMLReal_round(myx + ((letterx - myx) / 2.0));
             else
@@ -513,7 +508,6 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
         } else if (ch == '\\') {
             n++;
             ch = nativeStringCharAtBuf(originalstring, origStrLen, n);
-
             bool handled = true;
             switch (ch) {
                 case 'R': mycolor = 255;
@@ -550,7 +544,6 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
                     char buf[2] = {ch, '\0'};
                     val = GMLReal_strtod(buf, nullptr);
                 }
-
                 globalArraySet(ctx, writerCache.gFlag, 20, RValue_makeReal(val));
             } else if (ch == 'E') {
                 n++;
@@ -601,7 +594,6 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
                         globalSet(ctx, writerCache.gTyper, RValue_makeReal((GMLReal) typerVal));
                     }
 
-
                     GMLReal currentTyper = globalReal(ctx, writerCache.gTyper);
                     RValue scrArg = RValue_makeReal(currentTyper);
                     RValue scrResult = VM_callCodeIndex(ctx, writerCache.scrTexttype, &scrArg, 1);
@@ -633,7 +625,6 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
                 if (myfont == writerCache.fntPapyrus || myfont == writerCache.fntJaPapyrusBtl) {
                     icontype = 1;
                 }
-
                 char chStr[2] = {ch, '\0'};
                 RValue getbtnArgs[2] = {RValue_makeString(chStr), RValue_makeReal((GMLReal) icontype)};
                 RValue spriteResult = VM_callCodeIndex(ctx, writerCache.scrGetbuttonsprite, getbtnArgs, 2);
@@ -674,15 +665,10 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
                         spritey += (rshake2 - (shake / 2.0));
                     }
                     GMLReal iconScale = 1.0;
-                    if (myfont == writerCache.fntMain || myfont == writerCache.fntJaMain) {
-                        iconScale = 2.0;
-                    }
-                    if (myfont == writerCache.fntMain || myfont == writerCache.fntMaintext) {
+                    if (myfont == writerCache.fntMain || myfont == writerCache.fntJaMain) iconScale = 2.0;
+                    if (myfont == writerCache.fntMain || myfont == writerCache.fntMaintext)
                         spritey += (1.0 * iconScale);
-                    }
-                    if (myfont == writerCache.fntJaPapyrusBtl) {
-                        spritex -= 1;
-                    }
+                    if (myfont == writerCache.fntJaPapyrusBtl) spritex -= 1;
                     if (myfont == writerCache.fntPapyrus && icontype == 1) {
                         int32_t sprHeight = (sprite >= 0 && dw->sprt.count > (uint32_t) sprite)
                                                 ? (int32_t) dw->sprt.sprites[sprite].height
@@ -722,45 +708,34 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
                     myx = 196;
                 } else {
                     myx = 100;
-                    if (myfont == writerCache.fntJaComicsansBig) {
-                        myx += 11;
-                    }
+                    if (myfont == writerCache.fntJaComicsansBig) myx += 11;
                 }
-
                 int32_t viewCurrent = runner->viewCurrent;
                 int32_t viewWview = 0;
                 if (viewCurrent >= 0 && 8 > viewCurrent) {
-                    viewWview = (int32_t) runner->currentRoom->views[viewCurrent].viewWidth;
+                    viewWview = (int32_t) runner->views[viewCurrent].viewWidth;
                 }
-                if (viewWview == 640) {
-                    myx *= 2;
-                }
+                if (viewWview == 640) myx *= 2;
 
                 int32_t viewXview = 0;
                 if (viewCurrent >= 0 && 8 > viewCurrent) {
-                    viewXview = (int32_t) runner->currentRoom->views[viewCurrent].viewX;
+                    viewXview = (int32_t) runner->views[viewCurrent].viewX;
                 }
                 myx += viewXview;
             }
         } else if (ch == '&') {
             Instance_setSelfVar(inst, writerCache.myx, RValue_makeReal(myx));
             Instance_setSelfVar(inst, writerCache.myy, RValue_makeReal(myy));
-
             RValue newlineResult = VM_callCodeIndex(ctx, writerCache.scrNewline, nullptr, 0);
             RValue_free(&newlineResult);
-
             myx = selfReal(inst, writerCache.myx);
             myy = selfReal(inst, writerCache.myy);
         } else if (ch == '/') {
             int32_t halt = 1;
             char nextch = nativeStringCharAtBuf(originalstring, origStrLen, n + 1);
-            if (nextch == '%') {
-                halt = 2;
-            } else if (nextch == '^' && nativeStringCharAtBuf(originalstring, origStrLen, n + 2) != '0') {
-                halt = 4;
-            } else if (nextch == '*') {
-                halt = 6;
-            }
+            if (nextch == '%') halt = 2;
+            else if (nextch == '^' && nativeStringCharAtBuf(originalstring, origStrLen, n + 2) != '0') halt = 4;
+            else if (nextch == '*') halt = 6;
             Instance_setSelfVar(inst, writerCache.halt, RValue_makeReal((GMLReal) halt));
             break;
         } else if (ch == '%') {
@@ -772,28 +747,25 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
             stringno++;
             Instance_setSelfVar(inst, writerCache.stringno, RValue_makeReal((GMLReal) stringno));
 
-
             RValue mystringVal = selfArrayGet(inst, writerCache.mystring, stringno);
             RValue replaceArgs[1] = {mystringVal};
             RValue replaceResult = VM_callCodeIndex(ctx, writerCache.scrReplaceButtonsPc, replaceArgs, 1);
-
 
             if (ownedOriginalString != nullptr) {
                 free(ownedOriginalString);
                 ownedOriginalString = nullptr;
             }
 
-
             Instance_setSelfVar(inst, writerCache.originalstring, replaceResult);
-
             originalstring = selfString(inst, writerCache.originalstring);
             RValue_free(&replaceResult);
+            origStrLen = (int32_t) strlen(originalstring);
 
             stringpos = 0;
             Instance_setSelfVar(inst, writerCache.stringpos, RValue_makeReal(0.0));
             myx = writingx;
             myy = writingy;
-            inst->alarm[0] = selfInt(inst, writerCache.textspeed);
+            setAlarm(inst, 0, selfInt(inst, writerCache.textspeed));
             break;
         } else {
             char myletter = nativeStringCharAtBuf(originalstring, origStrLen, n);
@@ -816,11 +788,8 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
             GMLReal halfscale = 1.0;
             if (halfsize) {
                 halfscale = 0.5;
-                if (vtext) {
-                    offsetx += (vspacing * 0.33);
-                } else {
-                    offsety += (vspacing * 0.33);
-                }
+                if (vtext) offsetx += (vspacing * 0.33);
+                else offsety += (vspacing * 0.33);
             }
             if (isEnglish) {
                 if ((int32_t) globalReal(ctx, writerCache.gTyper) == 18) {
@@ -835,13 +804,13 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
                     if (myletter == '\'') letterx += 1;
                 }
             } else if (isJapanese) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wtype-limits"
+                int32_t ordVal = (int32_t) (unsigned char) myletter;
                 if (vtext && (myfont == writerCache.fntJaPapyrus || myfont == writerCache.fntJaPapyrusBtl)) {
                     char myletterStr[2] = {myletter, '\0'};
                     bool isBracket = (strcmp(myletterStr, "\xe3\x80\x8c") == 0 || strcmp(myletterStr, "\xe3\x80\x8e") ==
                                       0);
-                    // Note: This check won't work for multi-byte chars with single char buffer
-
-
                     if ((int32_t) myy == (int32_t) writingy && isBracket) {
                         RValue swArgs[1] = {RValue_makeString(myletterStr)};
                         RValue sw = callBuiltin(ctx, "string_width", swArgs, 1);
@@ -850,13 +819,7 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
                     }
                 } else if (myfont == writerCache.fntJaMaintext || myfont == writerCache.fntJaMain) {
                     GMLReal unit = htextscale * halfscale;
-                    if (myfont == writerCache.fntJaMain) {
-                        unit *= 2;
-                    }
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wtype-limits"
-                    int32_t ordVal = (int32_t) (unsigned char) myletter;
+                    if (myfont == writerCache.fntJaMain) unit *= 2;
                     if (ordVal < 1024 || ordVal == 8211) {
                         if (n > 1) {
                             char lastchChar = nativeStringCharAtBuf(originalstring, origStrLen, n - 1);
@@ -865,16 +828,14 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
                                 letterx += unit;
                             }
                         }
-#pragma GCC diagnostic pop
                     }
                 }
+#pragma GCC diagnostic pop
             }
-
 
             RValue setfontArg = RValue_makeReal((GMLReal) myfont);
             RValue setfontResult = VM_callCodeIndex(ctx, writerCache.scrSetfont, &setfontArg, 1);
             RValue_free(&setfontResult);
-
 
             renderer->drawColor = (uint32_t) mycolor;
 
@@ -914,7 +875,6 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
             GMLReal finalx = GMLReal_round(letterx + offsetx);
             GMLReal finaly = GMLReal_round(myy + offsety);
 
-
             {
                 char letterStr[2] = {myletter, '\0'};
                 float xsc = (float) (htextscale * halfscale);
@@ -930,48 +890,27 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
 
             if (isEnglish) {
                 if (myfont == writerCache.fntComicsans) {
-                    if (myletter == 'w') letterx += 2;
-                    if (myletter == 'm') letterx += 2;
-                    if (myletter == 'i') letterx -= 2;
-                    if (myletter == 'l') letterx -= 2;
-                    if (myletter == 's') letterx -= 1;
-                    if (myletter == 'j') letterx -= 1;
+                    if (myletter == 'w' || myletter == 'm') letterx += 2;
+                    if (myletter == 'i' || myletter == 'l') letterx -= 2;
+                    if (myletter == 's' || myletter == 'j') letterx -= 1;
                 } else if (myfont == writerCache.fntPapyrus) {
-                    if (myletter == 'D') letterx += 1;
+                    if (myletter == 'D' || myletter == 'C' || myletter == 'A' || myletter == 'H' || myletter == 'B' ||
+                        myletter == 'G')
+                        letterx += 1;
                     if (myletter == 'Q') letterx += 3;
                     if (myletter == 'M') letterx += 1;
-                    if (myletter == 'L') letterx -= 1;
-                    if (myletter == 'K') letterx -= 1;
-                    if (myletter == 'C') letterx += 1;
-                    if (myletter == '.') letterx -= 3;
-                    if (myletter == '!') letterx -= 3;
+                    if (myletter == 'L' || myletter == 'K' || myletter == 'F' || myletter == 'T' || myletter == 'J')
+                        letterx -= 1;
+                    if (myletter == '.' || myletter == '!' || myletter == '?') letterx -= 3;
                     if (myletter == 'O' || myletter == 'W') letterx += 2;
-                    if (myletter == 'I') letterx -= 6;
-                    if (myletter == 'T') letterx -= 1;
-                    if (myletter == 'P') letterx -= 2;
-                    if (myletter == 'R') letterx -= 2;
-                    if (myletter == 'A') letterx += 1;
-                    if (myletter == 'H') letterx += 1;
-                    if (myletter == 'B') letterx += 1;
-                    if (myletter == 'G') letterx += 1;
-                    if (myletter == 'F') letterx -= 1;
-                    if (myletter == '?') letterx -= 3;
-                    if (myletter == '\'') letterx -= 6;
-                    if (myletter == 'J') letterx -= 1;
+                    if (myletter == 'I' || myletter == '\'') letterx -= 6;
+                    if (myletter == 'P' || myletter == 'R') letterx -= 2;
                 }
             } else if (isJapanese) {
-                // Note: Japanese text support requires proper UTF-8 multi-byte character handling.
-                // The single-byte char approach here only handles ASCII correctly. For multi-byte
-                // characters (ord >= 256), the GML original uses string_char_at which returns full
-                // Unicode codepoints. For now, single-byte characters always fall through to the
-                // "< 1024" branch since unsigned char maxes at 255.
-                // ordVal will only be 0-255 for single-byte chars; the >= 65377 / == 8211 branches
-                // are unreachable but kept for parity with the GML original (future UTF-8 support)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wtype-limits"
                 int32_t ordVal = (int32_t) (unsigned char) myletter;
                 if (vtext) {
-                    // string_width(myletter)
                     char letterStr[2] = {myletter, '\0'};
                     RValue swArgs[1] = {RValue_makeString(letterStr)};
                     RValue sw = callBuiltin(ctx, "string_width", swArgs, 1);
@@ -999,7 +938,6 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
         }
     }
 
-    // Write back myx, myy and mycolor to the instance
     Instance_setSelfVar(inst, writerCache.myx, RValue_makeReal(myx));
     Instance_setSelfVar(inst, writerCache.myy, RValue_makeReal(myy));
     Instance_setSelfVar(inst, writerCache.mycolor, RValue_makeReal((GMLReal) mycolor));
@@ -1130,7 +1068,7 @@ static void native_hpname_Step0(VMContext *ctx, Runner *runner, Instance *inst) 
 // GML: if (control_check(0) == 1) event_user(0);
 // =====================================================================
 static void native_battlecontroller_Step1(VMContext *ctx, Runner *runner, Instance *inst) {
-    // control_check(0) = keyboard_check(vk_confirm) — check via VMBuiltins
+    // control_check(0) = keyboard_check(vk_confirm) РІР‚вЂќ check via VMBuiltins
     RValue arg = RValue_makeReal(0);
     BuiltinFunc controlCheck = VMBuiltins_find("control_check");
     if (controlCheck) {
@@ -1268,7 +1206,7 @@ static inline GMLReal getGlobalArray(VMContext *ctx, int32_t varID, int32_t inde
     return (slot != NULL) ? RValue_toReal(*slot) : 0.0;
 }
 
-// Per-frame cache for border positions (avoids 2× findInstanceByObject + 2× getGlobalArray per bullet)
+// Per-frame cache for border positions (avoids 2Р“вЂ” findInstanceByObject + 2Р“вЂ” getGlobalArray per bullet)
 static struct {
     float lbx, rbx, border2, border3;
     uint64_t frame;
@@ -1298,7 +1236,7 @@ static void native_drawSelfBorder(VMContext *ctx, Runner *runner, Instance *inst
     float sw = (float) spr->width * inst->imageXscale;
     float sh = (float) spr->height * inst->imageYscale;
 
-    // Get border positions — cached per frame (was 2× findInstanceByObject = O(N) per call!)
+    // Get border positions РІР‚вЂќ cached per frame (was 2Р“вЂ” findInstanceByObject = O(N) per call!)
     updateBorderPosCache(ctx, runner);
     float lbx = borderPosCache.lbx;
     float rbx = borderPosCache.rbx;
@@ -1334,7 +1272,7 @@ static void native_drawSelfBorder(VMContext *ctx, Runner *runner, Instance *inst
 // =====================================================================
 // NATIVE BUILTIN: scr_gettext(text_id, [arg1], [arg2], ...)
 // Replaces the GML script which does:
-//   ds_map_find_value → for loop with string_copy per char → replace \[X]
+//   ds_map_find_value РІвЂ вЂ™ for loop with string_copy per char РІвЂ вЂ™ replace \[X]
 // The GML version is O(N) per call with malloc on every char. This is O(1) scan.
 // =====================================================================
 static struct {
@@ -1362,10 +1300,8 @@ static void initGettextCache(VMContext *ctx) {
 static RValue native_scr_gettext(VMContext *ctx, RValue *args, int32_t argCount) {
     if (!gettextCache.ready || argCount < 1) return RValue_makeOwnedString(safeStrdup(""));
 
-    // Get text_id string
-    const char *textId = (args[0].type == RVALUE_STRING && args[0].string) ? args[0].string : "";
+    char *textId = (args[0].type == RVALUE_STRING && args[0].string) ? args[0].string : "";
 
-    // ds_map_find_value(global.text_data_en, text_id)
     BuiltinFunc dsMapFind = VMBuiltins_find("ds_map_find_value");
     if (!dsMapFind) return RValue_makeOwnedString(safeStrdup(""));
 
@@ -1383,7 +1319,6 @@ static RValue native_scr_gettext(VMContext *ctx, RValue *args, int32_t argCount)
         text = ts;
     }
 
-    // Check Japanese
     if (gettextCache.textDataJa >= 0 && gettextCache.language >= 0) {
         RValue langVal = ctx->globalVars[gettextCache.language];
         if (langVal.type == RVALUE_STRING && langVal.string && strcmp(langVal.string, "ja") == 0) {
@@ -1400,21 +1335,20 @@ static RValue native_scr_gettext(VMContext *ctx, RValue *args, int32_t argCount)
         }
     }
 
-    // Replace \[X] patterns — direct C scan, no malloc per char
     size_t len = strlen(text);
     if (len < 4) {
-        // Too short for any \[X] pattern — return as-is
         char *result = safeStrdup(text);
         RValue_free(&textVal);
         return RValue_makeOwnedString(result);
     }
 
-    // Build result with replacements
-    char *result = safeMalloc(len * 4 + 64); // worst case: every \[X] replaced with long string
+    // Р вЂќР С‘Р Р…Р В°Р СР С‘РЎвЂЎР ВµРЎРѓР С”Р С‘Р в„– Р В±РЎС“РЎвЂћР ВµРЎР‚ РЎРѓ Р В·Р В°РЎвЂ°Р С‘РЎвЂљР С•Р в„– Р С•РЎвЂљ Р С—Р ВµРЎР‚Р ВµР С—Р С•Р В»Р Р…Р ВµР Р…Р С‘Р в„– Р С‘ Р С”РЎР‚Р В°РЎв‚¬Р ВµР в„–
+    size_t resultCap = len * 2 + 128;
+    char *result = (char*)malloc(resultCap);
+    if (!result) { RValue_free(&textVal); return RValue_makeOwnedString(safeStrdup("")); }
     size_t outPos = 0;
 
     for (size_t i = 0; i < len; i++) {
-        // Check for \[X] pattern: backslash, bracket, char, bracket
         if (i + 3 < len && text[i] == '\\' && text[i + 1] == '[' && text[i + 3] == ']') {
             char sel = text[i + 2];
             const char *replace = "";
@@ -1423,7 +1357,6 @@ static RValue native_scr_gettext(VMContext *ctx, RValue *args, int32_t argCount)
             if (sel == 'C' && gettextCache.charname >= 0) {
                 replace = globalString(ctx, gettextCache.charname);
             } else if (sel == 'I' && gettextCache.itemname >= 0 && gettextCache.menucoord >= 0) {
-                // \[I] = global.itemname[global.menucoord[1]]
                 int32_t menuIdx = (int32_t) getGlobalArray(ctx, gettextCache.menucoord, 1);
                 int64_t k = ((int64_t) gettextCache.itemname << 32) | (uint32_t) menuIdx;
                 ptrdiff_t idx = hmgeti(ctx->globalArrayMap, k);
@@ -1441,19 +1374,37 @@ static RValue native_scr_gettext(VMContext *ctx, RValue *args, int32_t argCount)
                 } else if (argIdx < argCount) {
                     char *ts = RValue_toString(args[argIdx]);
                     size_t rl = strlen(ts);
+                    if (outPos + rl + 1 >= resultCap) {
+                        resultCap = (outPos + rl) * 2 + 128;
+                        char *newResult = (char*)realloc(result, resultCap);
+                        if (!newResult) { free(result); free(ts); RValue_free(&textVal); return RValue_makeOwnedString(safeStrdup("")); }
+                        result = newResult;
+                    }
                     memcpy(result + outPos, ts, rl);
                     outPos += rl;
                     free(ts);
-                    i += 3; // skip \[X]
+                    i += 3;
                     continue;
                 }
             }
 
             size_t rl = strlen(replace);
+            if (outPos + rl + 1 >= resultCap) {
+                resultCap = (outPos + rl) * 2 + 128;
+                char *newResult = (char*)realloc(result, resultCap);
+                if (!newResult) { free(result); RValue_free(&textVal); return RValue_makeOwnedString(safeStrdup("")); }
+                result = newResult;
+            }
             memcpy(result + outPos, replace, rl);
             outPos += rl;
-            i += 3; // skip \[X]
+            i += 3;
         } else {
+            if (outPos + 2 >= resultCap) {
+                resultCap *= 2;
+                char *newResult = (char*)realloc(result, resultCap);
+                if (!newResult) { free(result); RValue_free(&textVal); return RValue_makeOwnedString(safeStrdup("")); }
+                result = newResult;
+            }
             result[outPos++] = text[i];
         }
     }
@@ -1464,7 +1415,7 @@ static RValue native_scr_gettext(VMContext *ctx, RValue *args, int32_t argCount)
 }
 
 // =====================================================================
-// NATIVE: obj_ct_fallobj_Step_0  (117× per frame in settings!)
+// NATIVE: obj_ct_fallobj_Step_0  (117Р“вЂ” per frame in settings!)
 // GML:
 //   if (y > 250) instance_destroy();
 //   siner += 1;
@@ -1484,7 +1435,7 @@ static void initFallobjCache(DataWin *dw) {
     fallobjCache.ready = (fallobjCache.siner >= 0 && fallobjCache.sinerfactor >= 0 && fallobjCache.rotspeed >= 0);
 }
 
-// NATIVE: obj_ct_fallobj_Create_0 — sets initial random motion/position.
+// NATIVE: obj_ct_fallobj_Create_0 РІР‚вЂќ sets initial random motion/position.
 // Nativized so we can skip VM dispatch on the ~1-per-frame creation in settings room.
 // GML:
 //   x = random(room_width);
@@ -1547,7 +1498,7 @@ static void native_ctFallobj_Step0(VMContext *ctx, Runner *runner, Instance *ins
 }
 
 // =====================================================================
-// NATIVE: obj_time_Step_1 — THE hottest script in overworld (473 lines!)
+// NATIVE: obj_time_Step_1 РІР‚вЂќ THE hottest script in overworld (473 lines!)
 // On PSP: skip joystick handling (done in main.c), debug, fullscreen.
 // Only keep: time increment, keyboard input mapping, quit handling.
 // =====================================================================
@@ -1620,7 +1571,7 @@ static void native_time_Step1(VMContext *ctx, Runner *runner, Instance *inst) {
         Instance_setSelfVar(inst, timeCache.time_var, RValue_makeReal(t + 1.0));
     }
 
-    // Inline control_update (GML script) — direct access to keyboard state +
+    // Inline control_update (GML script) РІР‚вЂќ direct access to keyboard state +
     // global.control_state[]. Replaces VM_callCodeIndex which dispatches 6+
     // keyboard_check calls + array updates. On PSP saves ~40us/frame.
     {
@@ -1642,9 +1593,9 @@ static void native_time_Step1(VMContext *ctx, Runner *runner, Instance *inst) {
         }
     }
 
-    // PSP: SKIP joystick handling (lines 104-317 in GML) — done in main.c
+    // PSP: SKIP joystick handling (lines 104-317 in GML) РІР‚вЂќ done in main.c
 
-    // Keyboard input → self.up/down/left/right. Direct keyboard state reads
+    // Keyboard input РІвЂ вЂ™ self.up/down/left/right. Direct keyboard state reads
     // instead of VMBuiltins_find("keyboard_check") dispatches (~16 calls/frame).
     RunnerKeyboardState *kb = runner->keyboard;
 #define KB(key)  (kb->keyDown[key])
@@ -1691,14 +1642,14 @@ static void native_time_Step1(VMContext *ctx, Runner *runner, Instance *inst) {
     }
     GMLReal wasIdle = RValue_toReal(Instance_getSelfVar(inst, timeCache.idle));
     if (nowIdle && !wasIdle) {
-        // current_time is a built-in VARIABLE (not function) — use VMBuiltins_getVariable
+        // current_time is a built-in VARIABLE (not function) РІР‚вЂќ use VMBuiltins_getVariable
         RValue ct = VMBuiltins_getVariable(ctx, BUILTIN_VAR_CURRENT_TIME, "current_time", -1);
         Instance_setSelfVar(inst, timeCache.idle_time, ct);
         RValue_free(&ct);
     }
     Instance_setSelfVar(inst, timeCache.idle, RValue_makeReal(nowIdle ? 1 : 0));
 
-    // Skip: debug (lines 422-432), fullscreen (434-440) — not relevant on PSP
+    // Skip: debug (lines 422-432), fullscreen (434-440) РІР‚вЂќ not relevant on PSP
 
     // Quit handling
     GMLReal canquit = RValue_toReal(Instance_getSelfVar(inst, timeCache.canquit));
@@ -1711,7 +1662,7 @@ static void native_time_Step1(VMContext *ctx, Runner *runner, Instance *inst) {
         if (KB(27)) {
             GMLReal q = RValue_toReal(Instance_getSelfVar(inst, timeCache.quit)) + 1.0;
             Instance_setSelfVar(inst, timeCache.quit, RValue_makeReal(q));
-            // instance_exists(140) == 0 → instance_create(0,0,140)
+            // instance_exists(140) == 0 РІвЂ вЂ™ instance_create(0,0,140)
             BuiltinFunc instExists = VMBuiltins_find("instance_exists");
             if (instExists) {
                 RValue a = RValue_makeReal(140);
@@ -1733,8 +1684,8 @@ static void native_time_Step1(VMContext *ctx, Runner *runner, Instance *inst) {
 // ===[ Initialization ]===
 
 // =====================================================================
-// NATIVE: action_kill_object() — just instance_destroy()
-// Used by whtpxlgrav (vaporize particles), 93× per frame
+// NATIVE: action_kill_object() РІР‚вЂќ just instance_destroy()
+// Used by whtpxlgrav (vaporize particles), 93Р“вЂ” per frame
 // =====================================================================
 static void native_actionKillObject(VMContext *ctx, Runner *runner, Instance *inst) {
     (void) ctx;
@@ -1743,11 +1694,11 @@ static void native_actionKillObject(VMContext *ctx, Runner *runner, Instance *in
 
 // =====================================================================
 // NATIVE: Generic simple scripts (overworld objects)
-// These are trivial scripts that run every frame — avoid VM overhead.
+// These are trivial scripts that run every frame РІР‚вЂќ avoid VM overhead.
 // =====================================================================
 
 // obj_readable_Step_0 / obj_readablesolid_Step_0 (identical logic)
-// 4× per frame in ruins3
+// 4Р“вЂ” per frame in ruins3
 static struct {
     int32_t myinteract, mydialoguer;
     bool ready;
@@ -1764,7 +1715,7 @@ static void native_readable_Step0(VMContext *ctx, Runner *runner, Instance *inst
     int32_t mi = selfInt(inst, readableCache.myinteract);
     if (mi == 1) {
         globalSet(ctx, findGlobalVarId(ctx, "interact"), RValue_makeReal(1));
-        inst->alarm[0] = 1;
+        setAlarm(inst, 0, 1);
         Instance_setSelfVar(inst, readableCache.myinteract, RValue_makeReal(2));
     } else if (mi == 3) {
         int32_t dlgId = (int32_t) selfReal(inst, readableCache.mydialoguer);
@@ -1882,7 +1833,7 @@ static void native_writerStep0(VMContext *ctx, Runner *runner, Instance *inst) {
 }
 
 // =====================================================================
-// NATIVE: obj_finalbarrier_Draw_0 (100× per frame at barrier scene!)
+// NATIVE: obj_finalbarrier_Draw_0 (100Р“вЂ” per frame at barrier scene!)
 // GML: script_execute(scr_colorcycle); draw_set_color(color);
 //      ossafe_fill_rectangle(x, y, room_width/2 + room_width/m, room_height/2 + room_height/m);
 // scr_colorcycle: for i=0..2: bounce c[i] between 10..250, color = make_color_rgb(c[0],c[1],c[2])
@@ -1961,7 +1912,7 @@ static void native_finalbarrier_Draw0(VMContext *ctx, Runner *runner, Instance *
 }
 
 // =====================================================================
-// NATIVE: Asgore battle scripts (240×, 239×, 90×, 22× per frame!)
+// NATIVE: Asgore battle scripts (240Р“вЂ”, 239Р“вЂ”, 90Р“вЂ”, 22Р“вЂ” per frame!)
 // =====================================================================
 
 // obj_sinefire_asghelix_Step_0: s+=1; x+=sin(s/sv)*sf; destroy if y>room_h+100; collision check
@@ -1993,7 +1944,7 @@ static void native_asghelix_Step0(VMContext *ctx, Runner *runner, Instance *inst
 }
 
 // obj_asgorebulparent_Step_2: same as blt_parent_Step_2
-// Already have native_bltParent_Step2 — reuse it!
+// Already have native_bltParent_Step2 РІР‚вЂќ reuse it!
 
 // obj_orangeparticle_Step_0: size lerp + alpha fade + sin/cos movement
 static struct {
@@ -2116,8 +2067,8 @@ static void native_noop(VMContext *ctx, Runner *runner, Instance *inst) {
 }
 
 // =====================================================================
-// NATIVE: obj_asgoreb_body_Draw_0 (Asgore body — 8 draw_sprite_ext + sin/cos animation)
-// 168us on PC = ~1.2ms on PSP — biggest single Draw script!
+// NATIVE: obj_asgoreb_body_Draw_0 (Asgore body РІР‚вЂќ 8 draw_sprite_ext + sin/cos animation)
+// 168us on PC = ~1.2ms on PSP РІР‚вЂќ biggest single Draw script!
 // =====================================================================
 static struct {
     int32_t part, partx, party, siner, fakeanim, moving;
@@ -2140,7 +2091,7 @@ static void initAsgBodyCache(DataWin *dw) {
 // NATIVE: obj_itemswapper_Draw_0 (menu UI with 18+ draw_text calls = ~2.7ms PSP)
 // Native version: direct renderer.drawText calls, cached global arrays, skip VM dispatch.
 // Complex helpers (scr_itemname, scr_storagename, scr_drawtext_icons, scr_drawtext_centered)
-// are invoked via VM_callCodeIndex — they're called once, not per-character.
+// are invoked via VM_callCodeIndex РІР‚вЂќ they're called once, not per-character.
 
 static struct {
     int32_t buffer, boxno, boxtype, column, c0y, c1y, spec, noroom;
@@ -2220,8 +2171,8 @@ static void native_itemswapper_Draw0(VMContext *ctx, Runner *runner, Instance *i
     Instance_setSelfVar(inst, swapperCache.boxno, RValue_makeReal((GMLReal) boxno));
 
 
-    float xx = (float) runner->currentRoom->views[runner->viewCurrent].viewX;
-    float yy = (float) runner->currentRoom->views[runner->viewCurrent].viewY + 6.0f;
+    float xx = (float) runner->views[runner->viewCurrent].viewX;
+    float yy = (float) runner->views[runner->viewCurrent].viewY + 6.0f;
 
 
     const char *lang = globalString(ctx, swapperCache.gLanguage);
@@ -2924,10 +2875,11 @@ static int32_t findAllSelfVarIds(DataWin *dw, const char *name, int32_t *outArr,
     forEach(Variable, v, dw->vari.variables, dw->vari.variableCount) {
         if (v->varID >= 0 && v->instanceType != INSTANCE_GLOBAL && strcmp(v->name, name) == 0) {
             bool dup = false;
-            for (int32_t k = 0; k < count; k++) if (outArr[k] == v->varID) {
-                dup = true;
-                break;
-            }
+            for (int32_t k = 0; k < count; k++)
+                if (outArr[k] == v->varID) {
+                    dup = true;
+                    break;
+                }
             if (!dup && count < maxCount) outArr[count++] = v->varID;
         }
     }
@@ -2961,7 +2913,7 @@ static void initSpearCache(DataWin *dw) {
     spearCache.ready = (spearCache.siner >= 0 && spearCache.angleCandidateCount > 0 &&
                         spearCache.color_v >= 0 && spearCache.xhand1 >= 0);
     if (spearCache.angleCandidateCount > 1) {
-        fprintf(stderr, "NativeScripts: spear 'angle' has %d VARI entries — per-instance resolve enabled\n",
+        fprintf(stderr, "NativeScripts: spear 'angle' has %d VARI entries РІР‚вЂќ per-instance resolve enabled\n",
                 spearCache.angleCandidateCount);
     }
 }
@@ -4171,7 +4123,7 @@ static void native_specialtile_Alarm0(VMContext *ctx, Runner *runner, Instance *
     }
 
 
-    inst->alarm[0] = (int32_t) randofactor;
+    setAlarm(inst, 0, (int32_t) randofactor);
 
 
     int32_t gg = (int32_t) (((double) rand() / ((double) RAND_MAX + 1.0)) * 7.0);
@@ -4324,8 +4276,8 @@ static void native_dialoguer_Draw0(VMContext *ctx, Runner *runner, Instance *ins
     if (!r || !runner->currentRoom) return;
 
     int32_t side = selfInt(inst, dialoguerCache.side);
-    float vx = (float) runner->currentRoom->views[runner->viewCurrent].viewX;
-    float vy = (float) runner->currentRoom->views[runner->viewCurrent].viewY;
+    float vx = (float) runner->views[runner->viewCurrent].viewX;
+    float vy = (float) runner->views[runner->viewCurrent].viewY;
 
 
     uint32_t writerId = (uint32_t) selfInt(inst, dialoguerCache.writer);
@@ -4333,11 +4285,13 @@ static void native_dialoguer_Draw0(VMContext *ctx, Runner *runner, Instance *ins
     if (writerInst && writerInst->active && dialoguerCache.writer_writingy >= 0) {
         GMLReal wy = selfReal(writerInst, dialoguerCache.writer_writingy);
         if (side == 0) {
-            if (wy > (vy + 80.0f)) Instance_setSelfVar(writerInst, dialoguerCache.writer_writingy,
-                                                       RValue_makeReal(wy - 155.0));
+            if (wy > (vy + 80.0f))
+                Instance_setSelfVar(writerInst, dialoguerCache.writer_writingy,
+                                    RValue_makeReal(wy - 155.0));
         } else {
-            if (wy < (vy + 80.0f)) Instance_setSelfVar(writerInst, dialoguerCache.writer_writingy,
-                                                       RValue_makeReal(wy + 155.0));
+            if (wy < (vy + 80.0f))
+                Instance_setSelfVar(writerInst, dialoguerCache.writer_writingy,
+                                    RValue_makeReal(wy + 155.0));
         }
     }
 
@@ -4570,8 +4524,8 @@ static void native_overworldctrl_Draw0(VMContext *ctx, Runner *runner, Instance 
         Instance_setSelfVar(inst, ovrctrlCache.currentmenu, RValue_makeReal((GMLReal) currentmenu));
         Instance_setSelfVar(inst, ovrctrlCache.currentspot, RValue_makeReal(currentspot));
 
-        float xx = (float) runner->currentRoom->views[runner->viewCurrent].viewX;
-        float yy = (float) runner->currentRoom->views[runner->viewCurrent].viewY + 10.0f;
+        float xx = (float) runner->views[runner->viewCurrent].viewX;
+        float yy = (float) runner->views[runner->viewCurrent].viewY + 10.0f;
         float moveyy = yy;
         Instance *mainchara = (ovrctrlCache.objMainchara >= 0)
                                   ? findInstanceByObject(runner, ovrctrlCache.objMainchara)
@@ -5594,7 +5548,7 @@ static void native_vapNew_Draw0(VMContext *ctx, Runner *runner, Instance *inst) 
             Runner_destroyInstance(runner, inst);
             return;
         } else {
-            inst->alarm[0] = 1 + myvapor;
+            setAlarm(inst, 0, 1 + myvapor);
         }
     }
 
@@ -5997,8 +5951,8 @@ static void native_trueLavawaver_Draw0(VMContext *ctx, Runner *runner, Instance 
     if (darkAlpha < 0.0f) darkAlpha = 0.0f;
     if (darkAlpha > 1.0f) darkAlpha = 1.0f;
     if (runner->currentRoom) {
-        float vx = (float) runner->currentRoom->views[0].viewX;
-        float vy = (float) runner->currentRoom->views[0].viewY;
+        float vx = (float) runner->views[0].viewX;
+        float vy = (float) runner->views[0].viewY;
         r->vtable->drawRectangle(r, vx - 10.0f, vy - 10.0f, vx + 330.0f, vy + 250.0f,
                                  0x000000u, darkAlpha, false);
     }
@@ -6188,7 +6142,7 @@ static void native_bottomglower_Draw0(VMContext *ctx, Runner *runner, Instance *
 
     float cw = 0.0f;
     float roomH = (float) runner->currentRoom->height;
-    float vx = (float) runner->currentRoom->views[0].viewX;
+    float vx = (float) runner->views[0].viewX;
 
 
     GMLReal finalAlp = 0.0, finalW = 0.0;
@@ -6460,7 +6414,7 @@ static void native_bluelaser_Draw0(VMContext *ctx, Runner *runner, Instance *ins
     }
 
     if (selfInt(inst, bluelaserCache.ex) == 1 && findInstanceByObject(runner, 784) == NULL) {
-        inst->alarm[3] = 1;
+        setAlarm(inst, 3, 1);
         Instance_setSelfVar(inst, bluelaserCache.ex, RValue_makeReal(0.0));
     }
 
@@ -6668,7 +6622,7 @@ static void leglineDrawShared(VMContext *ctx, Runner *runner, Instance *inst, bo
         if (myx >= attackLen - myspeed) {
             myx = attackLen;
             con = 4.0;
-            inst->alarm[4] = 6;
+            setAlarm(inst, 4, 6);
             shake = 5.0;
         }
     }
@@ -8125,7 +8079,7 @@ static void native_floweyMouth_Draw0(VMContext *ctx, Runner *runner, Instance *i
     if (con == 3) {
         con = 4;
         cntr = 0.0;
-        inst->alarm[4] = 40;
+        setAlarm(inst, 4, 40);
     }
 
 
@@ -8145,7 +8099,7 @@ static void native_floweyMouth_Draw0(VMContext *ctx, Runner *runner, Instance *i
         Instance *b = Runner_createInstance(runner, 271.0, 214.0, 1645);
         if (b) b->depth = inst->depth + 1;
         con = 6;
-        inst->alarm[4] = 25;
+        setAlarm(inst, 4, 25);
     }
 
 
@@ -8405,7 +8359,7 @@ static void native_floweyEye_Draw0(VMContext *ctx, Runner *runner, Instance *ins
 
     if (con == 1) {
         con = 3;
-        inst->alarm[4] = 4;
+        setAlarm(inst, 4, 4);
     }
 
 
@@ -8421,7 +8375,7 @@ static void native_floweyEye_Draw0(VMContext *ctx, Runner *runner, Instance *ins
         con = 5;
         durara = 0.0;
         oner = (rand() & 1) ? 1 : 0;
-        inst->alarm[4] = 7;
+        setAlarm(inst, 4, 7);
         inst->imageBlend = 0xFFFFFFu;
     }
 
@@ -8796,7 +8750,7 @@ static void native_floweyLeftEye_Draw0(VMContext *ctx, Runner *runner, Instance 
 
     if (con == 1) {
         con = 3;
-        inst->alarm[4] = 2;
+        setAlarm(inst, 4, 2);
     }
 
     if (con == 3) {
@@ -8811,7 +8765,7 @@ static void native_floweyLeftEye_Draw0(VMContext *ctx, Runner *runner, Instance 
         con = 5;
         durara = 0.0;
         oner = (rand() & 1) ? 1 : 0;
-        inst->alarm[4] = 3;
+        setAlarm(inst, 4, 3);
         inst->imageBlend = 0xFFFFFFu;
     }
 
@@ -8949,10 +8903,12 @@ static void native_floweyLeftEye_Draw0(VMContext *ctx, Runner *runner, Instance 
     Instance_setSelfVar(inst, floweyEyeCache.durara, RValue_makeReal(durara));
     Instance_setSelfVar(inst, floweyEyeCache.oner, RValue_makeReal((GMLReal) oner));
     if (floweyLeftEyeCache.rot >= 0) Instance_setSelfVar(inst, floweyLeftEyeCache.rot, RValue_makeReal((GMLReal) rot));
-    if (floweyLeftEyeCache.rotx >= 0) Instance_setSelfVar(inst, floweyLeftEyeCache.rotx,
-                                                          RValue_makeReal((GMLReal) rotx));
-    if (floweyLeftEyeCache.roty >= 0) Instance_setSelfVar(inst, floweyLeftEyeCache.roty,
-                                                          RValue_makeReal((GMLReal) roty));
+    if (floweyLeftEyeCache.rotx >= 0)
+        Instance_setSelfVar(inst, floweyLeftEyeCache.rotx,
+                            RValue_makeReal((GMLReal) rotx));
+    if (floweyLeftEyeCache.roty >= 0)
+        Instance_setSelfVar(inst, floweyLeftEyeCache.roty,
+                            RValue_makeReal((GMLReal) roty));
 }
 
 
@@ -9341,7 +9297,7 @@ static void native_floweyTv_Draw0(VMContext *ctx, Runner *runner, Instance *inst
         break;
 
         case 1: {
-            inst->alarm[1] = -1;
+            setAlarm(inst, 1, -1);
             r->vtable->drawRectangle(r, fx + 20.0f, fy + 10.0f, fx + 160.0f, fy + 140.0f,
                                      0x000000u, 1.0f, false);
             float sprAlpha = 0.8f + (float) GMLReal_sin(siner / 2.0);
@@ -9356,7 +9312,7 @@ static void native_floweyTv_Draw0(VMContext *ctx, Runner *runner, Instance *inst
         break;
 
         case 2: {
-            inst->alarm[1] = -1;
+            setAlarm(inst, 1, -1);
             Renderer_drawSpriteExt(r, 2309, (int32_t) tvRand(3.0f), fx + 26.0f, fy + 50.0f,
                                    1.2f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
             Renderer_drawSprite(r, inst->spriteIndex, imgIdx, fx, fy + (float) (GMLReal_sin(siner / 3.0) * 1.0));
@@ -9988,7 +9944,7 @@ static void actRunPattern(VMContext *ctx, Runner *runner, Instance *inst, const 
             actWithSelfVarSet(runner, 1591, pdVar, 1.0);
         }
         Instance_setSelfVar(inst, conVar, RValue_makeReal(2.1));
-        inst->alarm[4] = 50;
+        setAlarm(inst, 4, 50);
     } else if (con == 2.1 && p->with21_a > 0) {
         actWithEventUser(runner, p->with21_a, 5);
     } else if (con == 3.0) {
@@ -10308,7 +10264,7 @@ static void native_bookMaster_Draw0(VMContext *ctx, Runner *runner, Instance *in
         actWithSelfVarSet(runner, 1591, pdVar, 1.0);
         actWithEventUser(runner, 1628, 5);
         Instance_setSelfVar(inst, conVar, RValue_makeReal(2.1));
-        inst->alarm[4] = 50;
+        setAlarm(inst, 4, 50);
     } else if (con == 3.0) {
         GMLReal cur = (actSharedCache.gSoulRescue >= 0)
                           ? globalReal(ctx, actSharedCache.gSoulRescue)
@@ -10923,8 +10879,8 @@ static void native_fgWaterfall_Draw0(VMContext *ctx, Runner *runner, Instance *i
     Instance_setSelfVar(inst, fgWaterfallCache.anim, RValue_makeReal(anim));
 
 
-    float viewX = (float) runner->currentRoom->views[0].viewX;
-    float viewW = (float) runner->currentRoom->views[0].viewWidth;
+    float viewX = (float) runner->views[0].viewX;
+    float viewW = (float) runner->views[0].viewWidth;
     float roomW = (float) runner->currentRoom->width;
     float myview = 0.0f;
     if (viewX > 0.0f && viewX < (roomW - viewW)) myview = viewX;
@@ -12599,8 +12555,8 @@ static void native_memoryheadBody_Draw0(VMContext *ctx, Runner *runner, Instance
         if (cc <= 1.0) {
             mega = 0;
             on = 0;
-            inst->alarm[2] = -1;
-            inst->alarm[1] = 90;
+            setAlarm(inst, 2, -1);
+            setAlarm(inst, 1, 90);
             Instance_setSelfVar(inst, memoryheadCache.on, RValue_makeReal(0.0));
         }
         Instance_setSelfVar(inst, memoryheadCache.cc, RValue_makeReal(cc));
@@ -12672,7 +12628,7 @@ static void initWrapshockCache(DataWin *dw) {
                             wrapshockCache.mf >= 0 && wrapshockCache.type >= 0 &&
                             wrapshockCache.faceCandidateCount > 0);
     if (wrapshockCache.faceCandidateCount > 1) {
-        fprintf(stderr, "NativeScripts: wrapshock 'face' has %d VARI entries — per-instance resolve enabled\n",
+        fprintf(stderr, "NativeScripts: wrapshock 'face' has %d VARI entries РІР‚вЂќ per-instance resolve enabled\n",
                 wrapshockCache.faceCandidateCount);
     }
 }
@@ -12742,12 +12698,15 @@ static void native_wrapshock_Draw0(VMContext *ctx, Runner *runner, Instance *ins
         if (shock == 1) {
             Renderer_drawSpriteExt(r, 2421, 0, inst->x + 58, inst->y - 52, 2.0f, 2.0f, 0.0f, blend, alpha);
         } else {
-            if (face == 0) Renderer_drawSpriteExt(r, 2420, 0, inst->x + 58, inst->y - 52, 2.0f, 2.0f, 0.0f, blend,
-                                                  alpha);
-            if (face == 1) Renderer_drawSpriteExt(r, 2422, 0, inst->x + 58, inst->y - 52, 2.0f, 2.0f, 0.0f, blend,
-                                                  alpha);
-            if (face == 2) Renderer_drawSpriteExt(r, 2422, 1, inst->x + 58, inst->y - 52, 2.0f, 2.0f, 0.0f, blend,
-                                                  alpha);
+            if (face == 0)
+                Renderer_drawSpriteExt(r, 2420, 0, inst->x + 58, inst->y - 52, 2.0f, 2.0f, 0.0f, blend,
+                                       alpha);
+            if (face == 1)
+                Renderer_drawSpriteExt(r, 2422, 0, inst->x + 58, inst->y - 52, 2.0f, 2.0f, 0.0f, blend,
+                                       alpha);
+            if (face == 2)
+                Renderer_drawSpriteExt(r, 2422, 1, inst->x + 58, inst->y - 52, 2.0f, 2.0f, 0.0f, blend,
+                                       alpha);
         }
     } else if (type == 1) {
         inst->x += (float) (cos(siner / 2.0) * 0.5 * mf);
@@ -12771,10 +12730,12 @@ static void native_wrapshock_Draw0(VMContext *ctx, Runner *runner, Instance *ins
         if (shock == 1) {
             Renderer_drawSpriteExt(r, 2432, 0, inst->x + 60, inst->y - 44, 2.0f, 2.0f, 0.0f, blend, alpha);
         } else {
-            if (face == 0) Renderer_drawSpriteExt(r, 2432, 0, inst->x + 60, inst->y - 44, 2.0f, 2.0f, 0.0f, blend,
-                                                  alpha);
-            if (face == 1) Renderer_drawSpriteExt(r, 2432, 1, inst->x + 60, inst->y - 44, 2.0f, 2.0f, 0.0f, blend,
-                                                  alpha);
+            if (face == 0)
+                Renderer_drawSpriteExt(r, 2432, 0, inst->x + 60, inst->y - 44, 2.0f, 2.0f, 0.0f, blend,
+                                       alpha);
+            if (face == 1)
+                Renderer_drawSpriteExt(r, 2432, 1, inst->x + 60, inst->y - 44, 2.0f, 2.0f, 0.0f, blend,
+                                       alpha);
             if (face == 2) Renderer_drawSpriteExt(r, 2424, 0, inst->x + 40, inst->y, 2.0f, 2.0f, 0.0f, blend, alpha);
         }
     } else if (type == 3) {
@@ -12796,8 +12757,9 @@ static void native_wrapshock_Draw0(VMContext *ctx, Runner *runner, Instance *ins
             if (face == 0)
                 Renderer_drawSpriteExt(r, 2437, (int32_t) floor(siner / 5.0),
                                        inst->x + 30, inst->y - 40, 2.0f, 2.0f, 0.0f, blend, alpha);
-            if (face == 1) Renderer_drawSpriteExt(r, 2438, 0, inst->x + 30, inst->y - 40, 2.0f, 2.0f, 0.0f, blend,
-                                                  alpha);
+            if (face == 1)
+                Renderer_drawSpriteExt(r, 2438, 0, inst->x + 30, inst->y - 40, 2.0f, 2.0f, 0.0f, blend,
+                                       alpha);
             if (face == 2) Renderer_drawSpriteExt(r, 2424, 0, inst->x + 40, inst->y, 2.0f, 2.0f, 0.0f, blend, alpha);
         }
     } else if (type == 4) {
@@ -12822,12 +12784,15 @@ static void native_wrapshock_Draw0(VMContext *ctx, Runner *runner, Instance *ins
         if (shock == 1) {
             Renderer_drawSpriteExt(r, 2424, 0, inst->x + 122, inst->y - 32, 2.0f, 2.0f, 0.0f, blend, alpha);
         } else {
-            if (face == 0) Renderer_drawSpriteExt(r, 2425, 0, inst->x + 124, inst->y - 32, 2.0f, 2.0f, 0.0f, blend,
-                                                  alpha);
-            if (face == 1) Renderer_drawSpriteExt(r, 2425, 1, inst->x + 124, inst->y - 32, 2.0f, 2.0f, 0.0f, blend,
-                                                  alpha);
-            if (face == 2) Renderer_drawSpriteExt(r, 2425, 2, inst->x + 124, inst->y - 32, 2.0f, 2.0f, 0.0f, blend,
-                                                  alpha);
+            if (face == 0)
+                Renderer_drawSpriteExt(r, 2425, 0, inst->x + 124, inst->y - 32, 2.0f, 2.0f, 0.0f, blend,
+                                       alpha);
+            if (face == 1)
+                Renderer_drawSpriteExt(r, 2425, 1, inst->x + 124, inst->y - 32, 2.0f, 2.0f, 0.0f, blend,
+                                       alpha);
+            if (face == 2)
+                Renderer_drawSpriteExt(r, 2425, 2, inst->x + 124, inst->y - 32, 2.0f, 2.0f, 0.0f, blend,
+                                       alpha);
         }
     }
 
@@ -12898,11 +12863,12 @@ static void native_roundedge_Draw0(VMContext *ctx, Runner *runner, Instance *ins
     if (roundedgeCache.hp >= 0) Instance_setSelfVar(inst, roundedgeCache.hp, RValue_makeReal(hp));
 
 
-    float viewX = (float) runner->currentRoom->views[runner->viewCurrent].viewX;
-    float viewW = (float) runner->currentRoom->views[runner->viewCurrent].viewWidth;
+    float viewX = (float) runner->views[runner->viewCurrent].viewX;
+    float viewW = (float) runner->views[runner->viewCurrent].viewWidth;
     if (roundedgeCache.lside >= 0) Instance_setSelfVar(inst, roundedgeCache.lside, RValue_makeReal((GMLReal) viewX));
-    if (roundedgeCache.rside >= 0) Instance_setSelfVar(inst, roundedgeCache.rside,
-                                                       RValue_makeReal((GMLReal) (viewX + viewW)));
+    if (roundedgeCache.rside >= 0)
+        Instance_setSelfVar(inst, roundedgeCache.rside,
+                            RValue_makeReal((GMLReal) (viewX + viewW)));
     if (roundedgeCache.side >= 0) Instance_setSelfVar(inst, roundedgeCache.side, RValue_makeReal(0.0));
     if (roundedgeCache.curx >= 0) Instance_setSelfVar(inst, roundedgeCache.curx, RValue_makeReal(0.0));
     if (roundedgeCache.size >= 0) Instance_setSelfVar(inst, roundedgeCache.size, RValue_makeReal(1.0));
@@ -13354,11 +13320,11 @@ static void native_asrielBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
             }
             armraise = 20.0;
             starcon = 2;
-            inst->alarm[5] = 1;
+            setAlarm(inst, 5, 1);
         }
         if (starcon == 3) {
             starcon = 4;
-            inst->alarm[5] = 1;
+            setAlarm(inst, 5, 1);
         }
         if (starcon == 5) {
             armrot_l -= armraise;
@@ -13366,7 +13332,7 @@ static void native_asrielBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
             armraise -= 2.0;
             if (armraise <= 0.0) {
                 starcon = 6;
-                inst->alarm[5] = 20;
+                setAlarm(inst, 5, 20);
             }
             if (C->armrot_l >= 0) Instance_setSelfVar(inst, C->armrot_l, RValue_makeReal(armrot_l));
             if (C->armrot_r >= 0) Instance_setSelfVar(inst, C->armrot_r, RValue_makeReal(armrot_r));
@@ -13407,7 +13373,7 @@ static void native_asrielBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
         }
         if (starcon == 7) {
             starcon = 8;
-            inst->alarm[5] = 15;
+            setAlarm(inst, 5, 15);
         }
         if (starcon == 9) starcon = 12;
         if (starcon == 12) {
@@ -13422,8 +13388,8 @@ static void native_asrielBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
                 }
             }
             starcon = 13;
-            inst->alarm[5] = 300;
-            if (type == 1) inst->alarm[5] = 180;
+            setAlarm(inst, 5, 300);
+            if (type == 1) setAlarm(inst, 5, 180);
         }
         if (starcon == 13) {
             if (inst->imageAlpha > 0.0f) inst->imageAlpha -= 0.05f;
@@ -13456,7 +13422,7 @@ static void native_asrielBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
             armraise = 20.0;
             bladecon = 2;
             if (C->specialarm >= 0) Instance_setSelfVar(inst, C->specialarm, RValue_makeReal(1.0));
-            inst->alarm[6] = 30;
+            setAlarm(inst, 6, 30);
         }
         if (bladecon == 2) {
             if (arm_alpha > 0.0) arm_alpha -= 0.05;
@@ -13468,7 +13434,7 @@ static void native_asrielBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
                 if (C->gen >= 0) Instance_setSelfVar(inst, C->gen, RValue_makeReal((GMLReal) gen_inst->instanceId));
             }
             bladecon = 4;
-            inst->alarm[6] = 30;
+            setAlarm(inst, 6, 30);
         }
         if (bladecon == 10) {
             heady = 0.0;
@@ -13523,7 +13489,7 @@ static void native_asrielBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
             arm_alpha = 1.0;
             guncon = 2;
             if (C->specialarm >= 0) Instance_setSelfVar(inst, C->specialarm, RValue_makeReal(2.0));
-            inst->alarm[7] = 20;
+            setAlarm(inst, 7, 20);
         }
         if (guncon == 2) {
             if (arm_alpha > 0.0) arm_alpha -= 0.05;
@@ -13535,7 +13501,7 @@ static void native_asrielBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
                 if (C->gen >= 0) Instance_setSelfVar(inst, C->gen, RValue_makeReal((GMLReal) gen_inst->instanceId));
             }
             guncon = 4;
-            inst->alarm[7] = 30;
+            setAlarm(inst, 7, 30);
         }
         if (guncon == 7) {
             arm_alpha += 0.1;
@@ -13544,7 +13510,7 @@ static void native_asrielBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
         if (guncon == 8) {
             aligncon = 1;
             guncon = 9;
-            inst->alarm[7] = 10;
+            setAlarm(inst, 7, 10);
             Instance_setSelfVar(inst, C->aligncon, RValue_makeReal(1.0));
         }
         if (guncon == 10) {
@@ -13564,11 +13530,11 @@ static void native_asrielBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
         if (gonercon == 1) {
             if (C->gFlag >= 0) globalArraySet(ctx, C->gFlag, 20, RValue_makeReal(1.0));
             gonercon = 2;
-            inst->alarm[8] = 1;
+            setAlarm(inst, 8, 1);
         }
         if (gonercon == 3) {
             gonercon = 4;
-            inst->alarm[8] = 30;
+            setAlarm(inst, 8, 30);
         }
         if (gonercon == 5) {
             asriel_withObjectSetVar(runner, C->obj744, C->ignore_border, RValue_makeReal(1.0));
@@ -13578,7 +13544,7 @@ static void native_asrielBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
                 Instance_setSelfVar(inst, C->ws, RValue_makeReal(ws_id));
             }
             gonercon = 6;
-            inst->alarm[8] = 40;
+            setAlarm(inst, 8, 40);
         }
         if (gonercon == 7) {
             Instance *hg_inst = Runner_createInstance(runner, 176.0, 16.0, 596);
@@ -13643,7 +13609,7 @@ static void native_asrielBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
             if (inst->imageAlpha >= 1.0f) {
                 inst->imageAlpha = 1.0f;
                 gonercon = 12;
-                inst->alarm[8] = 30;
+                setAlarm(inst, 8, 30);
             }
         }
         if (gonercon == 13) {
@@ -13878,7 +13844,7 @@ static void native_mhd_Draw0(VMContext *ctx, Runner *runner, Instance *inst) {
     if (spec == 1 && r0 > 30.0) {
         r0 = 30.0;
         selfArraySet(inst, mhdCache.r, 0, RValue_makeReal(r0));
-        inst->alarm[5] = -1;
+        setAlarm(inst, 5, -1);
         if (mhdCache.rspeed >= 0)
             selfArraySet(inst, mhdCache.rspeed, 0, RValue_makeReal(0.0));
         inst->depth = -2;
@@ -13915,7 +13881,7 @@ static void initStrangetangleCache(DataWin *dw) {
                                 strangetangleCache.y1CandidateCount > 0);
     if (strangetangleCache.x1CandidateCount > 1 || strangetangleCache.y1CandidateCount > 1) {
         fprintf(
-            stderr, "NativeScripts: strangetangle 'x1'/'y1' have %d/%d VARI entries — per-instance resolve enabled\n",
+            stderr, "NativeScripts: strangetangle 'x1'/'y1' have %d/%d VARI entries РІР‚вЂќ per-instance resolve enabled\n",
             strangetangleCache.x1CandidateCount, strangetangleCache.y1CandidateCount);
     }
 }
@@ -14177,7 +14143,7 @@ static void native_lastbeam_Draw0(VMContext *ctx, Runner *runner, Instance *inst
 
     if ((int32_t) timer == (int32_t) beamtime) {
         if (lastbeamCache.hits >= 0) Instance_setSelfVar(inst, lastbeamCache.hits, RValue_makeReal(0.0));
-        inst->alarm[5] = 1;
+        setAlarm(inst, 5, 1);
 
         if (lastbeamCache.objBtparent >= 0) {
             int32_t n = (int32_t) arrlen(runner->instances);
@@ -14274,10 +14240,12 @@ static void native_lastbeam_Draw0(VMContext *ctx, Runner *runner, Instance *inst
             if (home_v == 1) {
                 GMLReal targetx = 0.0;
                 GMLReal targety = 0.0;
-                if (lastbeamCache.targetx >= 0) Instance_setSelfVar(inst, lastbeamCache.targetx,
-                                                                    RValue_makeReal(targetx));
-                if (lastbeamCache.targety >= 0) Instance_setSelfVar(inst, lastbeamCache.targety,
-                                                                    RValue_makeReal(targety));
+                if (lastbeamCache.targetx >= 0)
+                    Instance_setSelfVar(inst, lastbeamCache.targetx,
+                                        RValue_makeReal(targetx));
+                if (lastbeamCache.targety >= 0)
+                    Instance_setSelfVar(inst, lastbeamCache.targety,
+                                        RValue_makeReal(targety));
                 GMLReal dx = targetx - inst->x;
                 GMLReal dy = targety - inst->y;
                 GMLReal dir = atan2(-dy, dx) * (180.0 / M_PI);
@@ -14445,8 +14413,9 @@ static void native_lastbeam_Draw0(VMContext *ctx, Runner *runner, Instance *inst
                         }
                     }
                 }
-                if (lastbeamCache.gBmenucoord >= 0) globalArraySet(ctx, lastbeamCache.gBmenucoord, 0,
-                                                                   RValue_makeReal(1.0));
+                if (lastbeamCache.gBmenucoord >= 0)
+                    globalArraySet(ctx, lastbeamCache.gBmenucoord, 0,
+                                   RValue_makeReal(1.0));
                 if (lastbeamCache.gMercy >= 0) globalSet(ctx, lastbeamCache.gMercy, RValue_makeReal(3.0));
             }
 
@@ -14666,7 +14635,7 @@ static void native_afinalBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
             arf -= 2.0;
             if (arf <= 0.0) {
                 ucon = 3;
-                inst->alarm[10] = 5;
+                setAlarm(inst, 10, 5);
             }
         }
         if (ucon == 4) {
@@ -14698,11 +14667,11 @@ static void native_afinalBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
                     Instance_setSelfVar(inst, AF->target, RValue_makeReal((GMLReal) tgt->instanceId));
             }
             ucon = 5;
-            inst->alarm[10] = 140;
+            setAlarm(inst, 10, 140);
 
             if (AF->u_gen >= 0) {
                 GMLReal u_gen = selfReal(inst, AF->u_gen);
-                if (u_gen == 2.0) inst->alarm[10] = 130;
+                if (u_gen == 2.0) setAlarm(inst, 10, 130);
             }
             arf = -30.0;
         }
@@ -14754,7 +14723,7 @@ static void native_afinalBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
 
         if (bconReal == 1.0) {
             if (AF->ps >= 0) Instance_setSelfVar(inst, AF->ps, RValue_makeReal(0.0));
-            inst->alarm[9] = 7;
+            setAlarm(inst, 9, 7);
             r_break = 0;
             r_al = 1.0;
             radi = 0.0;
@@ -14767,17 +14736,17 @@ static void native_afinalBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
             arf -= 5.0;
             if (arf <= 0.0) {
                 bconReal = 3.0;
-                inst->alarm[11] = 35;
+                setAlarm(inst, 11, 35);
             }
         }
         if (bconReal == 4.0) {
             bconReal = 4.1;
-            inst->alarm[11] = 2;
+            setAlarm(inst, 11, 2);
         }
         if (fabs(bconReal - 4.1) < 1e-6) armrot -= 5.0;
         if (fabs(bconReal - 5.1) < 1e-6) {
             bconReal = 5.0;
-            inst->alarm[11] = 5;
+            setAlarm(inst, 11, 5);
         }
         if (bconReal == 5.0) {
             ar_shake = 0.0;
@@ -14796,7 +14765,7 @@ static void native_afinalBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
             if (beam && AF->beam >= 0)
                 Instance_setSelfVar(inst, AF->beam, RValue_makeReal((GMLReal) beam->instanceId));
             bconReal = 7.0;
-            inst->alarm[11] = 400;
+            setAlarm(inst, 11, 400);
         }
 
 
@@ -14965,7 +14934,7 @@ static void native_hgBody_Draw0(VMContext *ctx, Runner *runner, Instance *inst) 
         inst->imageAlpha += 0.05f;
         if (inst->imageAlpha >= 1.0f) {
             con = 0.1;
-            inst->alarm[4] = 20;
+            setAlarm(inst, 4, 20);
         }
     }
 
@@ -14998,8 +14967,8 @@ static void native_hgBody_Draw0(VMContext *ctx, Runner *runner, Instance *inst) 
         if (hgBodyCache.siner >= 0) Instance_setSelfVar(inst, hgBodyCache.siner, RValue_makeReal(0.0));
         if (facescale < -1.0) {
             con = 1.9;
-            inst->alarm[4] = 75;
-            inst->alarm[6] = 100;
+            setAlarm(inst, 4, 75);
+            setAlarm(inst, 6, 100);
         }
     }
 
@@ -15342,7 +15311,7 @@ static void native_normaldrop_Step0(VMContext *ctx, Runner *runner, Instance *in
     }
 
     if (dont == 0 && runner->currentRoom != NULL) {
-        float viewX = (float) runner->currentRoom->views[runner->viewCurrent].viewX;
+        float viewX = (float) runner->views[runner->viewCurrent].viewX;
         if (inst->x < viewX - 40.0f) inst->x += 361.0f;
         if (inst->x > viewX + 360.0f) inst->x -= 361.0f;
     }
@@ -15496,7 +15465,7 @@ static void native_waterpushrock_Step0(VMContext *ctx, Runner *runner, Instance 
     if ((GMLReal) inst->y > bottomy) {
         Instance *splash = Runner_createInstance(runner, inst->x, inst->y, 1140);
         if (splash && runner->currentRoomIndex == 91) {
-            splash->alarm[0] = 2;
+            setAlarm(splash, 0, 2);
         }
         if (waterpushrockCache.d_v >= 0 && splash)
             Instance_setSelfVar(inst, waterpushrockCache.d_v, RValue_makeReal((GMLReal) splash->instanceId));
@@ -15679,8 +15648,8 @@ static void native_waterstarBg_Other10(VMContext *ctx, Runner *runner, Instance 
     if (f_test != 1) return;
 
     int32_t viewIdx = runner->viewCurrent;
-    float viewX = (float) runner->currentRoom->views[viewIdx].viewX;
-    float viewW = (float) runner->currentRoom->views[viewIdx].viewWidth;
+    float viewX = (float) runner->views[viewIdx].viewX;
+    float viewW = (float) runner->views[viewIdx].viewWidth;
     float roomW = (float) runner->currentRoom->width;
 
     float myview = viewX;
@@ -15719,10 +15688,12 @@ static void native_waterstarBg_Other10(VMContext *ctx, Runner *runner, Instance 
 
     Instance_setSelfVar(inst, waterstarBgCache.g_heart, RValue_makeReal((GMLReal) g_heart));
     Instance_setSelfVar(inst, waterstarBgCache.xhome, RValue_makeReal((GMLReal) xhome));
-    if (waterstarBgCache.myview >= 0) Instance_setSelfVar(inst, waterstarBgCache.myview,
-                                                          RValue_makeReal((GMLReal) myview));
-    if (waterstarBgCache.myview_b >= 0) Instance_setSelfVar(inst, waterstarBgCache.myview_b,
-                                                            RValue_makeReal((GMLReal) myview_b));
+    if (waterstarBgCache.myview >= 0)
+        Instance_setSelfVar(inst, waterstarBgCache.myview,
+                            RValue_makeReal((GMLReal) myview));
+    if (waterstarBgCache.myview_b >= 0)
+        Instance_setSelfVar(inst, waterstarBgCache.myview_b,
+                            RValue_makeReal((GMLReal) myview_b));
     if (waterstarBgCache.gg >= 0) Instance_setSelfVar(inst, waterstarBgCache.gg, RValue_makeReal((GMLReal) gg));
 }
 
@@ -15774,7 +15745,7 @@ static void initSpeartileCache(DataWin *dw) {
     speartileCache.ready = (speartileCache.conCount > 0 && speartileCache.facerCount > 0 &&
                             speartileCache.activeCount > 0);
     if (speartileCache.conCount > 1)
-        fprintf(stderr, "NativeScripts: speartile 'con' has %d VARI entries — per-instance resolve enabled\n",
+        fprintf(stderr, "NativeScripts: speartile 'con' has %d VARI entries РІР‚вЂќ per-instance resolve enabled\n",
                 speartileCache.conCount);
     if (speartileCache.conCount == SPEARTILE_MAX_VARIDS ||
         speartileCache.facerCount == SPEARTILE_MAX_VARIDS ||
@@ -15896,7 +15867,7 @@ static void native_speartile_Step0(VMContext *ctx, Runner *runner, Instance *ins
         if (inst->imageAlpha > 0.9f) {
             inst->imageAlpha = 1.0f;
             con = 1.0;
-            inst->alarm[4] = 10;
+            setAlarm(inst, 4, 10);
             Instance_setSelfVar(inst, conId, RValue_makeReal(1.0));
         }
     }
@@ -15975,7 +15946,7 @@ static void native_speartile_Step0(VMContext *ctx, Runner *runner, Instance *ins
         if (bud && bud->imageIndex >= 3.0f) {
             bud->imageSpeed = 0.0f;
             con = 3.0;
-            inst->alarm[4] = 5;
+            setAlarm(inst, 4, 5);
             Instance_setSelfVar(inst, conId, RValue_makeReal(3.0));
         }
     }
@@ -16361,7 +16332,7 @@ static void native_mettatonnnWriter_Draw0(VMContext *ctx, Runner *runner, Instan
     float rh = (float) runner->currentRoom->height;
 
 
-    const char *ch = isJa ? "ン" : "n";
+    const char *ch = isJa ? "РіС“С–" : "n";
     float spacing = isJa ? 28.0f : 14.0f;
     float xstart_top, ystart_top;
     int32_t limit_top;
@@ -16485,7 +16456,7 @@ static void native_bouncersteam_Create0(VMContext *ctx, Runner *runner, Instance
     inst->imageXscale = 0.4f;
     inst->imageYscale = 0.4f;
     Instance_setSelfVar(inst, bouncersteamCreateCache.size, RValue_makeReal(0.4));
-    inst->alarm[0] = 0;
+    setAlarm(inst, 0, 0);
     inst->direction = 80.0f + (float) rand() * randScale * 20.0f;
     inst->speed = 3.0f;
     inst->friction = 0.1f;
@@ -16496,12 +16467,12 @@ static void native_bouncersteam_Create0(VMContext *ctx, Runner *runner, Instance
 static void native_bounceright_Alarm1(VMContext *ctx, Runner *runner, Instance *inst) {
     (void) ctx;
     if (!bouncerightCache.ready) {
-        inst->alarm[1] = 10;
+        setAlarm(inst, 1, 10);
         return;
     }
     int32_t con = selfInt(inst, bouncerightCache.con);
     if (con == 0) Runner_createInstance(runner, inst->x, inst->y, 1534);
-    inst->alarm[1] = 10;
+    setAlarm(inst, 1, 10);
 }
 
 
@@ -16578,8 +16549,8 @@ static void native_sugarbullet_Step0(VMContext *ctx, Runner *runner, Instance *i
 
 
     int32_t viewIdx = runner->viewCurrent;
-    float viewX = (float) runner->currentRoom->views[viewIdx].viewX;
-    float viewY = (float) runner->currentRoom->views[viewIdx].viewY;
+    float viewX = (float) runner->views[viewIdx].viewX;
+    float viewY = (float) runner->views[viewIdx].viewY;
     if (inst->y > viewY + 250.0f ||
         inst->x < viewX - 10.0f ||
         inst->x > viewX + 320.0f) {
@@ -16692,8 +16663,8 @@ static void native_mettEggbullet_Step0(VMContext *ctx, Runner *runner, Instance 
     }
 
     int32_t viewIdx = runner->viewCurrent;
-    float viewX = (float) runner->currentRoom->views[viewIdx].viewX;
-    float viewY = (float) runner->currentRoom->views[viewIdx].viewY;
+    float viewX = (float) runner->views[viewIdx].viewX;
+    float viewY = (float) runner->views[viewIdx].viewY;
     if (inst->y > viewY + 245.0f ||
         inst->x < viewX - 4.0f ||
         inst->x > viewX + 324.0f) {
@@ -16776,7 +16747,7 @@ static void native_mettnewsPart_Step2(VMContext *ctx, Runner *runner, Instance *
     int32_t on = (int32_t) RValue_toReal(Instance_getSelfVar(inst, onId));
 
     int32_t viewIdx = runner->viewCurrent;
-    RoomView *view = &runner->currentRoom->views[viewIdx];
+    RuntimeView *view = &runner->views[viewIdx];
 
 
     if (on == 1) {
@@ -16905,14 +16876,13 @@ static void native_snowfloor_Draw0(VMContext *ctx, Runner *runner, Instance *ins
         needFlag64Set = (f64 == 0.0);
     }
 
-    // Находим границы экрана (Culling), чтобы не рисовать снег, который мы не видим
+    // Р СњР В°РЎвЂ¦Р С•Р Т‘Р С‘Р С Р С–РЎР‚Р В°Р Р…Р С‘РЎвЂ РЎвЂ№ РЎРЊР С”РЎР‚Р В°Р Р…Р В° (Culling), РЎвЂЎРЎвЂљР С•Р В±РЎвЂ№ Р Р…Р Вµ РЎР‚Р С‘РЎРѓР С•Р Р†Р В°РЎвЂљРЎРЉ РЎРѓР Р…Р ВµР С–, Р С”Р С•РЎвЂљР С•РЎР‚РЎвЂ№Р в„– Р СРЎвЂ№ Р Р…Р Вµ Р Р†Р С‘Р Т‘Р С‘Р С
     int viewIdx = runner->viewCurrent;
-    float viewX = runner->currentRoom ? (float) runner->currentRoom->views[viewIdx].viewX : 0.0f;
-    float viewY = runner->currentRoom ? (float) runner->currentRoom->views[viewIdx].viewY : 0.0f;
-    float viewW = runner->currentRoom ? (float) runner->currentRoom->views[viewIdx].viewWidth : 320.0f;
-    float viewH = runner->currentRoom ? (float) runner->currentRoom->views[viewIdx].viewHeight : 240.0f;
+    float viewX = runner->currentRoom ? (float) runner->views[viewIdx].viewX : 0.0f;
+    float viewY = runner->currentRoom ? (float) runner->views[viewIdx].viewY : 0.0f;
+    float viewW = runner->currentRoom ? (float) runner->views[viewIdx].viewWidth : 320.0f;
+    float viewH = runner->currentRoom ? (float) runner->views[viewIdx].viewHeight : 240.0f;
 
-    // Расширяем границы на 10 пикселей
     float vL = viewX - 10.0f, vR = viewX + viewW + 10.0f;
     float vT = viewY - 10.0f, vB = viewY + viewH + 10.0f;
 
