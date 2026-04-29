@@ -9,6 +9,7 @@
 #include <3ds.h>
 #include <malloc.h>
 #include "stb_image.h"
+#include "image_decoder.h"
 #include "utils.h"
 
 #define CTR_QUAD_BATCH_CAPACITY 2048
@@ -107,11 +108,15 @@ static void ctrBuildFullTextureCache(CtrRenderer *gl) {
         uint8_t *streamedBlob = ctrReadPngBlobFromFile(dataWinFile, txtr->blobOffset, txtr->blobSize);
         if (!streamedBlob) continue;
 
-        int w, h, ch;
-        uint8_t *pixels = stbi_load_from_memory(streamedBlob, (int) txtr->blobSize, &w, &h, &ch, 4);
+        int w, h;
+        bool gm2022_5 = DataWin_isVersionAtLeast(dw, 2022, 5, 0, 0);
+        uint8_t *pixels = ImageDecoder_decodeToRgba(streamedBlob, txtr->blobSize, gm2022_5, &w, &h);
         free(streamedBlob);
 
-        if (!pixels) continue;
+        if (!pixels) {
+            fprintf(stderr, "ImageDecoder: failed to decode texture page %u (size=%u)\n", pId, txtr->blobSize);
+            continue;
+        }
 
         uint16_t *out16 = (uint16_t *) malloc(w * h * 2);
         if (out16) {
@@ -130,7 +135,7 @@ static void ctrBuildFullTextureCache(CtrRenderer *gl) {
             }
             free(out16);
         }
-        stbi_image_free(pixels);
+        free(pixels);
     }
 
     if (dataWinFile) fclose(dataWinFile);

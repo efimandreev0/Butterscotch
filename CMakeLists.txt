@@ -378,6 +378,7 @@ elseif(PLATFORM STREQUAL "3ds")
         NovaGL
         citro3d
         ctru
+        bz2
         m
     )
 
