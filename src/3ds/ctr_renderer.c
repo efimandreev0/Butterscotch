@@ -417,7 +417,6 @@ static void extract_tpag_from_ram(CtrRenderer *gl, DataWin *dw, uint32_t tId, ui
 #define CTR_LINEAR_SAFE_TARGET     (2u * 1024u * 1024u)
 #define CTR_EVICT_MAX_PER_CALL     32
 
-
 static void ctrEvictLruIfPressure(CtrRenderer *gl) {
     if (linearSpaceFree() >= CTR_LINEAR_LOW_THRESHOLD) return;
 
@@ -644,9 +643,8 @@ static void markSpriteResident(CtrRenderer *gl, DataWin *dw, int32_t spriteIndex
 }
 
 static void markBackgroundResident(CtrRenderer *gl, DataWin *dw, int32_t bgndIndex) {
-    if (bgndIndex >= 0 && (uint32_t) bgndIndex < dw->bgnd.count)
-        markTpagResident(
-            gl, dw->bgnd.backgrounds[bgndIndex].tpagIndex);
+    if (bgndIndex >= 0 && (uint32_t) bgndIndex < dw->bgnd.count) markTpagResident(
+        gl, dw->bgnd.backgrounds[bgndIndex].tpagIndex);
 }
 
 void CtrRenderer_prefetchSprite(Renderer *renderer, int32_t spriteIndex) {
@@ -753,7 +751,18 @@ static void lerp2D_quad(float x0, float y0, float x1, float y1, float x2, float 
     *outX = topX + (botX - topX) * ty;
     *outY = topY + (botY - topY) * ty;
 }
-
+static void ctrSetBlendMode(Renderer *renderer, int32_t mode) {
+    CtrRenderer *gl = (CtrRenderer *) renderer;
+    ctrFlushBatch(gl);
+    // bm_normal = 0, bm_add = 1, bm_max = 2, bm_subtract = 3
+    if (mode == 0) {
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    } else if (mode == 1) {
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    } else if (mode == 3) {
+        glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_COLOR);
+    }
+}
 static void ctrDrawTpagRegion(CtrRenderer *gl, uint32_t tpagIndex, float srcOffX, float srcOffY, float srcW, float srcH,
                               float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3, uint8_t r,
                               uint8_t g, uint8_t b, uint8_t a) {
@@ -839,10 +848,10 @@ static void ctrDrawSprite(Renderer *renderer, int32_t tpagIndex, float x, float 
     uint8_t r = BGR_R(color), g = BGR_G(color), b = BGR_B(color);
 
     if (angleDeg == 0.0f) {
-        float x0 = roundf(x + lx0);
-        float y0 = roundf(y + ly0);
-        float x1 = roundf(x + lx1);
-        float y1 = roundf(y + ly1);
+        float x0 = x + lx0;
+        float y0 = y + ly0;
+        float x1 = x + lx1;
+        float y1 = y + ly1;
         if (singleChunk) {
             tpagData->lastFrameUsed = g_frameCounter;
             ctrDrawSpriteFastSingleChunk(gl, tpagData, x0, y0, x1, y0, x1, y1, x0, y1, r, g, b, a);
@@ -877,10 +886,10 @@ static void ctrDrawSpritePart(Renderer *renderer, int32_t tpagIndex, int32_t src
     CtrRenderer *gl = (CtrRenderer *) renderer;
     uint8_t a = ctrAlphaToByte(alpha);
     if (a == 0) return;
-    float cx = roundf(x);
-    float cy = roundf(y);
-    float x1 = cx + roundf((float) srcW * xscale);
-    float y1 = cy + roundf((float) srcH * yscale);
+    float cx = x;
+    float cy = y;
+    float x1 = cx + ((float) srcW * xscale);
+    float y1 = cy + ((float) srcH * yscale);
 
     ctrDrawTpagRegion(gl, tpagIndex, (float) srcOffX, (float) srcOffY, (float) srcW, (float) srcH, cx, cy, x1, cy, x1,
                       y1, cx, y1, BGR_R(color), BGR_G(color), BGR_B(color), a);
@@ -1427,8 +1436,7 @@ static int32_t ctrCreateSpriteFromSurface(Renderer *renderer, int32_t x, int32_t
 static void ctrDeleteSprite(Renderer *renderer, int32_t spriteIndex) {
 }
 
-static void ctrDrawRectangleColor(Renderer *renderer, float x1, float y1, float x2, float y2, uint32_t col1,
-                                  uint32_t col2, uint32_t col3, uint32_t col4, float alpha, bool outline) {
+static void ctrDrawRectangleColor(Renderer *renderer, float x1, float y1, float x2, float y2, uint32_t col1, uint32_t col2, uint32_t col3, uint32_t col4, float alpha, bool outline) {
     CtrRenderer *gl = (CtrRenderer *) renderer;
     uint8_t a = ctrAlphaToByte(alpha);
     if (a == 0) return;
@@ -1445,22 +1453,12 @@ static void ctrDrawRectangleColor(Renderer *renderer, float x1, float y1, float 
 
     if (outline) {
         float thick = 2.0f;
-        ctrPushQuadGradient(gl, gl->whiteTexture, left, top, right + 1.0f, top, right + 1.0f, top + thick, left,
-                            top + thick, 0.5f, 0.5f, 0.5f, 0.5f, r1, g1, b1, a, r2, g2, b2, a, r2, g2, b2, a, r1, g1,
-                            b1, a);
-        ctrPushQuadGradient(gl, gl->whiteTexture, left, bottom - thick + 1.0f, right + 1.0f, bottom - thick + 1.0f,
-                            right + 1.0f, bottom + 1.0f, left, bottom + 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, r4, g4, b4, a, r3,
-                            g3, b3, a, r3, g3, b3, a, r4, g4, b4, a);
-        ctrPushQuadGradient(gl, gl->whiteTexture, left, top + thick, left + thick, top + thick, left + thick,
-                            bottom - thick + 1.0f, left, bottom - thick + 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, r1, g1, b1, a,
-                            r1, g1, b1, a, r4, g4, b4, a, r4, g4, b4, a);
-        ctrPushQuadGradient(gl, gl->whiteTexture, right - thick + 1.0f, top + thick, right + 1.0f, top + thick,
-                            right + 1.0f, bottom - thick + 1.0f, right - thick + 1.0f, bottom - thick + 1.0f, 0.5f,
-                            0.5f, 0.5f, 0.5f, r2, g2, b2, a, r2, g2, b2, a, r3, g3, b3, a, r3, g3, b3, a);
+        ctrPushQuadGradient(gl, gl->whiteTexture, left, top, right + 1.0f, top, right + 1.0f, top + thick, left, top + thick, 0.5f, 0.5f, 0.5f, 0.5f, r1, g1, b1, a, r2, g2, b2, a, r2, g2, b2, a, r1, g1, b1, a);
+        ctrPushQuadGradient(gl, gl->whiteTexture, left, bottom - thick + 1.0f, right + 1.0f, bottom - thick + 1.0f, right + 1.0f, bottom + 1.0f, left, bottom + 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, r4, g4, b4, a, r3, g3, b3, a, r3, g3, b3, a, r4, g4, b4, a);
+        ctrPushQuadGradient(gl, gl->whiteTexture, left, top + thick, left + thick, top + thick, left + thick, bottom - thick + 1.0f, left, bottom - thick + 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, r1, g1, b1, a, r1, g1, b1, a, r4, g4, b4, a, r4, g4, b4, a);
+        ctrPushQuadGradient(gl, gl->whiteTexture, right - thick + 1.0f, top + thick, right + 1.0f, top + thick, right + 1.0f, bottom - thick + 1.0f, right - thick + 1.0f, bottom - thick + 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, r2, g2, b2, a, r2, g2, b2, a, r3, g3, b3, a, r3, g3, b3, a);
     } else {
-        ctrPushQuadGradient(gl, gl->whiteTexture, left, top, right + 1.0f, top, right + 1.0f, bottom + 1.0f, left,
-                            bottom + 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, r1, g1, b1, a, r2, g2, b2, a, r3, g3, b3, a, r4, g4,
-                            b4, a);
+        ctrPushQuadGradient(gl, gl->whiteTexture, left, top, right + 1.0f, top, right + 1.0f, bottom + 1.0f, left, bottom + 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, r1, g1, b1, a, r2, g2, b2, a, r3, g3, b3, a, r4, g4, b4, a);
     }
 }
 
@@ -1474,7 +1472,7 @@ static RendererVtable ctrVtable = {
     .createSpriteFromSurface = ctrCreateSpriteFromSurface, .deleteSprite = ctrDeleteSprite,
     .drawTile = ctrDrawTile, .drawTiled = ctrDrawTiled, .drawCircle = ctrDrawCircle, .drawRoundrect = ctrDrawRoundrect,
     .drawTriangleColor = ctrDrawTriangleColor, .drawEllipse = ctrDrawEllipse, .onRoomChanged = ctrOnRoomChanged,
-    .set3DDepthOffset = ctrSet3DDepthOffset
+    .set3DDepthOffset = ctrSet3DDepthOffset, .setBlendMode = ctrSetBlendMode
 };
 
 Renderer *CtrRenderer_create(void) {

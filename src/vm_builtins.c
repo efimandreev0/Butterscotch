@@ -8083,8 +8083,6 @@ static RValue builtinAssetGetIndex(VMContext *ctx, RValue *args, int32_t argCoun
 STUB_RETURN_ZERO(draw_enable_alphablend)
 STUB_RETURN_UNDEFINED(draw_clear_alpha)
 STUB_RETURN_UNDEFINED(draw_point_color)
-STUB_RETURN_UNDEFINED(draw_clear)
-STUB_RETURN_UNDEFINED(draw_set_blend_mode)
 STUB_RETURN_UNDEFINED(draw_set_blend_mode_ext)
 STUB_RETURN_UNDEFINED(draw_set_alpha_test)
 STUB_RETURN_UNDEFINED(draw_set_alpha_test_ref_value)
@@ -8097,7 +8095,6 @@ STUB_RETURN_UNDEFINED(buffer_async_group_option)
 STUB_RETURN_VALUE(buffer_load_async, -1)
 STUB_RETURN_VALUE(buffer_async_group_end, -1)
 STUB_RETURN_VALUE(buffer_save_async, -1)
-STUB_RETURN_ZERO(draw_getpixel)
 STUB_RETURN_ZERO(extension_stubfunc_real)
 STUB_RETURN_VALUE(get_string_async, -1)
 STUB_RETURN_ZERO(steam_file_write_file)
@@ -8105,7 +8102,6 @@ STUB_RETURN_UNDEFINED(action_previous_room)
 STUB_RETURN_UNDEFINED(texture_set_interpolation)
 STUB_RETURN_ZERO(os_is_paused)
 STUB_RETURN_VALUE(sprite_replace, -1)
-STUB_RETURN_UNDEFINED(sprite_collision_mask)
 STUB_RETURN_ZERO(window_get_x)
 STUB_RETURN_ZERO(window_get_y)
 STUB_RETURN_UNDEFINED(window_set_position)
@@ -8156,6 +8152,68 @@ static RValue builtin_action_set_motion(VMContext *ctx, RValue *args, int32_t ar
     return RValue_makeUndefined();
 }
 
+static RValue builtin_draw_getpixel(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (argCount < 2) return RValue_makeReal(0.0);
+    Runner *runner = (Runner *) ctx->runner;
+    float px = (float) RValue_toReal(args[0]);
+    float py = (float) RValue_toReal(args[1]);
+
+    uint32_t hitColor = 0; // c_black by default bruh
+    int32_t minDepth = 9999999;
+
+    int32_t snapBase = Runner_pushInstancesForTarget(runner, INSTANCE_ALL);
+    int32_t snapEnd = (int32_t) arrlen(runner->instanceSnapshots);
+
+    for (int32_t i = snapBase; i < snapEnd; i++) {
+        Instance *inst = runner->instanceSnapshots[i];
+        if (!inst->active || !inst->visible) continue;
+
+        InstanceBBox bbox = Collision_computeBBox(ctx->dataWin, inst);
+
+        if (bbox.valid && px >= bbox.left && px <= bbox.right && py >= bbox.top && py <= bbox.bottom) {
+            if (inst->depth < minDepth) {
+                minDepth = inst->depth;
+                hitColor = inst->imageBlend;
+            }
+        }
+    }
+    Runner_popInstanceSnapshot(runner, snapBase);
+
+    return RValue_makeReal((GMLReal) hitColor);
+}
+
+static RValue builtin_sprite_collision_mask(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (argCount < 9) return RValue_makeUndefined();
+    int32_t ind = RValue_toInt32(args[0]);
+    DataWin *dw = ctx->dataWin;
+
+    if (ind < 0 || (uint32_t)ind >= dw->sprt.count) return RValue_makeUndefined();
+
+    Sprite *spr = &dw->sprt.sprites[ind];
+
+    int32_t bboxmode = RValue_toInt32(args[2]); // 0 = Auto, 1 = Full Image, 2 = Manual
+    int32_t bbleft   = RValue_toInt32(args[3]);
+    int32_t bbright  = RValue_toInt32(args[4]);
+    int32_t bbtop    = RValue_toInt32(args[5]);
+    int32_t bbbottom = RValue_toInt32(args[6]);
+
+    if (bboxmode == 2) {
+        spr->bboxMode = 2;
+        spr->marginLeft = bbleft;
+        spr->marginRight = bbright;
+        spr->marginTop = bbtop;
+        spr->marginBottom = bbbottom;
+    } else if (bboxmode == 1) { // Full Image
+        spr->bboxMode = 1;
+        spr->marginLeft = 0;
+        spr->marginRight = spr->width > 0 ? spr->width - 1 : 0;
+        spr->marginTop = 0;
+        spr->marginBottom = spr->height > 0 ? spr->height - 1 : 0;
+    }
+
+    return RValue_makeUndefined();
+}
+
 static RValue builtin_collision_circle(VMContext *ctx, RValue *args, int32_t argCount) {
     if (5 > argCount) return RValue_makeReal(-4.0);
     Runner *runner = (Runner *) ctx->runner;
@@ -8176,6 +8234,26 @@ static RValue builtin_collision_circle(VMContext *ctx, RValue *args, int32_t arg
         if (dx * dx + dy * dy <= r2) return RValue_makeReal((GMLReal) it->instanceId);
     }
     return RValue_makeReal(-4.0);
+}
+
+static RValue builtin_draw_clear(VMContext *ctx, RValue *args, MAYBE_UNUSED int32_t argCount) {
+    if (1 > argCount) return RValue_makeUndefined();
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer != nullptr) {
+        uint32_t color = (uint32_t) RValue_toInt32(args[0]);
+        // Рисуем гигантский прямоугольник для очистки экрана (так как glClear недоступен напрямую из VM)
+        runner->renderer->vtable->drawRectangle(runner->renderer, -5000, -5000, 5000, 5000, color, 1.0f, false);
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_set_blend_mode(VMContext *ctx, RValue *args, MAYBE_UNUSED int32_t argCount) {
+    if (1 > argCount) return RValue_makeUndefined();
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer != nullptr && runner->renderer->vtable->setBlendMode != nullptr) {
+        runner->renderer->vtable->setBlendMode(runner->renderer, RValue_toInt32(args[0]));
+    }
+    return RValue_makeUndefined();
 }
 
 static RValue builtin_draw_circle_color(VMContext *ctx, RValue *args, int32_t argCount) {

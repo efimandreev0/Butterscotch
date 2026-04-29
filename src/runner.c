@@ -462,11 +462,19 @@ static int compareDrawableDepth(const void *a, const void *b) {
     // At same depth, tiles before instances (tiles are background)
     if (da->type < db->type) return -1;
     if (db->type < da->type) return 1;
+
     // At same depth and type, preserve original room order (higher index draws later = in front)
     if (da->type == DRAWABLE_TILE) {
-        if (db->tileIndex > da->tileIndex) return -1;
+        if (da->tileIndex < db->tileIndex) return -1;
         if (da->tileIndex > db->tileIndex) return 1;
+    } else if (da->type == DRAWABLE_INSTANCE) {
+        if (da->instance->instanceId < db->instance->instanceId) return -1;
+        if (da->instance->instanceId > db->instance->instanceId) return 1;
+    } else if (da->type == DRAWABLE_LAYER) {
+        if (da->runtimeLayer->id < db->runtimeLayer->id) return -1;
+        if (da->runtimeLayer->id > db->runtimeLayer->id) return 1;
     }
+
     return 0;
 }
 

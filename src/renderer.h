@@ -89,6 +89,8 @@ typedef struct {
 
     void (*onRoomChanged)(Renderer *renderer, int32_t roomIndex);
 
+    void (*setBlendMode)(Renderer *renderer, int32_t mode);
+    
     void (*set3DDepthOffset)(Renderer *renderer, float depth);
 } RendererVtable;
 
