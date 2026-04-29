@@ -21,10 +21,16 @@ u32 __ctru_heap_size = 0;
 u32 __ctru_linear_heap_size = 25 * 1024 * 1024;
 u32 __stacksize__ = 64 * 1024;
 
+#define delta
+#ifdef delta
+#define DATA_PATH "sdmc:/3ds/butterscotch/delta/chapter3_windows/data.orig.win"
+#define CACHE_DIR "sdmc:/3ds/butterscotch/cache"
+#define CODE_CACHE "sdmc:/3ds/butterscotch/cache/code.cache"
+#else
 #define DATA_PATH "sdmc:/3ds/butterscotch/data.win"
 #define CACHE_DIR "sdmc:/3ds/butterscotch/cache"
 #define CODE_CACHE "sdmc:/3ds/butterscotch/cache/code.cache"
-
+#endif
 static void map_key(RunnerKeyboardState *kb, u32 down, u32 up, u32 held, u32 mask, int gml) {
     if (down & mask) RunnerKeyboard_onKeyDown(kb, gml);
     else if ((up & mask) && !(held & mask)) RunnerKeyboard_onKeyUp(kb, gml);

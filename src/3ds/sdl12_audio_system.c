@@ -1,5 +1,4 @@
 ﻿#include "sdl12_audio_system.h"
-#include "utils.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -171,6 +170,9 @@ static bool ensure_snd(SysMixer *sm, int id) {
     return sm->chunks[id] || sm->music[id];
 }
 
+// Added dynamic float array for tracking pitches if game needs them stored
+static float *snd_pitches;
+
 static void sys_init(AudioSystem *sys, DataWin *dw, FileSystem *fs) {
     SysMixer *sm = (SysMixer *) sys;
     sm->base.dataWin = dw;
@@ -191,6 +193,9 @@ static void sys_init(AudioSystem *sys, DataWin *dw, FileSystem *fs) {
         sm->musicBuf = calloc(cnt, sizeof(uint8_t *));
         sm->sfxBuf = calloc(cnt, sizeof(void *));
         sm->lastUsed = calloc(cnt, sizeof(uint32_t));
+
+        snd_pitches = calloc(cnt, sizeof(float));
+        for (int i = 0; i < cnt; i++) snd_pitches[i] = 1.0f;
 
         sm->curMusicId = -1;
         sm->frame = 1;
@@ -219,6 +224,7 @@ static void sys_destroy(AudioSystem *sys) {
     free(sm->musicBuf);
     free(sm->sfxBuf);
     free(sm->lastUsed);
+    if (snd_pitches) free(snd_pitches);
     if (sm->archivePath) free(sm->archivePath);
 
     Mix_CloseAudio();
@@ -348,15 +354,44 @@ static float sys_get_gain(AudioSystem *sys, int32_t id) {
     return 0.f;
 }
 
-//stubs
 static void sys_set_pitch(AudioSystem *sys, int32_t id, float p) {
+    if (use_mixer && id >= 0 && id < sys->dataWin->sond.count && snd_pitches) {
+        snd_pitches[id] = p;
+    }
 }
 
-static float sys_get_pitch(AudioSystem *sys, int32_t id) { return 1.f; }
-static float sys_get_pos(AudioSystem *sys, int32_t id) { return 0.f; }
+static float sys_get_pitch(AudioSystem *sys, int32_t id) { 
+    if (use_mixer && id >= 0 && id < sys->dataWin->sond.count && snd_pitches) {
+        return snd_pitches[id];
+    }
+    return 1.f; 
+}
+
+static float sys_get_pos(AudioSystem *sys, int32_t id) { 
+    return 0.f;
+}
 
 static void sys_set_pos(AudioSystem *sys, int32_t id, float pos) {
     if (use_mixer && (id == MUS_ID_BASE || ((SysMixer *) sys)->curMusicId == id)) Mix_SetMusicPosition(pos);
+}
+
+static float sys_get_length(AudioSystem *sys, int32_t id) {
+    if (!use_mixer) return 0.f;
+    SysMixer *sm = (SysMixer *) sys;
+
+    if (id == MUS_ID_BASE || sm->curMusicId == id) return 0.f;
+    if (id >= SND_ID_BASE) id = -1; 
+    
+    if (id >= 0 && id < sm->base.dataWin->sond.count && sm->chunks[id]) {
+        int freq, chans;
+        Uint16 fmt;
+        Mix_QuerySpec(&freq, &fmt, &chans);
+        int bytes_per_sample = (fmt & 0xFF) / 8;
+        if (freq > 0 && chans > 0 && bytes_per_sample > 0) {
+            return (float)sm->chunks[id]->alen / (freq * chans * bytes_per_sample);
+        }
+    }
+    return 0.f;
 }
 
 static void sys_set_master(AudioSystem *sys, float g) {
@@ -372,7 +407,17 @@ static void sys_set_chans(AudioSystem *sys, int32_t cnt) { if (use_mixer) Mix_Al
 static void sys_grp_load(AudioSystem *sys, int32_t grp) {
 }
 
-static bool sys_grp_loaded(AudioSystem *sys, int32_t grp) { return true; }
+static bool sys_grp_loaded(AudioSystem *sys, int32_t grp) { 
+    return true;
+}
+
+static int32_t sys_create_stream(AudioSystem *sys, const char *filename) {
+    return -1;
+}
+
+static bool sys_destroy_stream(AudioSystem *sys, int32_t streamIndex) {
+    return false;
+}
 
 static AudioSystemVtable vtable = {
     .init = sys_init, .destroy = sys_destroy, .update = sys_update,
@@ -381,8 +426,10 @@ static AudioSystemVtable vtable = {
     .pauseAll = sys_pause_all, .resumeAll = sys_resume_all, .setSoundGain = sys_set_gain,
     .getSoundGain = sys_get_gain, .setSoundPitch = sys_set_pitch, .getSoundPitch = sys_get_pitch,
     .getTrackPosition = sys_get_pos, .setTrackPosition = sys_set_pos,
+    .getSoundLength = sys_get_length,
     .setMasterGain = sys_set_master, .setChannelCount = sys_set_chans,
     .groupLoad = sys_grp_load, .groupIsLoaded = sys_grp_loaded,
+    .createStream = sys_create_stream, .destroyStream = sys_destroy_stream
 };
 
 AudioSystem *SdlMixerAudioSystem_create(void) {

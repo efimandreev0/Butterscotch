@@ -41,5 +41,6 @@ typedef struct {
     int32_t gameW, gameH;
 } CtrRenderer;
 
-Renderer* CtrRenderer_create(void);
+Renderer *CtrRenderer_create(void);
+
 void CtrRenderer_prefetchSprite(Renderer *ren, int32_t sprIdx);

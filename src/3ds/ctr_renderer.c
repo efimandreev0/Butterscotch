@@ -464,16 +464,18 @@ static void ctr_draw_sprite_part(Renderer *ren, int32_t id, int32_t sx, int32_t 
                                  float y, float xscale, float yscale, uint32_t color, float alpha) {
     uint8_t c[4];
     col2rgb(color, alpha, c);
-    if (c[3]) draw_region((CtrRenderer *) ren, id, sx, sy, sw, sh, x, y, x + sw * xscale, y, x + sw * xscale,
-                          y + sh * yscale, x, y + sh * yscale, c);
+    if (c[3])
+        draw_region((CtrRenderer *) ren, id, sx, sy, sw, sh, x, y, x + sw * xscale, y, x + sw * xscale,
+                    y + sh * yscale, x, y + sh * yscale, c);
 }
 
 static void ctr_draw_sprite_pos(Renderer *ren, int32_t id, float x1, float y1, float x2, float y2, float x3, float y3,
                                 float x4, float y4, float alpha) {
     uint8_t c[4];
     col2rgb(ren->drawColor, alpha, c);
-    if (c[3]) draw_region((CtrRenderer *) ren, id, 0, 0, ren->dataWin->tpag.items[id].sourceWidth,
-                          ren->dataWin->tpag.items[id].sourceHeight, x1, y1, x2, y2, x3, y3, x4, y4, c);
+    if (c[3])
+        draw_region((CtrRenderer *) ren, id, 0, 0, ren->dataWin->tpag.items[id].sourceWidth,
+                    ren->dataWin->tpag.items[id].sourceHeight, x1, y1, x2, y2, x3, y3, x4, y4, c);
 }
 
 static void ctr_draw_tile(Renderer *ren, RoomTile *tile, float ox, float oy) {
@@ -727,8 +729,9 @@ static void ctr_draw_rr(Renderer *ren, float x1, float y1, float x2, float y2, f
         for (int i = 0; i < cnt; i++) ctr_draw_line(ren, px[i], py[i], px[(i + 1) % cnt], py[(i + 1) % cnt], 1.f, c, a);
     } else {
         float cx = (l + r) * .5f, cy = (t + b) * .5f;
-        for (int i = 0; i < cnt; i++) push_tri_grad((CtrRenderer *) ren, cx, cy, px[i], py[i], px[(i + 1) % cnt],
-                                                    py[(i + 1) % cnt], rgb, rgb, rgb);
+        for (int i = 0; i < cnt; i++)
+            push_tri_grad((CtrRenderer *) ren, cx, cy, px[i], py[i], px[(i + 1) % cnt],
+                          py[(i + 1) % cnt], rgb, rgb, rgb);
     }
 }
 
@@ -900,17 +903,147 @@ static void set_3d_depth(Renderer *ren, float depth) {
     novaSet3DDepth(z);
 }
 
-static int32_t ctr_create_surf(Renderer *ren, int x, int y, int w, int h, bool rb, bool sm, int xo, int yo) {
-    return -1;
+static int32_t ctr_create_surf(Renderer *ren, int32_t x, int32_t y, int32_t w, int32_t h, bool rb, bool sm, int32_t xo,
+                               int32_t yo) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    DataWin *dw = ctx->base.dataWin;
+    flush_batch(ctx);
+
+    int vw = w, vh = h;
+    static void *fbo_vram_buf = NULL;
+    if (!fbo_vram_buf) {
+        fbo_vram_buf = vramAlloc(640 * 480 * 4);
+        if (!fbo_vram_buf) fbo_vram_buf = linearAlloc(640 * 480 * 4);
+    }
+
+    uint32_t *pixels = (uint32_t *) fbo_vram_buf;
+    if (!pixels) return -1;
+
+    float scale = fminf((float) ctx->winW / ctx->gameW, (float) ctx->winH / ctx->gameH);
+    int32_t bw = roundf(ctx->gameW * scale), bh = roundf(ctx->gameH * scale);
+    int32_t bx = (ctx->winW - bw) / 2, by = (ctx->winH - bh) / 2;
+
+    int px = bx + roundf(x * scale);
+    int py = by + roundf(y * scale);
+    int pw = roundf(w * scale);
+    int ph = roundf(h * scale);
+
+    if (pw > 640) pw = 640;
+    if (ph > 480) ph = 480;
+
+    glReadPixels(px, ctx->winH - py - ph, pw, ph, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+
+    uint32_t newTpagIdx = dw->tpag.count;
+    dw->tpag.items = realloc(dw->tpag.items, (newTpagIdx + 1) * sizeof(TexturePageItem));
+    dw->tpag.count++;
+
+    TexturePageItem *tpag = &dw->tpag.items[newTpagIdx];
+    memset(tpag, 0, sizeof(TexturePageItem));
+    tpag->sourceX = 0;
+    tpag->sourceY = 0;
+    tpag->sourceWidth = pw;
+    tpag->sourceHeight = ph;
+    tpag->targetX = 0;
+    tpag->targetY = 0;
+    tpag->boundingWidth = vw;
+    tpag->boundingHeight = vh;
+    tpag->texturePageId = 0xFFFF; //mark as dyn
+
+    ctx->pages = realloc(ctx->pages, dw->tpag.count * sizeof(PageData));
+    PageData *page = &ctx->pages[newTpagIdx];
+    memset(page, 0, sizeof(PageData));
+    page->loaded = true;
+    page->keepResident = true;
+    page->origW = pw;
+    page->origH = ph;
+    page->chunksX = 1;
+    page->chunksY = 1;
+
+    AtlasChunk *chunk = &page->chunks[0][0];
+    chunk->srcX = 0;
+    chunk->srcY = 0;
+    chunk->width = pw;
+    chunk->height = ph;
+    chunk->potW = next_pow2(pw);
+    chunk->potH = next_pow2(ph);
+
+    uint16_t *tex_data = linearAlloc(chunk->potW * chunk->potH * 2);
+    if (tex_data) {
+        for (int cy = 0; cy < ph; cy++) {
+            for (int cx = 0; cx < pw; cx++) {
+                uint32_t pxl = pixels[(ph - 1 - cy) * pw + cx];
+                uint8_t r = pxl & 0xFF;
+                uint8_t g = (pxl >> 8) & 0xFF;
+                uint8_t b = (pxl >> 16) & 0xFF;
+                uint8_t a = (pxl >> 24) & 0xFF;
+                tex_data[cy * chunk->potW + cx] = pack_rgba4444(r, g, b, a);
+            }
+        }
+
+        glGenTextures(1, &chunk->tex);
+        glBindTexture(GL_TEXTURE_2D, chunk->tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, chunk->potW, chunk->potH, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4,
+                     tex_data);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, sm ? GL_LINEAR : GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, sm ? GL_LINEAR : GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        linearFree(tex_data);
+    }
+
+    ctx->pageCount = dw->tpag.count;
+
+    uint32_t newSprIdx = dw->sprt.count;
+    dw->sprt.sprites = realloc(dw->sprt.sprites, (newSprIdx + 1) * sizeof(Sprite));
+    dw->sprt.count++;
+
+    Sprite *spr = &dw->sprt.sprites[newSprIdx];
+    memset(spr, 0, sizeof(Sprite));
+    spr->originX = xo;
+    spr->originY = yo;
+    spr->textureCount = 1;
+    spr->tpagIndices = malloc(sizeof(int32_t));
+    spr->tpagIndices[0] = newTpagIdx;
+
+    return newSprIdx;
 }
 
 static void ctr_del_sprite(Renderer *ren, int32_t s) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    DataWin *dw = ctx->base.dataWin;
+    if (s < 0 || s >= dw->sprt.count) return;
+
+    Sprite *spr = &dw->sprt.sprites[s];
+    if (spr->textureCount == 0 || !spr->tpagIndices) return;
+
+    int tpagIdx = spr->tpagIndices[0];
+    if (tpagIdx >= 0 && tpagIdx < ctx->pageCount) {
+        PageData *page = &ctx->pages[tpagIdx];
+        if (page->loaded) {
+            for (int cx = 0; cx < page->chunksX; cx++) {
+                for (int cy = 0; cy < page->chunksY; cy++) {
+                    if (page->chunks[cx][cy].tex) {
+                        glDeleteTextures(1, &page->chunks[cx][cy].tex);
+                        page->chunks[cx][cy].tex = 0;
+                    }
+                }
+            }
+            page->loaded = false;
+        }
+    }
+
+    spr->textureCount = 0;
+    free(spr->tpagIndices);
+    spr->tpagIndices = NULL;
 }
 
 static void ctr_end_view(Renderer *ren) {
+    flush_batch((CtrRenderer *) ren);
 }
 
 static void ctr_end_gui(Renderer *ren) {
+    flush_batch((CtrRenderer *) ren);
 }
 
 static RendererVtable vtable = {
@@ -923,7 +1056,7 @@ static RendererVtable vtable = {
     .drawLine = ctr_draw_line, .drawLineColor = ctr_draw_line_c,
     .drawTriangle = ctr_draw_tri, .drawTriangleColor = ctr_draw_tri_c,
     .drawText = ctr_draw_text, .drawTextColor = ctr_draw_text_c, .flush = ctr_flush,
-    .createSpriteFromSurface = nullptr, .deleteSprite = ctr_del_sprite,
+    .createSpriteFromSurface = ctr_create_surf, .deleteSprite = ctr_del_sprite,
     .drawTile = ctr_draw_tile, .drawTiled = ctr_draw_tiled,
     .drawCircle = ctr_draw_circle, .drawEllipse = ctr_draw_ellipse, .drawRoundrect = ctr_draw_rr,
     .onRoomChanged = ctr_on_room, .set3DDepthOffset = set_3d_depth, .setBlendMode = ctr_set_blend
