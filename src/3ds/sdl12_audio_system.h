@@ -4,26 +4,23 @@
 #include <SDL/SDL_mixer.h>
 #include <stdio.h>
 
-#define SOUND_INSTANCE_ID_BASE 100000
+#define SND_ID_BASE 100000
+#define MUS_ID_BASE 200000
 
 typedef struct {
     AudioSystem base;
-    FileSystem *fileSystem;
+    FileSystem *fs;
 
-    FILE *dataWinFile;
-    FILE *sfxDataWinFile;
     Mix_Chunk **chunks;
     Mix_Music **music;
-    uint8_t **compressedMusicBuf;
-    void **decodedSfxBufs;
+    uint8_t **musicBuf;
+    void **sfxBuf;
 
     char *archivePath;
 
-    int32_t *channelToSoundIndex;
-    int32_t currentMusicSoundIndex;
+    int32_t curMusicId;
+    uint32_t *lastUsed;
+    uint32_t frame;
+} SysMixer;
 
-    uint32_t *chunkLastUsed;
-    uint32_t audioFrameCounter;
-} SdlMixerAudioSystem;
-
-AudioSystem *SdlMixerAudioSystem_create(void);
+AudioSystem* SdlMixerAudioSystem_create(void);

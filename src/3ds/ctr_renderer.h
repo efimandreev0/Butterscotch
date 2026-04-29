@@ -3,51 +3,43 @@
 #include "renderer.h"
 #include <NovaGL.h>
 
-#define CTR_MAX_CHUNKS_X 4
-#define CTR_MAX_CHUNKS_Y 4
+#define MAX_CHUNKS_X 4
+#define MAX_CHUNKS_Y 4
 
 typedef struct {
     GLuint tex;
-    int srcX;
-    int srcY;
-    int width;
-    int height;
-    int potW;
-    int potH;
-} CtrTpagChunk;
+    int srcX, srcY;
+    int width, height;
+    int potW, potH;
+} AtlasChunk;
 
 typedef struct {
-    bool isLoaded;
+    bool loaded;
     bool keepResident;
 
-    int origW;
-    int origH;
-    int chunksX;
-    int chunksY;
+    int origW, origH;
+    int chunksX, chunksY;
 
-    CtrTpagChunk chunks[CTR_MAX_CHUNKS_X][CTR_MAX_CHUNKS_Y];
-    uint32_t lastFrameUsed;
-} CtrTpagData;
+    AtlasChunk chunks[MAX_CHUNKS_X][MAX_CHUNKS_Y];
+    uint32_t lastFrame;
+} PageData;
 
 typedef struct {
     Renderer base;
 
-    CtrTpagData *tpags;
-    uint32_t tpagCount;
+    PageData *pages;
+    uint32_t pageCount;
 
-    GLuint whiteTexture;
+    GLuint whiteTex;
 
-    uint8_t *quadBatchVertices;
-    uint32_t quadBatchCapacity;
-    uint32_t quadBatchCount;
-    GLuint quadBatchTexture;
+    uint8_t *batchVerts;
+    uint32_t batchCap;
+    uint32_t batchCount;
+    GLuint batchTex;
 
-    int32_t windowW;
-    int32_t windowH;
-    int32_t gameW;
-    int32_t gameH;
+    int32_t winW, winH;
+    int32_t gameW, gameH;
 } CtrRenderer;
 
-Renderer *CtrRenderer_create(void);
-
-void CtrRenderer_prefetchSprite(Renderer *renderer, int32_t spriteIndex);
+Renderer* CtrRenderer_create(void);
+void CtrRenderer_prefetchSprite(Renderer *ren, int32_t sprIdx);

@@ -6,7 +6,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <sys/stat.h>
 
 #include "data_win.h"
@@ -16,352 +15,220 @@
 #include "ctr_renderer.h"
 #include "ctr_file_system.h"
 #include "sdl12_audio_system.h"
-#include "utils.h"
 
+//ctru ram setup
 u32 __ctru_heap_size = 0;
 u32 __ctru_linear_heap_size = 25 * 1024 * 1024;
 u32 __stacksize__ = 64 * 1024;
-//#define DELTA
-#ifdef DELTA
-#define DATA_WIN_PATH "sdmc:/3ds/butterscotch/delta/data.orig.win"
-#define NOVA_TEX_CACHE_PATH "sdmc:/3ds/butterscotch/cache"
-#define CODE_CACHE_PATH    "sdmc:/3ds/butterscotch/cache/code.cache"
-#else
-#define DATA_WIN_PATH "sdmc:/3ds/butterscotch/data.win"
-#define NOVA_TEX_CACHE_PATH "sdmc:/3ds/butterscotch/cache"
-#define CODE_CACHE_PATH    "sdmc:/3ds/butterscotch/cache/code.cache"
-#endif
-#define BUTTERSCOTCH_NOVA_CMD_BUF_SIZE      (512 * 1024)
-#define BUTTERSCOTCH_NOVA_CLIENT_BUF_SIZE   (1024 * 1024)
-#define BUTTERSCOTCH_NOVA_INDEX_BUF_SIZE    (256 * 1024)
-#define BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE  (256 * 1024)
 
-static void processCombinedKey(RunnerKeyboardState *kb, u32 kDown, u32 kUp, u32 kHeld, u32 mask, int32_t gmlKey) {
-    if (kDown & mask) {
-        RunnerKeyboard_onKeyDown(kb, gmlKey);
-    } else if ((kUp & mask) && !(kHeld & mask)) {
-        RunnerKeyboard_onKeyUp(kb, gmlKey);
-    }
+#define DATA_PATH "sdmc:/3ds/butterscotch/data.win"
+#define CACHE_DIR "sdmc:/3ds/butterscotch/cache"
+#define CODE_CACHE "sdmc:/3ds/butterscotch/cache/code.cache"
+
+static void map_key(RunnerKeyboardState *kb, u32 down, u32 up, u32 held, u32 mask, int gml) {
+    if (down & mask) RunnerKeyboard_onKeyDown(kb, gml);
+    else if ((up & mask) && !(held & mask)) RunnerKeyboard_onKeyUp(kb, gml);
 }
 
-void initLogging() {
+static void setup_logging() {
     freopen("sdmc:/3ds/butter_out.txt", "w", stdout);
     freopen("sdmc:/3ds/butter_err.txt", "w", stderr);
-
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
-
-    printf("Logging initialized!\n");
-    fprintf(stderr, "This goes to stderr!\n");
 }
 
-void printMemoryStats() {
-    struct mallinfo mi = mallinfo();
-
-    u32 linearFree = linearSpaceFree();
-
-    float heapUsedMB = (float) mi.uordblks / 1024.0f / 1024.0f;
-    float linearFreeMB = (float) linearFree / 1024.0f / 1024.0f;
-
-    fprintf(stderr, "[MEMORY] Heap Used: %.2f MB | LINEAR RAM FREE: %.2f MB\n",
-            heapUsedMB, linearFreeMB);
-}
-
-int main(int argc, char *argv[]) {
-    (void) argc;
-    (void) argv;
-    initLogging();
+int main(int argc, char **argv) {
+    setup_logging();
     cfguInit();
     gfxInitDefault();
     gfxSet3D(true);
 
     APT_SetAppCpuTimeLimit(30);
-    //osSetSpeedupEnable(true);
-    //TODO: Uncomment in release
+    //osSetSpeedupEnable(true); //uncoment for n3ds clock
 
-    fprintf(stderr, "Butterscotch 3DS booting...\n");
-    fprintf(stderr, "Loading %s\n", DATA_WIN_PATH);
+    nova_init_ex(512*1024, 1024*1024, 256*1024, 256*1024);
+    mkdir(CACHE_DIR, 0777);
+    nova_texture_cache_set_directory(CACHE_DIR);
 
-    nova_init_ex(BUTTERSCOTCH_NOVA_CMD_BUF_SIZE,
-                 BUTTERSCOTCH_NOVA_CLIENT_BUF_SIZE,
-                 BUTTERSCOTCH_NOVA_INDEX_BUF_SIZE,
-                 BUTTERSCOTCH_NOVA_TEX_STAGING_SIZE);
-    mkdir(NOVA_TEX_CACHE_PATH, 0777);
-    nova_texture_cache_set_directory(NOVA_TEX_CACHE_PATH);
+    FILE *flag = fopen(CACHE_DIR "/cache_ready.flag", "r");
+    bool cached = flag != NULL;
+    if (flag) fclose(flag);
 
-    bool isCacheReady = false;
-    {
-        FILE *cacheFlagFile = fopen(NOVA_TEX_CACHE_PATH "/cache_ready.flag", "r");
-        if (cacheFlagFile) {
-            isCacheReady = true;
-            fclose(cacheFlagFile);
+    if (!cached) {
+        fprintf(stderr, "=== STAGE 1: TEX PRECACHE ===\n");
+        DataWinParserOptions opt = { .parseGen8=1, .parseTpag=1, .parseTxtr=1, .skipTextureBlobData=1 };
+        DataWin *dw = DataWin_parse(DATA_PATH, opt);
+        if (dw) {
+            Renderer *r = CtrRenderer_create();
+            r->vtable->init(r, dw);
+            r->vtable->destroy(r);
+            DataWin_free(dw);
         }
+
+        flag = fopen(CACHE_DIR "/cache_ready.flag", "r");
+        cached = flag != NULL;
+        if (flag) fclose(flag);
     }
 
-    if (!isCacheReady) {
-        fprintf(stderr, "=== STAGE 1: TEXTURE PRE-CACHING (first boot) ===\n");
-        DataWin *cacheWin = DataWin_parse(
-            DATA_WIN_PATH,
-            (DataWinParserOptions){
-                .parseGen8 = true,
-                .parseTpag = true,
-                .parseTxtr = true,
-                .skipTextureBlobData = true,
-            }
-        );
+    fprintf(stderr, "=== STAGE 2: FULL BOOT ===\n");
+    DataWinParserOptions full_opt = {
+        .parseGen8=1, .parseOptn=1, .parseLang=1, .parseExtn=1, .parseSond=1,
+        .parseAgrp=1, .parseSprt=1, .parseBgnd=1, .parsePath=1, .parseScpt=1,
+        .parseGlob=1, .parseShdr=1, .parseFont=1, .parseTmln=1, .parseObjt=1,
+        .parseRoom=1, .parseTpag=1, .parseCode=1, .parseVari=1, .parseFunc=1,
+        .parseStrg=1, .parseTxtr=1, .parseAudo=1,
+        .skipLoadingPreciseMasksForNonPreciseSprites=1,
+        .skipTextureBlobData=cached, .skipAudioBlobData=1,
+        .codeCachePath=CODE_CACHE
+    };
 
-        if (cacheWin != NULL) {
-            Renderer *tempRenderer = CtrRenderer_create();
-            tempRenderer->vtable->init(tempRenderer, cacheWin);
-            tempRenderer->vtable->destroy(tempRenderer);
-            DataWin_free(cacheWin);
-            fprintf(stderr, "=== STAGE 1 COMPLETE ===\n");
-        } else {
-            fprintf(stderr, "WARNING: Stage 1 Cache pass failed to parse data.win!\n");
-        }
-        FILE *cacheFlagFile = fopen(NOVA_TEX_CACHE_PATH "/cache_ready.flag", "r");
-        if (cacheFlagFile) {
-            isCacheReady = true;
-            fclose(cacheFlagFile);
-        }
-    } else {
-        fprintf(stderr, "=== STAGE 1 SKIPPED (cache ready) ===\n");
-    }
+    DataWin *dw = DataWin_parse(DATA_PATH, full_opt);
 
-    fprintf(stderr, "=== STAGE 2: FULL GAME BOOT ===\n");
-
-    DataWin *dataWin = DataWin_parse(
-        DATA_WIN_PATH,
-        (DataWinParserOptions){
-            .parseGen8 = true,
-            .parseOptn = true,
-            .parseLang = true,
-            .parseExtn = true,
-            .parseSond = true,
-            .parseAgrp = true,
-            .parseSprt = true,
-            .parseBgnd = true,
-            .parsePath = true,
-            .parseScpt = true,
-            .parseGlob = true,
-            .parseShdr = true,
-            .parseFont = true,
-            .parseTmln = true,
-            .parseObjt = true,
-            .parseRoom = true,
-            .parseTpag = true,
-            .parseCode = true,
-            .parseVari = true,
-            .parseFunc = true,
-            .parseStrg = true,
-            .parseTxtr = true,
-            .parseAudo = true,
-
-            .skipLoadingPreciseMasksForNonPreciseSprites = true,
-            .skipTextureBlobData = isCacheReady,
-            .skipAudioBlobData = true,
-            .codeCachePath = CODE_CACHE_PATH,
-        }
-    );
-
-    if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_AUDIO) != 0) {
-        fprintf(stderr, "Failed to initialize SDL: %s\n", SDL_GetError());
-        if (dataWin) DataWin_free(dataWin);
-        return 1;
-    }
-
-    if (dataWin == NULL) {
+    if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_AUDIO) != 0 || !dw) {
         consoleInit(GFX_BOTTOM, NULL);
-        printf("Butterscotch 3DS: failed to parse data.win\n");
-        printf("Expected at: %s\n", DATA_WIN_PATH);
-        printf("\nPress START to exit.\n");
-        while (aptMainLoop()) {
-            hidScanInput();
-            gspWaitForVBlank();
-        }
+        printf("Boot failed.\nCheck data.win at %s\nPress START to quit.\n", DATA_PATH);
+        while (aptMainLoop()) { hidScanInput(); if (hidKeysDown() & KEY_START) break; gspWaitForVBlank(); }
         gfxExit();
+        if (dw) DataWin_free(dw);
         return 1;
     }
 
-    Gen8 *gen8 = &dataWin->gen8;
-    fprintf(stderr, "Loaded \"%s\" (%d) [BC%u]\n", gen8->name, gen8->gameID, gen8->bytecodeVersion);
+    fprintf(stderr, "Loaded \"%s\" (ID: %d) [BC%u]\n", dw->gen8.name, dw->gen8.gameID, dw->gen8.bytecodeVersion);
 
-    VMContext *vm = VM_create(dataWin);
+    VMContext *vm = VM_create(dw);
+    N3dsFileSystem *fs = N3dsFileSystem_create(DATA_PATH);
+    Renderer *ren = CtrRenderer_create();
+    AudioSystem *snd = SdlMixerAudioSystem_create();
+    if (snd) snd->dataWin = dw;
 
-    N3dsFileSystem *fs = N3dsFileSystem_create(DATA_WIN_PATH);
-    Renderer *renderer = CtrRenderer_create();
-    AudioSystem *audio = (AudioSystem *) SdlMixerAudioSystem_create();
-    if (audio) {
-        audio->dataWin = dataWin;
-    }
+    Runner *run = Runner_create(dw, vm, ren, (FileSystem*)fs, snd);
+    run->osType = OS_3DS;
 
-    Runner *runner = Runner_create(dataWin, vm, renderer, (FileSystem *) fs, audio);
-    runner->osType = OS_3DS;
+    snd->vtable->init(snd, dw, (FileSystem*)fs);
+    ren->vtable->init(ren, dw);
+    Runner_initFirstRoom(run);
 
-    audio->vtable->init(audio, audio->dataWin, (FileSystem *) fs);
-    renderer->vtable->init(renderer, dataWin);
-    Runner_initFirstRoom(runner);
+    u32 frames = 0;
 
-    double targetFrameSec = 1.0 / 30.0;
-    int frameCounter = 0;
-
-    while (aptMainLoop() && !runner->shouldExit) {
-        u64 frameStart = osGetTime();
-
+    while (aptMainLoop() && !run->shouldExit) {
+        u64 t_start = osGetTime();
         hidScanInput();
+        u32 d = hidKeysDown(), u = hidKeysUp(), h = hidKeysHeld();
 
-        u32 kHeld = hidKeysHeld();
-        u32 kDown = hidKeysDown();
-        u32 kUp = hidKeysUp();
+        RunnerKeyboard_beginFrame(run->keyboard);
+        map_key(run->keyboard, d, u, h, KEY_CPAD_UP | KEY_DUP, VK_UP);
+        map_key(run->keyboard, d, u, h, KEY_CPAD_DOWN | KEY_DDOWN, VK_DOWN);
+        map_key(run->keyboard, d, u, h, KEY_CPAD_LEFT | KEY_DLEFT, VK_LEFT);
+        map_key(run->keyboard, d, u, h, KEY_CPAD_RIGHT | KEY_DRIGHT, VK_RIGHT);
+        map_key(run->keyboard, d, u, h, KEY_A, 'Z');
+        map_key(run->keyboard, d, u, h, KEY_B, 'X');
+        map_key(run->keyboard, d, u, h, KEY_X, 'C');
+        map_key(run->keyboard, d, u, h, KEY_Y, VK_SHIFT);
+        map_key(run->keyboard, d, u, h, KEY_L, VK_ENTER);
+        map_key(run->keyboard, d, u, h, KEY_R, VK_SPACE);
+        map_key(run->keyboard, d, u, h, KEY_SELECT, VK_ESCAPE);
 
-        RunnerKeyboard_beginFrame(runner->keyboard);
+        Runner_step(run);
+        if (run->audioSystem) run->audioSystem->vtable->update(run->audioSystem, 1.f/30.f);
 
-        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_CPAD_UP | KEY_DUP, VK_UP);
-        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_CPAD_DOWN | KEY_DDOWN, VK_DOWN);
-        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_CPAD_LEFT | KEY_DLEFT, VK_LEFT);
-        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_CPAD_RIGHT | KEY_DRIGHT, VK_RIGHT);
+        Room *rm = run->currentRoom;
+        int gw = dw->gen8.defaultWindowWidth, gh = dw->gen8.defaultWindowHeight;
+        bool views_en = rm->flags & 1;
 
-        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_A, 'Z');
-        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_B, 'X');
-        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_X, 'C');
-        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_Y, VK_SHIFT);
-        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_L, VK_ENTER);
-        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_R, VK_SPACE);
-        processCombinedKey(runner->keyboard, kDown, kUp, kHeld, KEY_SELECT, VK_ESCAPE);
-
-        Runner_step(runner);
-        if (runner->audioSystem) {
-            runner->audioSystem->vtable->update(runner->audioSystem, (float) targetFrameSec);
+        if (views_en) {
+            int mr = 0, mb = 0;
+            for (int i = 0; i < MAX_VIEWS; i++) {
+                if (!run->views[i].enabled) continue;
+                int r = run->views[i].portX + run->views[i].portWidth;
+                int b = run->views[i].portY + run->views[i].portHeight;
+                if (r > mr) mr = r;
+                if (b > mb) mb = b;
+            }
+            if (mr > 0 && mb > 0) { gw = mr; gh = mb; }
         }
 
-        Room *activeRoom = runner->currentRoom;
-
-        int32_t gameW = (int32_t) gen8->defaultWindowWidth;
-        int32_t gameH = (int32_t) gen8->defaultWindowHeight;
-
-        bool viewsEnabled = (activeRoom->flags & 1) != 0;
-        if (viewsEnabled) {
-            int32_t maxRight = 0, maxBottom = 0;
-            for (int vi = 0; vi < MAX_VIEWS; vi++) {
-                RuntimeView *view = &runner->views[vi];
-                if (!view->enabled) continue;
-                int32_t right = view->portX + view->portWidth;
-                int32_t bottom = view->portY + view->portHeight;
-                if (right > maxRight) maxRight = right;
-                if (bottom > maxBottom) maxBottom = bottom;
-            }
-            if (maxRight > 0 && maxBottom > 0) {
-                gameW = maxRight;
-                gameH = maxBottom;
-            }
-        }
-
-        renderer->vtable->beginFrame(renderer, gameW, gameH, NOVA_SCREEN_W, NOVA_SCREEN_H);
+        ren->vtable->beginFrame(ren, gw, gh, NOVA_SCREEN_W, NOVA_SCREEN_H);
         int eyes = novaGetEyeCount();
-        int current_eye = 0;
-        if ((frameCounter % 30) == 0) {
-        }
-        RunnerKeyboardState kb_backup = *(runner->keyboard);
 
-        while (current_eye < eyes) {
-            novaBeginEye(current_eye);
+        //backups for 3d slider rendering
+        RunnerKeyboardState kb_bak = *run->keyboard;
 
-            if (current_eye == 1) {
-                memset(runner->keyboard->keyPressed, 0, sizeof(runner->keyboard->keyPressed));
-                memset(runner->keyboard->keyReleased, 0, sizeof(runner->keyboard->keyReleased));
+        for (int eye = 0; eye < eyes; eye++) {
+            novaBeginEye(eye);
+            if (eye == 1) {
+                memset(run->keyboard->keyPressed, 0, sizeof(run->keyboard->keyPressed));
+                memset(run->keyboard->keyReleased, 0, sizeof(run->keyboard->keyReleased));
             }
 
-            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            if (run->drawBackgroundColor) {
+                glClearColor(BGR_R(run->backgroundColor)/255.f, BGR_G(run->backgroundColor)/255.f, BGR_B(run->backgroundColor)/255.f, 1.f);
+            } else {
+                glClearColor(0.f, 0.f, 0.f, 1.f);
+            }
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-            if (runner->drawBackgroundColor) {
-                int rInt = BGR_R(runner->backgroundColor);
-                int gInt = BGR_G(runner->backgroundColor);
-                int bInt = BGR_B(runner->backgroundColor);
-                glClearColor(rInt / 255.0f, gInt / 255.0f, bInt / 255.0f, 1.0f);
-                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-            }
+            bool drawn = false;
+            if (views_en) {
+                for (int i = 0; i < MAX_VIEWS; i++) {
+                    RuntimeView *v = &run->views[i];
+                    if (!v->enabled) continue;
 
-            bool anyViewRendered = false;
-            if (viewsEnabled) {
-                for (int vi = 0; vi < MAX_VIEWS; vi++) {
-                    RuntimeView *view = &runner->views[vi];
-                    if (!view->enabled) continue;
-
-                    int32_t viewX = view->viewX;
-                    int32_t viewY = view->viewY;
-                    int32_t viewW = view->viewWidth;
-                    int32_t viewH = view->viewHeight;
-                    int32_t portX = view->portX;
-                    int32_t portY = view->portY;
-                    int32_t portW = view->portWidth;
-                    int32_t portH = view->portHeight;
-                    float viewAngle = view->viewAngle;
-
-                    runner->viewCurrent = vi;
-
+                    run->viewCurrent = i;
                     novaSet3DDepth(0.05f);
-                    renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH, portX, portY, portW, portH,
-                                                viewAngle);
-                    Runner_draw(runner);
-                    renderer->vtable->endView(renderer);
-                    int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : portW;
-                    int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : portH;
-                    renderer->vtable->beginGUI(renderer, guiW, guiH, portX, portY, portW, portH);
-                    Runner_drawGUI(runner);
-                    renderer->vtable->endGUI(renderer);
-                    renderer->vtable->flush(renderer);
+                    ren->vtable->beginView(ren, v->viewX, v->viewY, v->viewWidth, v->viewHeight, v->portX, v->portY, v->portWidth, v->portHeight, v->viewAngle);
+                    Runner_draw(run);
+                    ren->vtable->endView(ren);
 
-                    anyViewRendered = true;
+                    ren->vtable->beginGUI(ren, run->guiWidth > 0 ? run->guiWidth : v->portWidth, run->guiHeight > 0 ? run->guiHeight : v->portHeight, v->portX, v->portY, v->portWidth, v->portHeight);
+                    Runner_drawGUI(run);
+                    ren->vtable->endGUI(ren);
+                    ren->vtable->flush(ren);
+                    drawn = true;
                 }
             }
 
-            if (!anyViewRendered) {
-                runner->viewCurrent = 0;
+            if (!drawn) {
+                run->viewCurrent = 0;
                 novaSet3DDepth(0.05f);
-                renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, 0, 0, gameW, gameH, 0.0f);
-                Runner_draw(runner);
-                renderer->vtable->endView(renderer);
-                int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : gameW;
-                int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : gameH;
-                renderer->vtable->beginGUI(renderer, guiW, guiH, 0, 0, gameW, gameH);
-                Runner_drawGUI(runner);
-                renderer->vtable->endGUI(renderer);
-                renderer->vtable->flush(renderer);
+                ren->vtable->beginView(ren, 0, 0, gw, gh, 0, 0, gw, gh, 0.f);
+                Runner_draw(run);
+                ren->vtable->endView(ren);
+
+                ren->vtable->beginGUI(ren, run->guiWidth > 0 ? run->guiWidth : gw, run->guiHeight > 0 ? run->guiHeight : gh, 0, 0, gw, gh);
+                Runner_drawGUI(run);
+                ren->vtable->endGUI(ren);
+                ren->vtable->flush(ren);
             }
 
-            runner->viewCurrent = 0;
-            renderer->vtable->flush(renderer);
-
-            current_eye++;
+            run->viewCurrent = 0;
+            ren->vtable->flush(ren);
         }
-        *(runner->keyboard) = kb_backup;
 
-        renderer->vtable->endFrame(renderer);
+        *run->keyboard = kb_bak;
+        ren->vtable->endFrame(ren);
         novaSwapBuffers();
-        u64 frameDuration = osGetTime() - frameStart;
-        if (frameDuration > 200) {
-            fprintf(stderr, "statter WARNING NAHUY: Frame took %llu ms!\n", frameDuration);
+
+        u64 ftime = osGetTime() - t_start;
+        //statter warning nahui
+        if (ftime > 200) fprintf(stderr, "lag spike: %llu ms\n", ftime);
+
+        if (frames++ % 300 == 0) {
+            struct mallinfo mi = mallinfo();
+            fprintf(stderr, "MEM | Heap: %.2f MB | Linear: %.2f MB\n", mi.uordblks / 1048576.f, linearSpaceFree() / 1048576.f);
         }
-        if (frameCounter % 300 == 0) {
-            printMemoryStats();
-        }
-        frameCounter++;
-        while (osGetTime() - frameStart < 33) {
-            gspWaitForVBlank();
-        }
+
+        //limit to ~30fps
+        while (osGetTime() - t_start < 33) gspWaitForVBlank();
     }
 
-    runner->audioSystem->vtable->destroy(runner->audioSystem);
-    runner->audioSystem = nullptr;
-    renderer->vtable->destroy(renderer);
-
-    Runner_free(runner);
+    run->audioSystem->vtable->destroy(run->audioSystem);
+    ren->vtable->destroy(ren);
+    Runner_free(run);
     N3dsFileSystem_destroy(fs);
     VM_free(vm);
-    DataWin_free(dataWin);
-    cfguExit();
+    DataWin_free(dw);
 
+    cfguExit();
     nova_fini();
     gfxExit();
     return 0;

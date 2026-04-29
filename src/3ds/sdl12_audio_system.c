@@ -13,627 +13,380 @@
 
 static bool use_mixer = true;
 
-#define MAX_MIXER_CHANNELS 32
-#define MUSIC_INSTANCE_ID_BASE 200000
-#define SOUND_INSTANCE_ID_BASE 100000
-#define STREAMING_SIZE_THRESHOLD (512 * 1024)
-#define MAX_CACHED_CHUNKS 64
+#define MAX_CHANS 32
+#define STREAM_THRES (512 * 1024)
+#define MAX_CACHE 64
 
-typedef struct {
-    FILE *fp;
-    uint32_t base;
-    uint32_t size;
-    uint32_t pos;
-} RWDataWinContext;
-
-static int rw_datawin_seek(SDL_RWops *context, int offset, int whence) {
-    RWDataWinContext *ctx = (RWDataWinContext *) context->hidden.unknown.data1;
-    int32_t new_pos = (int32_t) ctx->pos;
-
-    if (whence == SEEK_SET) new_pos = offset;
-    else if (whence == SEEK_CUR) new_pos += offset;
-    else if (whence == SEEK_END) new_pos = (int32_t) ctx->size + offset;
-
-    if (new_pos < 0) new_pos = 0;
-    if ((uint32_t) new_pos > ctx->size) new_pos = (int32_t) ctx->size;
-
-    ctx->pos = (uint32_t) new_pos;
-    return (int) ctx->pos;
-}
-
-static int rw_datawin_read(SDL_RWops *context, void *ptr, int size, int maxnum) {
-    RWDataWinContext *ctx = (RWDataWinContext *) context->hidden.unknown.data1;
-
-    if (ctx->pos >= ctx->size) return 0;
-
-    uint32_t remaining = ctx->size - ctx->pos;
-    uint32_t total_to_read = (uint32_t) size * maxnum;
-
-    if (total_to_read > remaining) {
-        maxnum = remaining / size;
+//evict oldest shit if ram gets full
+static void evict_old(SysMixer *sm) {
+    int cnt = 0;
+    for (uint32_t i = 0; i < sm->base.dataWin->sond.count; i++) {
+        if (sm->chunks[i]) cnt++;
     }
-    if (maxnum <= 0) return 0;
+    if (cnt < MAX_CACHE) return;
 
-    fseek(ctx->fp, (long) (ctx->base + ctx->pos), SEEK_SET);
-    int read_items = fread(ptr, size, maxnum, ctx->fp);
+    int victim = -1;
+    uint32_t oldest = 0xFFFFFFFF;
 
-    if (read_items > 0) {
-        ctx->pos += (uint32_t) (read_items * size);
-    }
-    return read_items;
-}
+    for (uint32_t i = 0; i < sm->base.dataWin->sond.count; i++) {
+        if (!sm->chunks[i]) continue;
+        bool playing = false;
 
-static int rw_datawin_close(SDL_RWops *context) {
-    if (context) {
-        RWDataWinContext *ctx = (RWDataWinContext *) context->hidden.unknown.data1;
-        if (ctx) {
-            if (ctx->fp) fclose(ctx->fp);
-            free(ctx);
-        }
-        SDL_FreeRW(context);
-    }
-    return 0;
-}
-
-static SDL_RWops *createMusicRWops(const char *archivePath, uint32_t offset, uint32_t size) {
-    FILE *fp = fopen(archivePath, "rb");
-    if (!fp) return NULL;
-
-    SDL_RWops *rw = SDL_AllocRW();
-    if (!rw) {
-        fclose(fp);
-        return NULL;
-    }
-
-    RWDataWinContext *ctx = (RWDataWinContext *) safeMalloc(sizeof(RWDataWinContext));
-    ctx->fp = fp;
-    ctx->base = offset;
-    ctx->size = size;
-    ctx->pos = 0;
-
-    rw->hidden.unknown.data1 = ctx;
-    rw->read = rw_datawin_read;
-    rw->seek = rw_datawin_seek;
-    rw->write = NULL;
-    rw->close = rw_datawin_close;
-    rw->type = 0;
-
-    return rw;
-}
-
-static SDL_RWops *loadMusicIntoMemory(const char *archivePath, uint32_t offset, uint32_t size, uint8_t **outBuf) {
-    *outBuf = NULL;
-    if (!archivePath || size == 0) return NULL;
-
-    uint8_t *buf = (uint8_t *) malloc(size);
-    if (!buf) return NULL;
-
-    FILE *fp = fopen(archivePath, "rb");
-    if (!fp) {
-        free(buf);
-        return NULL;
-    }
-
-    if (fseek(fp, (long) offset, SEEK_SET) != 0) {
-        fclose(fp);
-        free(buf);
-        return NULL;
-    }
-    size_t got = fread(buf, 1, size, fp);
-    fclose(fp);
-    if (got != size) {
-        free(buf);
-        return NULL;
-    }
-
-    SDL_RWops *rw = SDL_RWFromConstMem(buf, (int) size);
-    if (!rw) {
-        free(buf);
-        return NULL;
-    }
-
-    *outBuf = buf;
-    return rw;
-}
-
-static char *resolveExternalPath(SdlMixerAudioSystem *sys, Sound *sound) {
-    if (!sound->file || sound->file[0] == '\0') return NULL;
-
-    char filename[512];
-    if (strchr(sound->file, '.') != NULL) {
-        snprintf(filename, sizeof(filename), "%s", sound->file);
-    } else {
-        snprintf(filename, sizeof(filename), "%s.ogg", sound->file);
-    }
-    return sys->fileSystem->vtable->resolvePath(sys->fileSystem, filename);
-}
-
-static void evictOldestSfx(SdlMixerAudioSystem *sys) {
-    int loadedChunks = 0;
-    uint32_t soundCount = sys->base.dataWin->sond.count;
-
-    for (uint32_t i = 0; i < soundCount; i++) {
-        if (sys->chunks[i]) loadedChunks++;
-    }
-
-    if (loadedChunks >= MAX_CACHED_CHUNKS) {
-        int oldestId = -1;
-        uint32_t oldestTime = 0xFFFFFFFF;
-
-        for (uint32_t i = 0; i < soundCount; i++) {
-            if (sys->chunks[i]) {
-                bool isPlaying = false;
-                for (int ch = 0; ch < MAX_MIXER_CHANNELS; ch++) {
-                    if (Mix_Playing(ch) && Mix_GetChunk(ch) == sys->chunks[i]) {
-                        isPlaying = true;
-                        break;
-                    }
-                }
-
-                if (!isPlaying && sys->chunkLastUsed[i] < oldestTime) {
-                    oldestTime = sys->chunkLastUsed[i];
-                    oldestId = (int) i;
-                }
+        for (int c = 0; c < MAX_CHANS; c++) {
+            if (Mix_Playing(c) && Mix_GetChunk(c) == sm->chunks[i]) {
+                playing = true;
+                break;
             }
         }
 
-        if (oldestId != -1) {
-            Mix_FreeChunk(sys->chunks[oldestId]);
-            sys->chunks[oldestId] = NULL;
+        if (!playing && sm->lastUsed[i] < oldest) {
+            oldest = sm->lastUsed[i];
+            victim = i;
+        }
+    }
 
-            if (sys->decodedSfxBufs[oldestId]) {
-                linearFree(sys->decodedSfxBufs[oldestId]);
-                sys->decodedSfxBufs[oldestId] = NULL;
-            }
+    if (victim >= 0) {
+        Mix_FreeChunk(sm->chunks[victim]);
+        sm->chunks[victim] = NULL;
+        if (sm->sfxBuf[victim]) {
+            linearFree(sm->sfxBuf[victim]);
+            sm->sfxBuf[victim] = NULL;
         }
     }
 }
 
-static bool loadSfxIntoRAM(SdlMixerAudioSystem *sys, int32_t soundIndex, AudioEntry *entry) {
-    evictOldestSfx(sys);
-    uint8_t *rawBuf = (uint8_t *) linearAlloc(entry->dataSize);
-    if (!rawBuf) return false;
+static bool load_sfx(SysMixer *sm, int id, AudioEntry *ent) {
+    evict_old(sm);
+    uint8_t *raw = linearAlloc(ent->dataSize);
+    if (!raw) return false;
 
-    FILE *fp = fopen(sys->archivePath, "rb");
+    FILE *fp = fopen(sm->archivePath, "rb");
     if (!fp) {
-        linearFree(rawBuf);
+        linearFree(raw);
         return false;
     }
-
-    fseek(fp, (long) entry->dataOffset, SEEK_SET);
-    fread(rawBuf, 1, entry->dataSize, fp);
+    fseek(fp, ent->dataOffset, SEEK_SET);
+    fread(raw, 1, ent->dataSize, fp);
     fclose(fp);
 
-    bool isOgg = (entry->dataSize > 4 && memcmp(rawBuf, "OggS", 4) == 0);
+    if (ent->dataSize > 4 && !memcmp(raw, "OggS", 4)) {
+        int chans, srate;
+        short *pcm;
+        int smp = stb_vorbis_decode_memory(raw, ent->dataSize, &chans, &srate, &pcm);
 
-    if (isOgg) {
-        int ogg_channels, ogg_sample_rate;
-        short *decodedPcm;
-        int samples = stb_vorbis_decode_memory(rawBuf, entry->dataSize, &ogg_channels, &ogg_sample_rate, &decodedPcm);
-
-        if (samples > 0) {
-            int freq, mix_channels;
-            Uint16 format;
-            Mix_QuerySpec(&freq, &format, &mix_channels);
+        if (smp > 0) {
+            int f, mc;
+            Uint16 fmt;
+            Mix_QuerySpec(&f, &fmt, &mc);
 
             SDL_AudioCVT cvt;
-            int build_ret = SDL_BuildAudioCVT(&cvt, AUDIO_S16SYS, ogg_channels, ogg_sample_rate, format, mix_channels,
-                                              freq);
-            int original_len = samples * ogg_channels * sizeof(short);
-            if (build_ret == 1) {
-                cvt.len = original_len;
-                cvt.buf = (uint8_t *) linearAlloc(cvt.len * cvt.len_mult);
-                if (!cvt.buf) {
-                    free(decodedPcm);
-                    linearFree(rawBuf);
-                    return false;
-                }
-                memcpy(cvt.buf, decodedPcm, cvt.len);
+            int len = smp * chans * sizeof(short);
+            if (SDL_BuildAudioCVT(&cvt, AUDIO_S16SYS, chans, srate, fmt, mc, f) == 1) {
+                cvt.len = len;
+                cvt.buf = linearAlloc(cvt.len * cvt.len_mult);
+                memcpy(cvt.buf, pcm, cvt.len);
                 SDL_ConvertAudio(&cvt);
 
-                sys->chunks[soundIndex] = Mix_QuickLoad_RAW(cvt.buf, cvt.len_cvt);
-                sys->decodedSfxBufs[soundIndex] = cvt.buf;
-                free(decodedPcm);
+                sm->chunks[id] = Mix_QuickLoad_RAW(cvt.buf, cvt.len_cvt);
+                sm->sfxBuf[id] = cvt.buf;
             } else {
-                uint8_t *linearPcm = (uint8_t *) linearAlloc(original_len);
-                if (!linearPcm) {
-                    free(decodedPcm);
-                    linearFree(rawBuf);
-                    return false;
-                }
-                memcpy(linearPcm, decodedPcm, original_len);
-                free(decodedPcm);
-                sys->chunks[soundIndex] = Mix_QuickLoad_RAW(linearPcm, original_len);
-                sys->decodedSfxBufs[soundIndex] = linearPcm;
+                uint8_t *lp = linearAlloc(len);
+                memcpy(lp, pcm, len);
+                sm->chunks[id] = Mix_QuickLoad_RAW(lp, len);
+                sm->sfxBuf[id] = lp;
             }
+            free(pcm);
         }
     } else {
-        SDL_RWops *rw = SDL_RWFromConstMem(rawBuf, entry->dataSize);
-        sys->chunks[soundIndex] = Mix_LoadWAV_RW(rw, 1);
+        SDL_RWops *rw = SDL_RWFromConstMem(raw, ent->dataSize);
+        sm->chunks[id] = Mix_LoadWAV_RW(rw, 1);
     }
 
-    linearFree(rawBuf);
-
-    if (!sys->chunks[soundIndex]) {
-        fprintf(stderr, "Audio Error: Failed to load SFX '%s'\n", sys->base.dataWin->sond.sounds[soundIndex].name);
-        return false;
-    }
-    return true;
+    linearFree(raw);
+    return sm->chunks[id] != NULL;
 }
 
-static bool ensureSoundLoaded(SdlMixerAudioSystem *sys, int32_t soundIndex) {
-    if (!use_mixer) return true;
-    if (soundIndex < 0 || (uint32_t) soundIndex >= sys->base.dataWin->sond.count) return false;
-
-    sys->chunkLastUsed[soundIndex] = sys->audioFrameCounter;
-    if (sys->chunks[soundIndex] || sys->music[soundIndex]) return true;
-
-    Sound *sound = &sys->base.dataWin->sond.sounds[soundIndex];
-    bool isEmbedded = (sound->flags & 0x01) != 0;
-
-    if (isEmbedded) {
-        AudioEntry *entry = &sys->base.dataWin->audo.entries[sound->audioFile];
-        if (entry->dataSize == 0) return false;
-
-        bool isMusic = (entry->dataSize > STREAMING_SIZE_THRESHOLD);
-
-        if (isMusic) {
-            for (uint32_t i = 0; i < sys->base.dataWin->sond.count; i++) {
-                if (i != (uint32_t) soundIndex && sys->music[i] != NULL) {
-                    if (sys->currentMusicSoundIndex == (int32_t) i) {
-                        Mix_HaltMusic();
-                        sys->currentMusicSoundIndex = -1;
-                    }
-                    Mix_FreeMusic(sys->music[i]);
-                    sys->music[i] = NULL;
-                    if (sys->compressedMusicBuf && sys->compressedMusicBuf[i]) {
-                        free(sys->compressedMusicBuf[i]);
-                        sys->compressedMusicBuf[i] = NULL;
-                    }
-                }
+//stahp the music
+static void stop_other_music(SysMixer *sm, int keepId) {
+    for (uint32_t i = 0; i < sm->base.dataWin->sond.count; i++) {
+        if (i != keepId && sm->music[i]) {
+            if (sm->curMusicId == i) {
+                Mix_HaltMusic();
+                sm->curMusicId = -1;
             }
-
-            uint8_t *musicBuf = NULL;
-            SDL_RWops *rw = loadMusicIntoMemory(sys->archivePath, entry->dataOffset, entry->dataSize, &musicBuf);
-            if (rw) {
-                sys->music[soundIndex] = Mix_LoadMUS_RW(rw);
-                if (sys->music[soundIndex] != NULL) {
-                    sys->compressedMusicBuf[soundIndex] = musicBuf;
-                } else {
-                    fprintf(stderr, "Audio Error: Mix_LoadMUS_RW failed: %s\n", Mix_GetError());
-                    free(musicBuf);
-                }
+            Mix_FreeMusic(sm->music[i]);
+            sm->music[i] = NULL;
+            if (sm->musicBuf[i]) {
+                free(sm->musicBuf[i]);
+                sm->musicBuf[i] = NULL;
             }
+        }
+    }
+}
+
+static bool ensure_snd(SysMixer *sm, int id) {
+    if (!use_mixer || id < 0 || id >= sm->base.dataWin->sond.count) return false;
+    sm->lastUsed[id] = sm->frame;
+    if (sm->chunks[id] || sm->music[id]) return true;
+
+    Sound *snd = &sm->base.dataWin->sond.sounds[id];
+
+    if (snd->flags & 1) {
+        AudioEntry *ent = &sm->base.dataWin->audo.entries[snd->audioFile];
+        if (!ent->dataSize) return false;
+
+        if (ent->dataSize > STREAM_THRES) {
+            stop_other_music(sm, id);
+
+            uint8_t *mb = malloc(ent->dataSize);
+            FILE *fp = fopen(sm->archivePath, "rb");
+            if (fp) {
+                fseek(fp, ent->dataOffset, SEEK_SET);
+                fread(mb, 1, ent->dataSize, fp);
+                fclose(fp);
+
+                SDL_RWops *rw = SDL_RWFromConstMem(mb, ent->dataSize);
+                sm->music[id] = Mix_LoadMUS_RW(rw);
+                if (sm->music[id]) sm->musicBuf[id] = mb;
+                else free(mb);
+            } else free(mb);
         } else {
-            loadSfxIntoRAM(sys, soundIndex, entry);
+            load_sfx(sm, id, ent);
         }
     } else {
-        char *path = resolveExternalPath(sys, sound);
+        if (!snd->file || !snd->file[0]) return false;
+        char name[512];
+        snprintf(name, sizeof(name), "%s%s", snd->file, strchr(snd->file, '.') ? "" : ".ogg");
+        char *path = sm->fs->vtable->resolvePath(sm->fs, name);
+
         if (path) {
-            if (strstr(path, ".wav")) {
-                sys->chunks[soundIndex] = Mix_LoadWAV(path);
-            } else {
-                for (uint32_t i = 0; i < sys->base.dataWin->sond.count; i++) {
-                    if (i != (uint32_t) soundIndex && sys->music[i] != NULL) {
-                        if (sys->currentMusicSoundIndex == (int32_t) i) {
-                            Mix_HaltMusic();
-                            sys->currentMusicSoundIndex = -1;
-                        }
-                        Mix_FreeMusic(sys->music[i]);
-                        sys->music[i] = NULL;
-                        if (sys->compressedMusicBuf && sys->compressedMusicBuf[i]) {
-                            free(sys->compressedMusicBuf[i]);
-                            sys->compressedMusicBuf[i] = NULL;
-                        }
-                    }
-                }
-                sys->music[soundIndex] = Mix_LoadMUS(path);
+            if (strstr(path, ".wav")) sm->chunks[id] = Mix_LoadWAV(path);
+            else {
+                stop_other_music(sm, id);
+                sm->music[id] = Mix_LoadMUS(path);
             }
             free(path);
         }
     }
-
-    return (sys->chunks[soundIndex] || sys->music[soundIndex]);
+    return sm->chunks[id] || sm->music[id];
 }
 
-static void sdlmInit(AudioSystem *audio, DataWin *dataWin, FileSystem *fileSystem) {
-    SdlMixerAudioSystem *sys = (SdlMixerAudioSystem *) audio;
-    sys->base.dataWin = dataWin;
-    sys->fileSystem = fileSystem;
+static void sys_init(AudioSystem *sys, DataWin *dw, FileSystem *fs) {
+    SysMixer *sm = (SysMixer *) sys;
+    sm->base.dataWin = dw;
+    sm->fs = fs;
+
     if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 4096) < 0) {
-        fprintf(stderr, "Audio: Failed to init SDL_mixer: %s\n", Mix_GetError());
+        fprintf(stderr, "SDL_mixer init failed: %s\n", Mix_GetError());
         use_mixer = false;
     }
 
     if (use_mixer) {
         Mix_Init(MIX_INIT_OGG | MIX_INIT_MP3);
-        Mix_AllocateChannels(MAX_MIXER_CHANNELS);
+        Mix_AllocateChannels(MAX_CHANS);
 
-        uint32_t soundCount = dataWin->sond.count;
-        sys->chunks = safeCalloc(soundCount, sizeof(Mix_Chunk*));
-        sys->music = safeCalloc(soundCount, sizeof(Mix_Music*));
-        sys->compressedMusicBuf = safeCalloc(soundCount, sizeof(uint8_t*));
-        sys->decodedSfxBufs = safeCalloc(soundCount, sizeof(void*));
-        sys->chunkLastUsed = safeCalloc(soundCount, sizeof(uint32_t));
+        int cnt = dw->sond.count;
+        sm->chunks = calloc(cnt, sizeof(Mix_Chunk *));
+        sm->music = calloc(cnt, sizeof(Mix_Music *));
+        sm->musicBuf = calloc(cnt, sizeof(uint8_t *));
+        sm->sfxBuf = calloc(cnt, sizeof(void *));
+        sm->lastUsed = calloc(cnt, sizeof(uint32_t));
 
-        sys->currentMusicSoundIndex = -1;
-        sys->audioFrameCounter = 1;
+        sm->curMusicId = -1;
+        sm->frame = 1;
 
-        sys->archivePath = fileSystem->vtable->resolvePath(fileSystem, "data.win");
-        if (!sys->archivePath) {
-            sys->archivePath = fileSystem->vtable->resolvePath(fileSystem, "game.unx");
-        }
+        sm->archivePath = fs->vtable->resolvePath(fs, "data.win");
+        if (!sm->archivePath) sm->archivePath = fs->vtable->resolvePath(fs, "game.unx");
     }
 }
 
-static void sdlmDestroy(AudioSystem *audio) {
-    if (use_mixer) {
-        SdlMixerAudioSystem *sys = (SdlMixerAudioSystem *) audio;
+static void sys_destroy(AudioSystem *sys) {
+    if (!use_mixer) return;
+    SysMixer *sm = (SysMixer *) sys;
 
-        Mix_HaltChannel(-1);
-        Mix_HaltMusic();
+    Mix_HaltChannel(-1);
+    Mix_HaltMusic();
 
-        uint32_t soundCount = sys->base.dataWin->sond.count;
-        for (uint32_t i = 0; i < soundCount; i++) {
-            if (sys->chunks[i]) Mix_FreeChunk(sys->chunks[i]);
-
-            if (sys->music[i]) Mix_FreeMusic(sys->music[i]);
-            if (sys->compressedMusicBuf && sys->compressedMusicBuf[i]) free(sys->compressedMusicBuf[i]);
-            if (sys->decodedSfxBufs[i]) linearFree(sys->decodedSfxBufs[i]);
-        }
-
-        free(sys->chunks);
-        free(sys->music);
-        free(sys->compressedMusicBuf);
-        free(sys->decodedSfxBufs);
-        free(sys->chunkLastUsed);
-        if (sys->archivePath) free(sys->archivePath);
-
-        Mix_CloseAudio();
-        Mix_Quit();
-        free(sys);
+    for (uint32_t i = 0; i < sm->base.dataWin->sond.count; i++) {
+        if (sm->chunks[i]) Mix_FreeChunk(sm->chunks[i]);
+        if (sm->music[i]) Mix_FreeMusic(sm->music[i]);
+        if (sm->musicBuf[i]) free(sm->musicBuf[i]);
+        if (sm->sfxBuf[i]) linearFree(sm->sfxBuf[i]);
     }
+
+    free(sm->chunks);
+    free(sm->music);
+    free(sm->musicBuf);
+    free(sm->sfxBuf);
+    free(sm->lastUsed);
+    if (sm->archivePath) free(sm->archivePath);
+
+    Mix_CloseAudio();
+    Mix_Quit();
+    free(sm);
 }
 
-static void sdlmUpdate(AudioSystem *audio, float deltaTime) {
-    if (use_mixer) {
-        ((SdlMixerAudioSystem *) audio)->audioFrameCounter++;
-        (void) deltaTime;
-    }
+static void sys_update(AudioSystem *sys, float dt) {
+    if (use_mixer) ((SysMixer *) sys)->frame++;
 }
 
-static int32_t sdlmPlaySound(AudioSystem *audio, int32_t soundIndex, int32_t priority, bool loop) {
+static int32_t sys_play(AudioSystem *sys, int32_t id, int32_t prio, bool loop) {
     if (!use_mixer) return 0;
-    SdlMixerAudioSystem *sys = (SdlMixerAudioSystem *) audio;
+    SysMixer *sm = (SysMixer *) sys;
+    if (!ensure_snd(sm, id)) return -1;
 
-    if (!ensureSoundLoaded(sys, soundIndex)) return -1;
+    int vol = sm->base.dataWin->sond.sounds[id].volume * MIX_MAX_VOLUME;
 
-    Sound *sound = &sys->base.dataWin->sond.sounds[soundIndex];
-    int volume = (int) (sound->volume * MIX_MAX_VOLUME);
-
-    if (sys->music[soundIndex] != NULL) {
-        Mix_VolumeMusic(volume);
-        if (Mix_PlayMusic(sys->music[soundIndex], loop ? -1 : 0) == -1) {
-            fprintf(stderr, "Audio Error: Mix_PlayMusic failed: %s\n", Mix_GetError());
-        }
-        sys->currentMusicSoundIndex = soundIndex;
-        return MUSIC_INSTANCE_ID_BASE;
+    if (sm->music[id]) {
+        Mix_VolumeMusic(vol);
+        Mix_PlayMusic(sm->music[id], loop ? -1 : 0);
+        sm->curMusicId = id;
+        return MUS_ID_BASE;
     }
 
-    if (sys->chunks[soundIndex] != NULL) {
-        int channel = Mix_PlayChannel(-1, sys->chunks[soundIndex], loop ? -1 : 0);
-        if (channel >= 0) {
-            Mix_Volume(channel, volume);
-            return SOUND_INSTANCE_ID_BASE + channel;
+    if (sm->chunks[id]) {
+        int ch = Mix_PlayChannel(-1, sm->chunks[id], loop ? -1 : 0);
+        if (ch >= 0) {
+            Mix_Volume(ch, vol);
+            return SND_ID_BASE + ch;
         }
     }
     return -1;
 }
 
-static void sdlmStopSound(AudioSystem *audio, int32_t soundOrInstance) {
+static void sys_stop(AudioSystem *sys, int32_t id) {
     if (!use_mixer) return;
-    SdlMixerAudioSystem *sys = (SdlMixerAudioSystem *) audio;
+    SysMixer *sm = (SysMixer *) sys;
 
-    if (soundOrInstance == MUSIC_INSTANCE_ID_BASE) {
+    if (id == MUS_ID_BASE || sm->curMusicId == id) {
         Mix_HaltMusic();
-        sys->currentMusicSoundIndex = -1;
-    } else if (soundOrInstance >= SOUND_INSTANCE_ID_BASE) {
-        int channel = soundOrInstance - SOUND_INSTANCE_ID_BASE;
-        if (channel >= 0 && channel < MAX_MIXER_CHANNELS) Mix_HaltChannel(channel);
-    } else {
-        if (sys->currentMusicSoundIndex == soundOrInstance) {
-            Mix_HaltMusic();
-            sys->currentMusicSoundIndex = -1;
-        }
-        Mix_Chunk *targetChunk = sys->chunks[soundOrInstance];
-        if (targetChunk) {
-            for (int i = 0; i < MAX_MIXER_CHANNELS; i++) {
-                if (Mix_GetChunk(i) == targetChunk) Mix_HaltChannel(i);
-            }
+        sm->curMusicId = -1;
+    } else if (id >= SND_ID_BASE) {
+        Mix_HaltChannel(id - SND_ID_BASE);
+    } else if (sm->chunks[id]) {
+        for (int i = 0; i < MAX_CHANS; i++) {
+            if (Mix_GetChunk(i) == sm->chunks[id]) Mix_HaltChannel(i);
         }
     }
 }
 
-static void sdlmStopAll(AudioSystem *audio) {
+static void sys_stop_all(AudioSystem *sys) {
     if (!use_mixer) return;
-    SdlMixerAudioSystem *sys = (SdlMixerAudioSystem *) audio;
     Mix_HaltChannel(-1);
     Mix_HaltMusic();
-    sys->currentMusicSoundIndex = -1;
+    ((SysMixer *) sys)->curMusicId = -1;
 }
 
-static bool sdlmIsPlaying(AudioSystem *audio, int32_t soundOrInstance) {
+static bool sys_is_playing(AudioSystem *sys, int32_t id) {
     if (!use_mixer) return false;
-    SdlMixerAudioSystem *sys = (SdlMixerAudioSystem *) audio;
+    SysMixer *sm = (SysMixer *) sys;
 
-    if (soundOrInstance == MUSIC_INSTANCE_ID_BASE) {
-        return Mix_PlayingMusic() != 0;
-    } else if (soundOrInstance >= SOUND_INSTANCE_ID_BASE) {
-        int channel = soundOrInstance - SOUND_INSTANCE_ID_BASE;
-        if (channel >= 0 && channel < MAX_MIXER_CHANNELS) return Mix_Playing(channel) != 0;
-    } else {
-        if (sys->currentMusicSoundIndex == soundOrInstance && Mix_PlayingMusic()) return true;
-        Mix_Chunk *targetChunk = sys->chunks[soundOrInstance];
-        if (targetChunk) {
-            for (int i = 0; i < MAX_MIXER_CHANNELS; i++) {
-                if (Mix_Playing(i) && Mix_GetChunk(i) == targetChunk) return true;
-            }
+    if (id == MUS_ID_BASE || (sm->curMusicId == id && Mix_PlayingMusic())) return Mix_PlayingMusic();
+    if (id >= SND_ID_BASE) return Mix_Playing(id - SND_ID_BASE);
+
+    if (sm->chunks[id]) {
+        for (int i = 0; i < MAX_CHANS; i++) {
+            if (Mix_Playing(i) && Mix_GetChunk(i) == sm->chunks[id]) return true;
         }
     }
     return false;
 }
 
-static void sdlmPauseSound(AudioSystem *audio, int32_t soundOrInstance) {
+static void sys_pause(AudioSystem *sys, int32_t id) {
     if (!use_mixer) return;
-    SdlMixerAudioSystem *sys = (SdlMixerAudioSystem *) audio;
-    if (soundOrInstance == MUSIC_INSTANCE_ID_BASE) Mix_PauseMusic();
-    else if (soundOrInstance >= SOUND_INSTANCE_ID_BASE) {
-        int channel = soundOrInstance - SOUND_INSTANCE_ID_BASE;
-        if (channel >= 0 && channel < MAX_MIXER_CHANNELS) Mix_Pause(channel);
-    } else {
-        if (sys->currentMusicSoundIndex == soundOrInstance) Mix_PauseMusic();
-        Mix_Chunk *targetChunk = sys->chunks[soundOrInstance];
-        if (targetChunk) {
-            for (int i = 0; i < MAX_MIXER_CHANNELS; i++) {
-                if (Mix_GetChunk(i) == targetChunk) Mix_Pause(i);
-            }
-        }
+    SysMixer *sm = (SysMixer *) sys;
+
+    if (id == MUS_ID_BASE || sm->curMusicId == id) Mix_PauseMusic();
+    else if (id >= SND_ID_BASE) Mix_Pause(id - SND_ID_BASE);
+    else if (sm->chunks[id]) {
+        for (int i = 0; i < MAX_CHANS; i++) if (Mix_GetChunk(i) == sm->chunks[id]) Mix_Pause(i);
     }
 }
 
-static void sdlmResumeSound(AudioSystem *audio, int32_t soundOrInstance) {
+static void sys_resume(AudioSystem *sys, int32_t id) {
     if (!use_mixer) return;
-    SdlMixerAudioSystem *sys = (SdlMixerAudioSystem *) audio;
-    if (soundOrInstance == MUSIC_INSTANCE_ID_BASE) Mix_ResumeMusic();
-    else if (soundOrInstance >= SOUND_INSTANCE_ID_BASE) {
-        int channel = soundOrInstance - SOUND_INSTANCE_ID_BASE;
-        if (channel >= 0 && channel < MAX_MIXER_CHANNELS) Mix_Resume(channel);
-    } else {
-        if (sys->currentMusicSoundIndex == soundOrInstance) Mix_ResumeMusic();
-        Mix_Chunk *targetChunk = sys->chunks[soundOrInstance];
-        if (targetChunk) {
-            for (int i = 0; i < MAX_MIXER_CHANNELS; i++) {
-                if (Mix_GetChunk(i) == targetChunk) Mix_Resume(i);
-            }
-        }
+    SysMixer *sm = (SysMixer *) sys;
+
+    if (id == MUS_ID_BASE || sm->curMusicId == id) Mix_ResumeMusic();
+    else if (id >= SND_ID_BASE) Mix_Resume(id - SND_ID_BASE);
+    else if (sm->chunks[id]) {
+        for (int i = 0; i < MAX_CHANS; i++) if (Mix_GetChunk(i) == sm->chunks[id]) Mix_Resume(i);
     }
 }
 
-static void sdlmPauseAll(AudioSystem *audio) {
-    (void) audio;
+static void sys_pause_all(AudioSystem *sys) {
     if (use_mixer) {
         Mix_Pause(-1);
         Mix_PauseMusic();
     }
 }
 
-static void sdlmResumeAll(AudioSystem *audio) {
-    (void) audio;
+static void sys_resume_all(AudioSystem *sys) {
     if (use_mixer) {
         Mix_Resume(-1);
         Mix_ResumeMusic();
     }
 }
 
-static void sdlmSetSoundGain(AudioSystem *audio, int32_t soundOrInstance, float gain, uint32_t timeMs) {
+static void sys_set_gain(AudioSystem *sys, int32_t id, float g, uint32_t t) {
     if (!use_mixer) return;
-    (void) timeMs;
-    SdlMixerAudioSystem *sys = (SdlMixerAudioSystem *) audio;
-    int vol = (int) (gain * MIX_MAX_VOLUME);
-    if (vol > MIX_MAX_VOLUME) vol = MIX_MAX_VOLUME;
+    SysMixer *sm = (SysMixer *) sys;
+    int vol = fminf(g * MIX_MAX_VOLUME, MIX_MAX_VOLUME);
 
-    if (soundOrInstance == MUSIC_INSTANCE_ID_BASE) Mix_VolumeMusic(vol);
-    else if (soundOrInstance >= SOUND_INSTANCE_ID_BASE) {
-        int channel = soundOrInstance - SOUND_INSTANCE_ID_BASE;
-        if (channel >= 0 && channel < MAX_MIXER_CHANNELS) Mix_Volume(channel, vol);
-    } else {
-        if (sys->currentMusicSoundIndex == soundOrInstance) Mix_VolumeMusic(vol);
-        Mix_Chunk *targetChunk = sys->chunks[soundOrInstance];
-        if (targetChunk) {
-            for (int i = 0; i < MAX_MIXER_CHANNELS; i++) {
-                if (Mix_GetChunk(i) == targetChunk) Mix_Volume(i, vol);
-            }
-        }
+    if (id == MUS_ID_BASE || sm->curMusicId == id) Mix_VolumeMusic(vol);
+    else if (id >= SND_ID_BASE) Mix_Volume(id - SND_ID_BASE, vol);
+    else if (sm->chunks[id]) {
+        for (int i = 0; i < MAX_CHANS; i++) if (Mix_GetChunk(i) == sm->chunks[id]) Mix_Volume(i, vol);
     }
 }
 
-static float sdlmGetSoundGain(AudioSystem *audio, int32_t soundOrInstance) {
-    if (!use_mixer) return 0.0f;
-    SdlMixerAudioSystem *sys = (SdlMixerAudioSystem *) audio;
-    if (soundOrInstance == MUSIC_INSTANCE_ID_BASE || sys->currentMusicSoundIndex == soundOrInstance) {
-        return (float) Mix_VolumeMusic(-1) / (float) MIX_MAX_VOLUME;
-    } else if (soundOrInstance >= SOUND_INSTANCE_ID_BASE) {
-        int channel = soundOrInstance - SOUND_INSTANCE_ID_BASE;
-        if (channel >= 0 && channel < MAX_MIXER_CHANNELS) return
-                (float) Mix_Volume(channel, -1) / (float) MIX_MAX_VOLUME;
-    }
-    return 0.0f;
+static float sys_get_gain(AudioSystem *sys, int32_t id) {
+    if (!use_mixer) return 0.f;
+    SysMixer *sm = (SysMixer *) sys;
+    if (id == MUS_ID_BASE || sm->curMusicId == id) return (float) Mix_VolumeMusic(-1) / MIX_MAX_VOLUME;
+    if (id >= SND_ID_BASE) return (float) Mix_Volume(id - SND_ID_BASE, -1) / MIX_MAX_VOLUME;
+    return 0.f;
 }
 
-static void sdlmSetSoundPitch(AudioSystem *audio, int32_t soundOrInstance, float pitch) {
-    (void) audio;
-    (void) soundOrInstance;
-    (void) pitch;
+//stubs
+static void sys_set_pitch(AudioSystem *sys, int32_t id, float p) {
 }
 
-static float sdlmGetSoundPitch(AudioSystem *audio, int32_t soundOrInstance) {
-    (void) audio;
-    (void) soundOrInstance;
-    return 1.0f;
+static float sys_get_pitch(AudioSystem *sys, int32_t id) { return 1.f; }
+static float sys_get_pos(AudioSystem *sys, int32_t id) { return 0.f; }
+
+static void sys_set_pos(AudioSystem *sys, int32_t id, float pos) {
+    if (use_mixer && (id == MUS_ID_BASE || ((SysMixer *) sys)->curMusicId == id)) Mix_SetMusicPosition(pos);
 }
 
-static float sdlmGetTrackPosition(AudioSystem *audio, int32_t soundOrInstance) {
-    (void) audio;
-    (void) soundOrInstance;
-    return 0.0f;
-}
-
-static void sdlmSetTrackPosition(AudioSystem *audio, int32_t soundOrInstance, float positionSeconds) {
-    if (!use_mixer) return;
-    SdlMixerAudioSystem *sys = (SdlMixerAudioSystem *) audio;
-    if (soundOrInstance == MUSIC_INSTANCE_ID_BASE || sys->currentMusicSoundIndex == soundOrInstance) {
-        Mix_SetMusicPosition((double) positionSeconds);
+static void sys_set_master(AudioSystem *sys, float g) {
+    if (use_mixer) {
+        int v = g * MIX_MAX_VOLUME;
+        Mix_Volume(-1, v);
+        Mix_VolumeMusic(v);
     }
 }
 
-static void sdlmSetMasterGain(AudioSystem *audio, float gain) {
-    if (!use_mixer) return;
-    (void) audio;
-    int vol = (int) (gain * MIX_MAX_VOLUME);
-    Mix_Volume(-1, vol);
-    Mix_VolumeMusic(vol);
+static void sys_set_chans(AudioSystem *sys, int32_t cnt) { if (use_mixer) Mix_AllocateChannels(cnt); }
+
+static void sys_grp_load(AudioSystem *sys, int32_t grp) {
 }
 
-static void sdlmSetChannelCount(AudioSystem *audio, int32_t count) {
-    if (!use_mixer) return;
-    (void) audio;
-    Mix_AllocateChannels(count);
-}
+static bool sys_grp_loaded(AudioSystem *sys, int32_t grp) { return true; }
 
-static void sdlmGroupLoad(AudioSystem *audio, int32_t groupIndex) {
-    (void) audio;
-    (void) groupIndex;
-}
-
-static bool sdlmGroupIsLoaded(AudioSystem *audio, int32_t groupIndex) {
-    (void) audio;
-    (void) groupIndex;
-    return true;
-}
-
-static AudioSystemVtable sdlmAudioSystemVtable = {
-    .init = sdlmInit, .destroy = sdlmDestroy, .update = sdlmUpdate,
-    .playSound = sdlmPlaySound, .stopSound = sdlmStopSound, .stopAll = sdlmStopAll,
-    .isPlaying = sdlmIsPlaying, .pauseSound = sdlmPauseSound, .resumeSound = sdlmResumeSound,
-    .pauseAll = sdlmPauseAll, .resumeAll = sdlmResumeAll, .setSoundGain = sdlmSetSoundGain,
-    .getSoundGain = sdlmGetSoundGain, .setSoundPitch = sdlmSetSoundPitch, .getSoundPitch = sdlmGetSoundPitch,
-    .getTrackPosition = sdlmGetTrackPosition, .setTrackPosition = sdlmSetTrackPosition,
-    .setMasterGain = sdlmSetMasterGain, .setChannelCount = sdlmSetChannelCount,
-    .groupLoad = sdlmGroupLoad, .groupIsLoaded = sdlmGroupIsLoaded,
+static AudioSystemVtable vtable = {
+    .init = sys_init, .destroy = sys_destroy, .update = sys_update,
+    .playSound = sys_play, .stopSound = sys_stop, .stopAll = sys_stop_all,
+    .isPlaying = sys_is_playing, .pauseSound = sys_pause, .resumeSound = sys_resume,
+    .pauseAll = sys_pause_all, .resumeAll = sys_resume_all, .setSoundGain = sys_set_gain,
+    .getSoundGain = sys_get_gain, .setSoundPitch = sys_set_pitch, .getSoundPitch = sys_get_pitch,
+    .getTrackPosition = sys_get_pos, .setTrackPosition = sys_set_pos,
+    .setMasterGain = sys_set_master, .setChannelCount = sys_set_chans,
+    .groupLoad = sys_grp_load, .groupIsLoaded = sys_grp_loaded,
 };
 
 AudioSystem *SdlMixerAudioSystem_create(void) {
-    SdlMixerAudioSystem *sys = safeCalloc(1, sizeof(SdlMixerAudioSystem));
-    sys->base.vtable = &sdlmAudioSystemVtable;
-    return (AudioSystem *) sys;
+    SysMixer *sm = calloc(1, sizeof(SysMixer));
+    sm->base.vtable = &vtable;
+    return (AudioSystem *) sm;
 }
