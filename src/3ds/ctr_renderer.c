@@ -1,3 +1,7 @@
+//
+// Created by efimandreev0 on 28.04.2026.
+//
+
 #include "ctr_renderer.h"
 #include "matrix_math.h"
 #include "text_utils.h"
@@ -11,6 +15,8 @@
 #include "stb_image.h"
 #include "image_decoder.h"
 #include "utils.h"
+
+extern char g_current_cache_dir[256];
 
 #define BATCH_CAP 2048
 #define MAX_RR_SEGMENTS 64
@@ -71,7 +77,8 @@ static uint8_t *read_blob(FILE *fp, uint32_t off, uint32_t size) {
 //gen cache on first boot
 static void build_texture_cache(CtrRenderer *ctx) {
     DataWin *dw = ctx->base.dataWin;
-    const char *flagFile = "sdmc:/3ds/butterscotch/cache/cache_ready.flag";
+    char flagFile[256];
+    snprintf(flagFile, sizeof(flagFile), "%s/cache_ready.flag", g_current_cache_dir);
 
     FILE *f = fopen(flagFile, "r");
     if (f) {
@@ -84,7 +91,7 @@ static void build_texture_cache(CtrRenderer *ctx) {
 
     for (uint32_t i = 0; i < dw->txtr.count; i++) {
         char path[256];
-        snprintf(path, sizeof(path), "sdmc:/3ds/butterscotch/cache/page_%u.atlas", i);
+        snprintf(path, sizeof(path), "%s/page_%u.atlas", g_current_cache_dir, i);
 
         FILE *check = fopen(path, "r");
         if (check) {
@@ -99,8 +106,7 @@ static void build_texture_cache(CtrRenderer *ctx) {
         if (!blob) continue;
 
         int w, h;
-        uint8_t *pixels = ImageDecoder_decodeToRgba(blob, t->blobSize, DataWin_isVersionAtLeast(dw, 2022, 5, 0, 0), &w,
-                                                    &h);
+        uint8_t *pixels = ImageDecoder_decodeToRgba(blob, t->blobSize, DataWin_isVersionAtLeast(dw, 2022, 5, 0, 0), &w, &h);
         free(blob);
 
         if (pixels) {
@@ -270,7 +276,7 @@ static void load_page_dyn(CtrRenderer *ctx, DataWin *dw, int32_t idx) {
 
     uint32_t pageId = dw->tpag.items[idx].texturePageId;
     char path[256];
-    snprintf(path, sizeof(path), "sdmc:/3ds/butterscotch/cache/page_%u.atlas", pageId);
+    snprintf(path, sizeof(path), "%s/page_%u.atlas", g_current_cache_dir, pageId);
 
     FILE *f = fopen(path, "rb");
     if (!f) return;
@@ -988,7 +994,7 @@ static void ctr_on_room(Renderer *ren, int32_t rm) {
     for (int p = 0; p < 256; p++) {
         if (!loadMap[p]) continue;
         char path[256];
-        snprintf(path, sizeof(path), "sdmc:/3ds/butterscotch/cache/page_%d.atlas", p);
+        snprintf(path, sizeof(path), "%s/page_%d.atlas", g_current_cache_dir, p);
         FILE *f = fopen(path, "rb");
         if (!f) continue;
         setvbuf(f, dyn_buf, _IOFBF, sizeof(dyn_buf));
@@ -1317,7 +1323,6 @@ static int32_t ctr_create_surf_ex(Renderer *ren, int32_t surfaceId, int32_t x, i
         sourceW = surf->width;
         sourceH = surf->height;
         sourcePotH = surf->potH;
-        // У обычных (не экранных) сюрфейсов скейлинга нет
         sx = 1.0f;
         sy = 1.0f;
     }
@@ -1373,11 +1378,8 @@ static int32_t ctr_create_surf_ex(Renderer *ren, int32_t surfaceId, int32_t x, i
                 }
             }
 
-            // ИДЕАЛЬНЫЙ МАППИНГ ПИКСЕЛЕЙ: Убивает дрифт (смещение вниз)
             for (int ly = 0; ly < h; ly++) {
                 for (int lx = 0; lx < w; lx++) {
-                    // Берем абсолютную координату в игре и переводим в FBO.
-                    // floorf здесь обязателен, чтобы пиксели не съезжали.
                     float game_abs_x = (float)x + (float)lx;
                     float game_abs_y = (float)y + (float)ly;
 

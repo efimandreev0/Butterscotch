@@ -1,3 +1,7 @@
+//
+// Created by efimandreev0 on 28.04.2026.
+//
+
 #pragma once
 
 #include "renderer.h"
@@ -58,17 +62,12 @@ typedef struct {
     int32_t winW, winH;
     int32_t gameW, gameH;
 
-    // Скейлинг для адаптации огромных игр под экран 3DS
     float scaleX;
     float scaleY;
 
-    // Original counts from data.win — dynamic tpag/sprite slots start at these.
     uint32_t originalTpagCount;
     uint32_t originalSpriteCount;
 
-    // Off-screen render target. The whole frame is drawn into this FBO; at
-    // endFrame the texture is blitted to the actual screen target. NovaGL keeps
-    // FBOs unrotated, so their logical size matches their texture size.
     bool fboCreated;
     bool fboFrameCleared;
     GLuint fboId;
