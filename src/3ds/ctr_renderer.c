@@ -250,8 +250,7 @@ static void extract_page_file(CtrRenderer *ctx, DataWin *dw, uint32_t id, FILE *
 
             glGenTextures(1, &chunk->tex);
             glBindTexture(GL_TEXTURE_2D, chunk->tex);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, chunk->potW, chunk->potH, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4,
-                         pixels);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, chunk->potW, chunk->potH, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, pixels);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -350,10 +349,6 @@ static void ctr_destroy(Renderer *ren) {
     free(ctx);
 }
 
-static void ensure_fbo(CtrRenderer *ctx) {
-    if (ctx->fboCreated && ctx->fboLogicW == ctx->winW && ctx->fboLogicH == ctx->winH) return; // Условие изменено ниже в begin_frame
-}
-
 static void ctr_begin_frame(Renderer *ren, int32_t gw, int32_t gh, int32_t ww, int32_t wh) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
     flush_batch(ctx);
@@ -363,7 +358,6 @@ static void ctr_begin_frame(Renderer *ren, int32_t gw, int32_t gh, int32_t ww, i
     ctx->gameW = gw;
     ctx->gameH = gh;
 
-    // Рассчитываем физические (ужатые) размеры главного FBO, чтобы не допустить OOM
     int drawW, drawH;
     if ((ctx->gameW * ctx->winH) / ctx->gameH < ctx->winW) {
         drawW = (ctx->gameW * ctx->winH) / ctx->gameH;
@@ -382,10 +376,14 @@ static void ctr_begin_frame(Renderer *ren, int32_t gw, int32_t gh, int32_t ww, i
             glDeleteTextures(1, &ctx->fboTexId);
         }
 
+        ctx->fboLogicW = drawW;
+        ctx->fboLogicH = drawH;
+        ctx->fboPotW = next_pow2(drawW);
+        ctx->fboPotH = next_pow2(drawH);
+
         glGenTextures(1, &ctx->fboTexId);
         glBindTexture(GL_TEXTURE_2D, ctx->fboTexId);
-        // Создаём текстуру физических размеров (чтобы влезла в VRAM)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, drawW, drawH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ctx->fboPotW, ctx->fboPotH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -396,10 +394,6 @@ static void ctr_begin_frame(Renderer *ren, int32_t gw, int32_t gh, int32_t ww, i
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ctx->fboTexId, 0);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-        ctx->fboLogicW = drawW;
-        ctx->fboLogicH = drawH;
-        ctx->fboPotW = next_pow2(drawW);
-        ctx->fboPotH = next_pow2(drawH);
         ctx->fboCreated = true;
     }
 
@@ -407,7 +401,6 @@ static void ctr_begin_frame(Renderer *ren, int32_t gw, int32_t gh, int32_t ww, i
     ctx->targetStackDepth = 0;
 }
 
-// Re-bind the FBO (novaBeginEye between eyes unbinds it) and lazily clear
 static void bind_fbo_for_drawing(CtrRenderer *ctx) {
     if (!ctx->fboCreated) return;
     glBindFramebuffer(GL_FRAMEBUFFER, ctx->fboId);
@@ -425,8 +418,7 @@ static void set_viewport(CtrRenderer *ctx, int32_t px, int32_t py, int32_t pw, i
     int32_t spw = pw * ctx->scaleX;
     int32_t sph = ph * ctx->scaleY;
 
-    // OpenGL Y is bottom-up inside FBO
-    int32_t glY = ctx->fboLogicH - spy - sph;
+    int32_t glY = ctx->fboPotH - spy - sph;
     glViewport(spx, glY, fmaxf(1, spw), fmaxf(1, sph));
     glEnable(GL_SCISSOR_TEST);
     glScissor(spx, glY, fmaxf(1, spw), fmaxf(1, sph));
@@ -1055,7 +1047,6 @@ static CtrSurface *get_surface(CtrRenderer *ctx, int32_t surfaceId) {
 static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
     if (width <= 0 || height <= 0) return -1;
-    // Лимит во избежание VRAM OOM
     if (width > 1024) width = 1024;
     if (height > 1024) height = 1024;
 
@@ -1080,9 +1071,14 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
     memset(surf, 0, sizeof(*surf));
     GLuint restoreFbo = ctx->activeFbo;
 
+    surf->width = width;
+    surf->height = height;
+    surf->potW = next_pow2(width);
+    surf->potH = next_pow2(height);
+
     glGenTextures(1, &surf->tex);
     glBindTexture(GL_TEXTURE_2D, surf->tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, surf->potW, surf->potH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -1095,10 +1091,6 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
     ctx->activeFbo = restoreFbo;
 
     surf->used = true;
-    surf->width = width;
-    surf->height = height;
-    surf->potW = next_pow2(width);
-    surf->potH = next_pow2(height);
     return (int32_t) slot;
 }
 
@@ -1149,7 +1141,8 @@ static bool ctr_surface_set_target(Renderer *ren, int32_t surfaceId) {
 
     glBindFramebuffer(GL_FRAMEBUFFER, surf->fbo);
     ctx->activeFbo = surf->fbo;
-    glViewport(0, 0, surf->width, surf->height);
+
+    glViewport(0, surf->potH - surf->height, surf->width, surf->height);
     glDisable(GL_SCISSOR_TEST);
 
     Matrix4f proj;
@@ -1219,7 +1212,6 @@ static void ctr_draw_surface(Renderer *ren, int32_t surfaceId, float x, float y,
     CtrRenderer *ctx = (CtrRenderer *) ren;
     if (surfaceId == -1) {
         if (!ctx->fboCreated) return;
-        // application_surface масштабируется до логического размера игры
         push_render_texture_quad(ctx, ctx->fboTexId, ctx->gameW, ctx->gameH, ctx->fboLogicW, ctx->fboLogicH, ctx->fboPotW, ctx->fboPotH, x, y,
                                  xscale, yscale, angleDeg, color, alpha);
         return;
@@ -1237,7 +1229,40 @@ static void ctr_clear_target(Renderer *ren, uint32_t color, float alpha) {
     glClearColor(BGR_R(color) / 255.f, BGR_G(color) / 255.f, BGR_B(color) / 255.f, fmaxf(0.f, fminf(1.f, alpha)));
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
+static inline void downscale_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, int dst_w, int dst_h) {
+    for (int y = 0; y < dst_h; y++) {
+        int sy0 = (int) ((int64_t) y * src_h / dst_h);
+        int sy1 = (int) ((int64_t) (y + 1) * src_h / dst_h);
+        if (sy1 <= sy0) sy1 = sy0 + 1;
+        if (sy1 > src_h) sy1 = src_h;
+        for (int x = 0; x < dst_w; x++) {
+            int sx0 = (int) ((int64_t) x * src_w / dst_w);
+            int sx1 = (int) ((int64_t) (x + 1) * src_w / dst_w);
+            if (sx1 <= sx0) sx1 = sx0 + 1;
+            if (sx1 > src_w) sx1 = src_w;
 
+            uint32_t r = 0, g = 0, b = 0, a = 0;
+            uint32_t count = 0;
+            for (int yy = sy0; yy < sy1; yy++) {
+                const uint32_t *row = src + yy * src_w;
+                for (int xx = sx0; xx < sx1; xx++) {
+                    uint32_t p = row[xx];
+                    r += (p >> 0) & 0xFF;
+                    g += (p >> 8) & 0xFF;
+                    b += (p >> 16) & 0xFF;
+                    a += (p >> 24) & 0xFF;
+                    count++;
+                }
+            }
+            if (count == 0) count = 1;
+            uint8_t rr = (uint8_t) (r / count);
+            uint8_t gg = (uint8_t) (g / count);
+            uint8_t bb = (uint8_t) (b / count);
+            uint8_t aa = (uint8_t) (a / count);
+            dst[y * dst_w + x] = ((uint32_t) aa << 24) | ((uint32_t) bb << 16) | ((uint32_t) gg << 8) | rr;
+        }
+    }
+}
 static int32_t ctr_create_surf_ex(Renderer *ren, int32_t surfaceId, int32_t x, int32_t y, int32_t w, int32_t h,
                                   bool rb, bool sm, int32_t xo, int32_t yo) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
@@ -1247,94 +1272,136 @@ static int32_t ctr_create_surf_ex(Renderer *ren, int32_t surfaceId, int32_t x, i
 
     GLuint sourceFbo = 0;
     int32_t sourceW = 0, sourceH = 0;
-
-    // Пересчитываем координаты, если обращаемся к даунскейленному FBO
-    int32_t fbo_x = x, fbo_y = y, fbo_w = w, fbo_h = h;
+    int32_t sourcePotH = 0;
+    float sx = 1.0f, sy = 1.0f;
 
     if (surfaceId == -1) {
         if (!ctx->fboCreated) return -1;
         sourceFbo = ctx->fboId;
         sourceW = ctx->fboLogicW;
         sourceH = ctx->fboLogicH;
-
-        fbo_x = (int32_t)(x * ctx->scaleX);
-        fbo_y = (int32_t)(y * ctx->scaleY);
-        fbo_w = (int32_t)(w * ctx->scaleX);
-        fbo_h = (int32_t)(h * ctx->scaleY);
+        sourcePotH = ctx->fboPotH;
+        sx = ctx->scaleX;
+        sy = ctx->scaleY;
     } else {
         CtrSurface *surf = get_surface(ctx, surfaceId);
         if (!surf) return -1;
         sourceFbo = surf->fbo;
         sourceW = surf->width;
         sourceH = surf->height;
+        sourcePotH = surf->potH;
     }
 
-    if (fbo_x < 0) { fbo_w += fbo_x; fbo_x = 0; }
-    if (fbo_y < 0) { fbo_h += fbo_y; fbo_y = 0; }
-    if (fbo_x + fbo_w > sourceW) fbo_w = sourceW - fbo_x;
-    if (fbo_y + fbo_h > sourceH) fbo_h = sourceH - fbo_y;
-    if (fbo_w <= 0 || fbo_h <= 0) return -1;
+    int32_t phys_l = (int32_t)floorf(x * sx);
+    int32_t phys_t = (int32_t)floorf(y * sy);
+    int32_t phys_r = (int32_t)ceilf((x + w) * sx);
+    int32_t phys_b = (int32_t)ceilf((y + h) * sy);
 
-    flush_batch(ctx);
-    GLuint restoreFbo = ctx->activeFbo;
-    glBindFramebuffer(GL_FRAMEBUFFER, sourceFbo);
+    int32_t read_l = phys_l < 0 ? 0 : phys_l;
+    int32_t read_t = phys_t < 0 ? 0 : phys_t;
+    int32_t read_r = phys_r > sourceW ? sourceW : phys_r;
+    int32_t read_b = phys_b > sourceH ? sourceH : phys_b;
 
-    int32_t glY = sourceH - fbo_y - fbo_h;
+    int32_t read_w = read_r - read_l;
+    int32_t read_h = read_b - read_t;
 
-    uint8_t *pixels = malloc((size_t) fbo_w * (size_t) fbo_h * 4);
-    if (!pixels) {
-        glBindFramebuffer(GL_FRAMEBUFFER, restoreFbo);
-        ctx->activeFbo = restoreFbo;
-        return -1;
-    }
+    uint8_t *final_pixels = calloc((size_t)w * (size_t)h, 4);
+    if (!final_pixels) return -1;
 
-    glReadPixels(fbo_x, glY, fbo_w, fbo_h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-    glBindFramebuffer(GL_FRAMEBUFFER, restoreFbo);
-    ctx->activeFbo = restoreFbo;
+    if (read_w > 0 && read_h > 0) {
+        flush_batch(ctx);
+        GLuint restoreFbo = ctx->activeFbo;
+        glBindFramebuffer(GL_FRAMEBUFFER, sourceFbo);
 
-    // glReadPixels returns rows bottom-up; flip vertically.
-    size_t rowBytes = (size_t) fbo_w * 4;
-    uint8_t *rowTmp = malloc(rowBytes);
-    if (rowTmp) {
-        for (int row = 0; row < fbo_h / 2; row++) {
-            uint8_t *top = pixels + (size_t) row * rowBytes;
-            uint8_t *bot = pixels + (size_t) (fbo_h - 1 - row) * rowBytes;
-            memcpy(rowTmp, top, rowBytes);
-            memcpy(top, bot, rowBytes);
-            memcpy(bot, rowTmp, rowBytes);
+        uint8_t *temp_pixels = malloc((size_t)read_w * (size_t)read_h * 4);
+        if (temp_pixels) {
+            int32_t glY = sourcePotH - read_b;
+            glDisable(GL_SCISSOR_TEST);
+            glReadPixels(read_l, glY, read_w, read_h, GL_RGBA, GL_UNSIGNED_BYTE, temp_pixels);
+            glBindFramebuffer(GL_FRAMEBUFFER, restoreFbo);
+            ctx->activeFbo = restoreFbo;
+
+            size_t rowBytes = (size_t)read_w * 4;
+            uint8_t *rowTmp = malloc(rowBytes);
+            if (rowTmp) {
+                for (int row = 0; row < read_h / 2; row++) {
+                    uint8_t *top = temp_pixels + row * rowBytes;
+                    uint8_t *bot = temp_pixels + (read_h - 1 - row) * rowBytes;
+                    memcpy(rowTmp, top, rowBytes);
+                    memcpy(top, bot, rowBytes);
+                    memcpy(bot, rowTmp, rowBytes);
+                }
+                free(rowTmp);
+            }
+
+            if (rb) {
+                uint8_t *bl = temp_pixels + (read_h - 1) * read_w * 4;
+                uint8_t kr = bl[0], kg = bl[1], kb = bl[2];
+                for (int i = 0; i < read_w * read_h; i++) {
+                    uint8_t *p = temp_pixels + i * 4;
+                    if (p[0] == kr && p[1] == kg && p[2] == kb) p[3] = 0;
+                }
+            }
+
+            for (int ly = 0; ly < h; ly++) {
+                for (int lx = 0; lx < w; lx++) {
+                    int32_t abs_px = phys_l + (int32_t)((lx + 0.5f) * sx);
+                    int32_t abs_py = phys_t + (int32_t)((ly + 0.5f) * sy);
+
+                    if (abs_px >= read_l && abs_px < read_r && abs_py >= read_t && abs_py < read_b) {
+                        int src_x = abs_px - read_l;
+                        int src_y = abs_py - read_t;
+
+                        uint8_t *src_color = temp_pixels + (src_y * read_w + src_x) * 4;
+                        uint8_t *dst_color = final_pixels + (ly * w + lx) * 4;
+
+                        dst_color[0] = src_color[0];
+                        dst_color[1] = src_color[1];
+                        dst_color[2] = src_color[2];
+                        dst_color[3] = src_color[3];
+                    }
+                }
+            }
+            free(temp_pixels);
+        } else {
+            glBindFramebuffer(GL_FRAMEBUFFER, restoreFbo);
+            ctx->activeFbo = restoreFbo;
         }
-        free(rowTmp);
     }
 
-    if (rb) {
-        uint8_t kr = pixels[0], kg = pixels[1], kb = pixels[2];
-        size_t total = (size_t) fbo_w * (size_t) fbo_h;
-        for (size_t i = 0; i < total; i++) {
-            uint8_t *p = pixels + i * 4;
-            if (p[0] == kr && p[1] == kg && p[2] == kb) p[3] = 0;
+    int32_t pot_w = next_pow2(w);
+    int32_t pot_h = next_pow2(h);
+    uint8_t *pot_pixels = calloc(pot_w * pot_h, 4);
+
+    if (pot_pixels) {
+        for (int row = 0; row < h; row++) {
+            memcpy(pot_pixels + (row * pot_w * 4), final_pixels + (row * w * 4), w * 4);
         }
     }
+    free(final_pixels);
+
+    if (!pot_pixels) return -1;
 
     GLuint newTex;
     glGenTextures(1, &newTex);
     glBindTexture(GL_TEXTURE_2D, newTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fbo_w, fbo_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, pot_w, pot_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pot_pixels);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, sm ? GL_LINEAR : GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, sm ? GL_LINEAR : GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    free(pixels);
+    free(pot_pixels);
 
     uint32_t tpagIndex = findOrAllocTpagSlot(ctx);
     TexturePageItem *tpag = &dw->tpag.items[tpagIndex];
     tpag->sourceX = 0;
     tpag->sourceY = 0;
-    tpag->sourceWidth = (uint16_t) fbo_w;
-    tpag->sourceHeight = (uint16_t) fbo_h;
+    tpag->sourceWidth = (uint16_t) w;
+    tpag->sourceHeight = (uint16_t) h;
     tpag->targetX = 0;
     tpag->targetY = 0;
-    tpag->targetWidth = (uint16_t) w; // Игровой (логический) размер!
+    tpag->targetWidth = (uint16_t) w;
     tpag->targetHeight = (uint16_t) h;
     tpag->boundingWidth = (uint16_t) w;
     tpag->boundingHeight = (uint16_t) h;
@@ -1344,8 +1411,8 @@ static int32_t ctr_create_surf_ex(Renderer *ren, int32_t surfaceId, int32_t x, i
     memset(page, 0, sizeof(*page));
     page->loaded = true;
     page->keepResident = true;
-    page->origW = fbo_w;
-    page->origH = fbo_h;
+    page->origW = w;
+    page->origH = h;
     page->chunksX = 1;
     page->chunksY = 1;
 
@@ -1353,22 +1420,17 @@ static int32_t ctr_create_surf_ex(Renderer *ren, int32_t surfaceId, int32_t x, i
     chunk->tex = newTex;
     chunk->srcX = 0;
     chunk->srcY = 0;
-    chunk->width = fbo_w;
-    chunk->height = fbo_h;
-    chunk->potW = next_pow2(fbo_w);
-    chunk->potH = next_pow2(fbo_h);
+    chunk->width = w;
+    chunk->height = h;
+    chunk->potW = pot_w;
+    chunk->potH = pot_h;
 
     uint32_t spriteIndex = DataWin_allocSpriteSlot(dw, ctx->originalSpriteCount);
     Sprite *sprite = &dw->sprt.sprites[spriteIndex];
     sprite->width = (uint32_t) w;
     sprite->height = (uint32_t) h;
-
-    // Переводим originX/Y если спрайт был вырезан с даунскейлом
-    if (fbo_w != w) sprite->originX = (int32_t)(xo * ((float)w / fbo_w));
-    else sprite->originX = xo;
-    if (fbo_h != h) sprite->originY = (int32_t)(yo * ((float)h / fbo_h));
-    else sprite->originY = yo;
-
+    sprite->originX = xo;
+    sprite->originY = yo;
     sprite->textureCount = 1;
     sprite->tpagIndices = safeMalloc(sizeof(int32_t));
     sprite->tpagIndices[0] = (int32_t) tpagIndex;

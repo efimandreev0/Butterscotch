@@ -635,12 +635,12 @@ static void rebuildDrawableCacheIfDirty(Runner *runner) {
     }
 }
 
-void Runner_draw(Runner *runner) {
-    Room *room = runner->currentRoom;
+void Runner_draw(Runner* runner) {
+    Room* room = runner->currentRoom;
 
     rebuildDrawableCacheIfDirty(runner);
     int32_t drawableCount = (int32_t) arrlen(runner->cachedDrawables);
-    Drawable *drawables = runner->cachedDrawables;
+    Drawable* drawables = runner->cachedDrawables;
 
     // Draw non-foreground backgrounds (behind everything)
     if (!DataWin_isVersionAtLeast(runner->dataWin, 2, 0, 0, 0))
@@ -652,10 +652,10 @@ void Runner_draw(Runner *runner) {
 
     // Draw interleaved tiles and instances
     repeat(drawableCount, i) {
-        Drawable *d = &drawables[i];
+        Drawable* d = &drawables[i];
         if (d->type == DRAWABLE_TILE) {
             if (runner->renderer != nullptr) {
-                RoomTile *tile = &room->tiles[d->tileIndex];
+                RoomTile* tile = &room->tiles[d->tileIndex];
                 // Skip tiles whose layer was hidden via tile_layer_hide(). Filtered here (not in the cache) so toggling layer visibility doesn't invalidate.
                 ptrdiff_t layerIdx = hmgeti(runner->tileLayerMap, tile->tileDepth);
                 if (layerIdx >= 0 && !runner->tileLayerMap[layerIdx].value.visible) continue;
@@ -668,41 +668,24 @@ void Runner_draw(Runner *runner) {
 #ifdef ENABLE_VM_TRACING
                 // Trace tile drawing if requested
                 if (shlen(runner->vmContext->tilesToBeTraced) > 0) {
-                    DataWin *dataWin = runner->dataWin;
-                    const char *bgName = (tile->backgroundDefinition >= 0 && dataWin->bgnd.count > (uint32_t) tile->
-                                          backgroundDefinition)
-                                             ? dataWin->bgnd.backgrounds[tile->backgroundDefinition].name
-                                             : "<none>";
-                    const char *roomName = room->name;
+                    DataWin* dataWin = runner->dataWin;
+                    const char* bgName = (tile->backgroundDefinition >= 0 && dataWin->bgnd.count > (uint32_t) tile->backgroundDefinition) ? dataWin->bgnd.backgrounds[tile->backgroundDefinition].name : "<none>";
+                    const char* roomName = room->name;
 
-                    bool shouldTrace = shgeti(runner->vmContext->tilesToBeTraced, "*") != -1 ||
-                                       shgeti(runner->vmContext->tilesToBeTraced, bgName) != -1 || shgeti(
-                                           runner->vmContext->tilesToBeTraced, roomName) != -1;
+                    bool shouldTrace = shgeti(runner->vmContext->tilesToBeTraced, "*") != -1 || shgeti(runner->vmContext->tilesToBeTraced, bgName) != -1 || shgeti(runner->vmContext->tilesToBeTraced, roomName) != -1;
 
                     if (shouldTrace) {
                         int32_t tpagIndex = Renderer_resolveObjectTPAGIndex(dataWin, tile);
                         if (tpagIndex >= 0) {
-                            TexturePageItem *tpag = &dataWin->tpag.items[tpagIndex];
-                            fprintf(stderr,
-                                    "Runner: [%s] Drawing tile #%d bg=%s(%d) tpag(srcX=%d srcY=%d srcW=%d srcH=%d tgtX=%d tgtY=%d bndW=%d bndH=%d page=%d) tile(srcX=%d srcY=%d w=%u h=%u) at pos=(%d,%d) depth=%d\n",
-                                    roomName, d->tileIndex, bgName, tile->backgroundDefinition, tpag->sourceX,
-                                    tpag->sourceY, tpag->sourceWidth, tpag->sourceHeight, tpag->targetX, tpag->targetY,
-                                    tpag->boundingWidth, tpag->boundingHeight, tpag->texturePageId, tile->sourceX,
-                                    tile->sourceY, tile->width, tile->height, tile->x, tile->y, tile->tileDepth);
+                            TexturePageItem* tpag = &dataWin->tpag.items[tpagIndex];
+                            fprintf(stderr, "Runner: [%s] Drawing tile #%d bg=%s(%d) tpag(srcX=%d srcY=%d srcW=%d srcH=%d tgtX=%d tgtY=%d bndW=%d bndH=%d page=%d) tile(srcX=%d srcY=%d w=%u h=%u) at pos=(%d,%d) depth=%d\n", roomName, d->tileIndex, bgName, tile->backgroundDefinition, tpag->sourceX, tpag->sourceY, tpag->sourceWidth, tpag->sourceHeight, tpag->targetX, tpag->targetY, tpag->boundingWidth, tpag->boundingHeight, tpag->texturePageId, tile->sourceX, tile->sourceY, tile->width, tile->height, tile->x, tile->y, tile->tileDepth);
 
                             // Warn if tile source rect exceeds TPAG content bounds
-                            if ((uint32_t) (tile->sourceX + tile->width) > (uint32_t) tpag->sourceWidth || (uint32_t) (
-                                    tile->sourceY + tile->height) > (uint32_t) tpag->sourceHeight) {
-                                fprintf(stderr,
-                                        "Runner: [%s] WARNING: Tile #%d source rect (%d,%d %ux%u) exceeds TPAG content bounds (%dx%d)\n",
-                                        roomName, d->tileIndex, tile->sourceX, tile->sourceY, tile->width, tile->height,
-                                        tpag->sourceWidth, tpag->sourceHeight);
+                            if ((uint32_t) (tile->sourceX + tile->width) > (uint32_t) tpag->sourceWidth || (uint32_t) (tile->sourceY + tile->height) > (uint32_t) tpag->sourceHeight) {
+                                fprintf(stderr, "Runner: [%s] WARNING: Tile #%d source rect (%d,%d %ux%u) exceeds TPAG content bounds (%dx%d)\n", roomName, d->tileIndex, tile->sourceX, tile->sourceY, tile->width, tile->height, tpag->sourceWidth, tpag->sourceHeight);
                             }
                         } else {
-                            fprintf(stderr,
-                                    "Runner: [%s] Drawing tile #%d bg=%s(%d) tpag=UNRESOLVED tile(srcX=%d srcY=%d w=%u h=%u) at pos=(%d,%d) depth=%d\n",
-                                    roomName, d->tileIndex, bgName, tile->backgroundDefinition, tile->sourceX,
-                                    tile->sourceY, tile->width, tile->height, tile->x, tile->y, tile->tileDepth);
+                            fprintf(stderr, "Runner: [%s] Drawing tile #%d bg=%s(%d) tpag=UNRESOLVED tile(srcX=%d srcY=%d w=%u h=%u) at pos=(%d,%d) depth=%d\n", roomName, d->tileIndex, bgName, tile->backgroundDefinition, tile->sourceX, tile->sourceY, tile->width, tile->height, tile->x, tile->y, tile->tileDepth);
                         }
                     }
                 }
@@ -711,19 +694,19 @@ void Runner_draw(Runner *runner) {
                 Renderer_drawTile(runner->renderer, tile, offsetX, offsetY);
             }
         } else if (d->type == DRAWABLE_INSTANCE) {
-            Instance *inst = d->instance;
+            Instance* inst = d->instance;
             // Filter inactive/invisible instances at draw time so the cache doesn't need invalidation when those flags toggle.
             if (!inst->active || !inst->visible) continue;
             int32_t ownerObjectIndex = -1;
-            int32_t codeId = findEventCodeIdAndOwner(runner, inst->objectIndex, EVENT_DRAW, DRAW_NORMAL,
-                                                     &ownerObjectIndex);
+            int32_t codeId = findEventCodeIdAndOwner(runner, inst->objectIndex, EVENT_DRAW, DRAW_NORMAL, &ownerObjectIndex);
             if (codeId >= 0) {
                 Runner_executeResolvedEvent(runner, inst, EVENT_DRAW, DRAW_NORMAL, codeId, ownerObjectIndex);
             } else if (runner->renderer != nullptr) {
                 Renderer_drawSelf(runner->renderer, inst);
             }
-        } else if (d->type == DRAWABLE_LAYER) {
-            RuntimeLayer *runtimeLayer = d->runtimeLayer;
+        } else if (d->type == DRAWABLE_LAYER)
+        {
+            RuntimeLayer* runtimeLayer = d->runtimeLayer;
             if (runtimeLayer == nullptr || !runtimeLayer->visible) continue;
             float layerOffsetX = runtimeLayer->xOffset;
             float layerOffsetY = runtimeLayer->yOffset;
@@ -732,34 +715,27 @@ void Runner_draw(Runner *runner) {
             if (runtimeLayer->dynamic) {
                 if (runner->renderer == nullptr) continue;
 
-                DataWin *dataWin = runner->dataWin;
+                DataWin* dataWin = runner->dataWin;
                 float roomW = (float) runner->currentRoom->width;
                 float roomH = (float) runner->currentRoom->height;
 
                 size_t elementCount = arrlenu(runtimeLayer->elements);
                 repeat(elementCount, j) {
-                    RuntimeLayerElement *layerElement = &runtimeLayer->elements[j];
-                    if (layerElement->type == RuntimeLayerElementType_Background && layerElement->backgroundElement !=
-                        nullptr) {
-                        RuntimeBackgroundElement *bg = layerElement->backgroundElement;
+                    RuntimeLayerElement* layerElement = &runtimeLayer->elements[j];
+                    if (layerElement->type == RuntimeLayerElementType_Background && layerElement->backgroundElement != nullptr) {
+                        RuntimeBackgroundElement* bg = layerElement->backgroundElement;
                         if (!bg->visible) continue;
                         int32_t tpagIndex = Renderer_resolveSpriteTPAGIndex(dataWin, bg->spriteIndex);
                         if (0 > tpagIndex) continue;
                         if (bg->stretch) {
-                            TexturePageItem *tpag = &dataWin->tpag.items[tpagIndex];
+                            TexturePageItem* tpag = &dataWin->tpag.items[tpagIndex];
                             float xscale = roomW / (float) tpag->boundingWidth;
                             float yscale = roomH / (float) tpag->boundingHeight;
-                            runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex, 0.0f, 0.0f, 0.0f, 0.0f,
-                                                                 xscale, yscale, 0.0f, bg->blend, bg->alpha);
+                            runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex, 0.0f, 0.0f, 0.0f, 0.0f, xscale, yscale, 0.0f, bg->blend, bg->alpha);
                         } else if (bg->htiled || bg->vtiled) {
-                            Renderer_drawBackgroundTiled(runner->renderer, tpagIndex, layerOffsetX + bg->xOffset,
-                                                         layerOffsetY + bg->yOffset, bg->htiled, bg->vtiled, roomW,
-                                                         roomH, bg->alpha);
+                            Renderer_drawBackgroundTiled(runner->renderer, tpagIndex, layerOffsetX + bg->xOffset, layerOffsetY + bg->yOffset, bg->htiled, bg->vtiled, roomW, roomH, bg->alpha);
                         } else {
-                            runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex,
-                                                                 layerOffsetX + bg->xOffset, layerOffsetY + bg->yOffset,
-                                                                 0.0f, 0.0f, bg->xScale, bg->yScale, 0.0f, bg->blend,
-                                                                 bg->alpha);
+                            runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex, layerOffsetX + bg->xOffset, layerOffsetY + bg->yOffset, 0.0f, 0.0f, bg->xScale, bg->yScale, 0.0f, bg->blend, bg->alpha);
                         }
                     }
                 }
@@ -767,13 +743,13 @@ void Runner_draw(Runner *runner) {
             }
 
             // Parsed layer: look up the RoomLayer by ID and render its data-driven content.
-            RoomLayer *parsedLayer = Runner_findRoomLayerById(runner, (int32_t) runtimeLayer->id);
+            RoomLayer* parsedLayer = Runner_findRoomLayerById(runner, (int32_t) runtimeLayer->id);
             if (parsedLayer == nullptr) continue;
             if (parsedLayer->type == RoomLayerType_Assets) {
-                RoomLayerAssetsData *data = parsedLayer->assetsData;
+                RoomLayerAssetsData* data = parsedLayer->assetsData;
                 repeat(data->legacyTileCount, j) {
                     if (runner->renderer != nullptr) {
-                        RoomTile *tile = &data->legacyTiles[j];
+                        RoomTile* tile = &data->legacyTiles[j];
                         // Check if this tile's layer is hidden via tile_layer_hide()
                         ptrdiff_t layerIdx = hmgeti(runner->tileLayerMap, tile->tileDepth);
                         if (layerIdx >= 0 && !runner->tileLayerMap[layerIdx].value.visible) continue;
@@ -786,44 +762,24 @@ void Runner_draw(Runner *runner) {
 #ifdef ENABLE_VM_TRACING
                         // Trace tile drawing if requested
                         if (shlen(runner->vmContext->tilesToBeTraced) > 0) {
-                            DataWin *dataWin = runner->dataWin;
-                            const char *bgName =
-                            (tile->backgroundDefinition >= 0 && dataWin->bgnd.count > (uint32_t) tile->
-                             backgroundDefinition)
-                                ? dataWin->bgnd.backgrounds[tile->backgroundDefinition].name
-                                : "<none>";
-                            const char *roomName = room->name;
+                            DataWin* dataWin = runner->dataWin;
+                            const char* bgName = (tile->backgroundDefinition >= 0 && dataWin->bgnd.count > (uint32_t) tile->backgroundDefinition) ? dataWin->bgnd.backgrounds[tile->backgroundDefinition].name : "<none>";
+                            const char* roomName = room->name;
 
-                            bool shouldTrace = shgeti(runner->vmContext->tilesToBeTraced, "*") != -1 ||
-                                               shgeti(runner->vmContext->tilesToBeTraced, bgName) != -1 || shgeti(
-                                                   runner->vmContext->tilesToBeTraced, roomName) != -1;
+                            bool shouldTrace = shgeti(runner->vmContext->tilesToBeTraced, "*") != -1 || shgeti(runner->vmContext->tilesToBeTraced, bgName) != -1 || shgeti(runner->vmContext->tilesToBeTraced, roomName) != -1;
 
                             if (shouldTrace) {
                                 int32_t tpagIndex = Renderer_resolveObjectTPAGIndex(dataWin, tile);
                                 if (tpagIndex >= 0) {
-                                    TexturePageItem *tpag = &dataWin->tpag.items[tpagIndex];
-                                    fprintf(stderr,
-                                            "Runner: [%s] Drawing tile #%d bg=%s(%d) tpag(srcX=%d srcY=%d srcW=%d srcH=%d tgtX=%d tgtY=%d bndW=%d bndH=%d page=%d) tile(srcX=%d srcY=%d w=%u h=%u) at pos=(%d,%d) depth=%d\n",
-                                            roomName, d->tileIndex, bgName, tile->backgroundDefinition, tpag->sourceX,
-                                            tpag->sourceY, tpag->sourceWidth, tpag->sourceHeight, tpag->targetX,
-                                            tpag->targetY, tpag->boundingWidth, tpag->boundingHeight,
-                                            tpag->texturePageId, tile->sourceX, tile->sourceY, tile->width,
-                                            tile->height, tile->x, tile->y, tile->tileDepth);
+                                    TexturePageItem* tpag = &dataWin->tpag.items[tpagIndex];
+                                    fprintf(stderr, "Runner: [%s] Drawing tile #%d bg=%s(%d) tpag(srcX=%d srcY=%d srcW=%d srcH=%d tgtX=%d tgtY=%d bndW=%d bndH=%d page=%d) tile(srcX=%d srcY=%d w=%u h=%u) at pos=(%d,%d) depth=%d\n", roomName, d->tileIndex, bgName, tile->backgroundDefinition, tpag->sourceX, tpag->sourceY, tpag->sourceWidth, tpag->sourceHeight, tpag->targetX, tpag->targetY, tpag->boundingWidth, tpag->boundingHeight, tpag->texturePageId, tile->sourceX, tile->sourceY, tile->width, tile->height, tile->x, tile->y, tile->tileDepth);
 
                                     // Warn if tile source rect exceeds TPAG content bounds
-                                    if ((uint32_t) (tile->sourceX + tile->width) > (uint32_t) tpag->sourceWidth || (
-                                            uint32_t) (tile->sourceY + tile->height) > (uint32_t) tpag->sourceHeight) {
-                                        fprintf(stderr,
-                                                "Runner: [%s] WARNING: Tile #%d source rect (%d,%d %ux%u) exceeds TPAG content bounds (%dx%d)\n",
-                                                roomName, d->tileIndex, tile->sourceX, tile->sourceY, tile->width,
-                                                tile->height, tpag->sourceWidth, tpag->sourceHeight);
+                                    if ((uint32_t) (tile->sourceX + tile->width) > (uint32_t) tpag->sourceWidth || (uint32_t) (tile->sourceY + tile->height) > (uint32_t) tpag->sourceHeight) {
+                                        fprintf(stderr, "Runner: [%s] WARNING: Tile #%d source rect (%d,%d %ux%u) exceeds TPAG content bounds (%dx%d)\n", roomName, d->tileIndex, tile->sourceX, tile->sourceY, tile->width, tile->height, tpag->sourceWidth, tpag->sourceHeight);
                                     }
                                 } else {
-                                    fprintf(stderr,
-                                            "Runner: [%s] Drawing tile #%d bg=%s(%d) tpag=UNRESOLVED tile(srcX=%d srcY=%d w=%u h=%u) at pos=(%d,%d) depth=%d\n",
-                                            roomName, d->tileIndex, bgName, tile->backgroundDefinition, tile->sourceX,
-                                            tile->sourceY, tile->width, tile->height, tile->x, tile->y,
-                                            tile->tileDepth);
+                                    fprintf(stderr, "Runner: [%s] Drawing tile #%d bg=%s(%d) tpag=UNRESOLVED tile(srcX=%d srcY=%d w=%u h=%u) at pos=(%d,%d) depth=%d\n", roomName, d->tileIndex, bgName, tile->backgroundDefinition, tile->sourceX, tile->sourceY, tile->width, tile->height, tile->x, tile->y, tile->tileDepth);
                                 }
                             }
                         }
@@ -837,9 +793,9 @@ void Runner_draw(Runner *runner) {
                 size_t elementCount = arrlenu(runtimeLayer->elements);
                 repeat(elementCount, j) {
                     if (runner->renderer == nullptr) break;
-                    RuntimeLayerElement *el = &runtimeLayer->elements[j];
+                    RuntimeLayerElement* el = &runtimeLayer->elements[j];
                     if (el->type != RuntimeLayerElementType_Sprite || el->spriteElement == nullptr) continue;
-                    RuntimeSpriteElement *spr = el->spriteElement;
+                    RuntimeSpriteElement* spr = el->spriteElement;
                     if (0 > spr->spriteIndex) continue;
                     Renderer_drawSpriteExt(
                         runner->renderer, spr->spriteIndex, (int32_t) spr->frameIndex,
@@ -847,35 +803,32 @@ void Runner_draw(Runner *runner) {
                         spr->scaleY, spr->rotation, spr->color,
                         1.0);
                 }
-            } else if (parsedLayer->type == RoomLayerType_Background) {
+            } else if(parsedLayer->type == RoomLayerType_Background) {
                 if (runner->renderer == nullptr) return;
-                DataWin *dataWin = runner->dataWin;
-                float roomW = (float) runner->currentRoom->width;
-                float roomH = (float) runner->currentRoom->height;
-                RoomLayerBackgroundData *data = parsedLayer->backgroundData;
+                    DataWin* dataWin = runner->dataWin;
+                    float roomW = (float) runner->currentRoom->width;
+                    float roomH = (float) runner->currentRoom->height;
+                    RoomLayerBackgroundData* data = parsedLayer->backgroundData;
 
-                int32_t tpagIndex = Renderer_resolveSpriteTPAGIndex(dataWin, data->spriteIndex);
-                if (0 > tpagIndex) continue;
+                        int32_t tpagIndex = Renderer_resolveSpriteTPAGIndex(dataWin, data->spriteIndex);
+                        if (0 > tpagIndex) continue;
 
-                if (data->stretch) {
-                    // Stretch to fill room dimensions
-                    TexturePageItem *tpag = &dataWin->tpag.items[tpagIndex];
-                    float xscale = roomW / (float) tpag->boundingWidth;
-                    float yscale = roomH / (float) tpag->boundingHeight;
-                    runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex, 0.0f, 0.0f, 0.0f, 0.0f, xscale,
-                                                         yscale, 0.0f, 0xFFFFFF, 1.0);
-                } else if (data->hTiled || data->vTiled) {
-                    Renderer_drawBackgroundTiled(runner->renderer, tpagIndex, layerOffsetX, layerOffsetY, data->hTiled,
-                                                 data->vTiled, roomW, roomH, 1.0);
-                } else {
-                    // Single placement
-                    runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex, layerOffsetX, layerOffsetY, 0.0f,
-                                                         0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFF, 1.0);
-                }
-            } else if (parsedLayer->type == RoomLayerType_Instances) {
+                        if (data->stretch) {
+                            // Stretch to fill room dimensions
+                            TexturePageItem* tpag = &dataWin->tpag.items[tpagIndex];
+                            float xscale = roomW / (float) tpag->boundingWidth;
+                            float yscale = roomH / (float) tpag->boundingHeight;
+                            runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex, 0.0f, 0.0f, 0.0f, 0.0f, xscale, yscale, 0.0f, 0xFFFFFF, 1.0);
+                        } else if (data->hTiled || data->vTiled) {
+                            Renderer_drawBackgroundTiled(runner->renderer, tpagIndex, layerOffsetX, layerOffsetY, data->hTiled, data->vTiled, roomW, roomH, 1.0);
+                        } else {
+                            // Single placement
+                            runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex, layerOffsetX, layerOffsetY, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFF, 1.0);
+                        }
+            } else if(parsedLayer->type == RoomLayerType_Instances) {
                 // Instance depth is assigned from layers during room init (initRoom).
                 // Nothing to do here - instances are drawn from the DRAWABLE_INSTANCE path.
-            } else if (parsedLayer->type == RoomLayerType_Tiles) {
+            } else if(parsedLayer->type == RoomLayerType_Tiles) {
                 if (runner->renderer == nullptr) continue;
                 Runner_drawTileLayer(runner, parsedLayer->tilesData, layerOffsetX, layerOffsetY);
             }
