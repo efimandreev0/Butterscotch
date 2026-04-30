@@ -2735,6 +2735,10 @@ static RValue executeLoop(VMContext *ctx) {
     const uint8_t *const bytecodeBase = ctx->bytecodeBase;
 
     while (codeEnd > ctx->ip) {
+#ifdef PLATFORM_3DS
+        //comment: prefetch next instructions to keep arm11 pipeline fed
+        __builtin_prefetch(bytecodeBase + ctx->ip + 16, 0, 0);
+#endif
 #ifdef ENABLE_VM_PROFILER
         if (ctx->profiler != nullptr)
             Profiler_tickInstruction(ctx->profiler);
@@ -2910,6 +2914,13 @@ VMContext *VM_create(DataWin *dataWin) {
     // Place VMContext in scratchpad RAM
     requireMessage(16384 >= sizeof(VMContext), "VMContext exceeds PS2 scratchpad size (16 KB)");
     VMContext *ctx = (VMContext *) 0x70000000;
+    memset(ctx, 0, sizeof(VMContext));
+#elif defined(PLATFORM_3DS)
+    //comment: but arm11 has 32kb L1 cache. we make static buffer and align it to 32 bytes
+    //comment: this pins the context & stack directly to cpu cache and goes crazy fast
+    static __attribute__((aligned(32))) uint8_t cache_ctx_3ds[sizeof(VMContext)];
+    requireMessage(32768 >= sizeof(VMContext), "VMContext too huge for 3DS L1 d-cache");
+    VMContext *ctx = (VMContext *)cache_ctx_3ds;
     memset(ctx, 0, sizeof(VMContext));
 #else
     VMContext *ctx = safeCalloc(1, sizeof(VMContext));
@@ -4034,7 +4045,7 @@ void VM_free(VMContext *ctx) {
         ctx->codeLocalsSlotMaps = nullptr;
     }
 
-#ifndef PLATFORM_PS2
+#if !defined(PLATFORM_PS2) && !defined(PLATFORM_3DS)
     free(ctx);
 #endif
 }

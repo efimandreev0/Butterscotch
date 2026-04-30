@@ -1044,6 +1044,26 @@ static CtrSurface *get_surface(CtrRenderer *ctx, int32_t surfaceId) {
     return ctx->surfaces[surfaceId].used ? &ctx->surfaces[surfaceId] : NULL;
 }
 
+static GLuint safe_restore_fbo(CtrRenderer *ctx) {
+    if (ctx->activeFbo != 0) return ctx->activeFbo;
+    return ctx->fboCreated ? ctx->fboId : 0;
+}
+
+static void clear_surface_fbo(CtrRenderer *ctx, CtrSurface *surf) {
+    flush_batch(ctx);
+    GLuint restoreFbo = safe_restore_fbo(ctx);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, surf->fbo);
+    ctx->activeFbo = surf->fbo;
+    glDisable(GL_SCISSOR_TEST);
+    glViewport(0, 0, surf->potW, surf->potH);
+    glClearColor(0.f, 0.f, 0.f, 0.f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, restoreFbo);
+    ctx->activeFbo = restoreFbo;
+}
+
 static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
     if (width <= 0 || height <= 0) return -1;
@@ -1065,11 +1085,12 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
     CtrSurface *surf = &ctx->surfaces[slot];
     if (surf->fbo != 0) {
         surf->used = true;
+        clear_surface_fbo(ctx, surf);
         return (int32_t) slot;
     }
 
     memset(surf, 0, sizeof(*surf));
-    GLuint restoreFbo = ctx->activeFbo;
+    GLuint restoreFbo = safe_restore_fbo(ctx);
 
     surf->width = width;
     surf->height = height;
@@ -1087,10 +1108,14 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
     glGenFramebuffers(1, &surf->fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, surf->fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, surf->tex, 0);
+
+    ctx->activeFbo = surf->fbo;
+    surf->used = true;
+    clear_surface_fbo(ctx, surf);
+
     glBindFramebuffer(GL_FRAMEBUFFER, restoreFbo);
     ctx->activeFbo = restoreFbo;
 
-    surf->used = true;
     return (int32_t) slot;
 }
 
@@ -1135,7 +1160,7 @@ static bool ctr_surface_set_target(Renderer *ren, int32_t surfaceId) {
 
     flush_batch(ctx);
     CtrTargetState *state = &ctx->targetStack[ctx->targetStackDepth++];
-    state->fbo = ctx->activeFbo;
+    state->fbo = safe_restore_fbo(ctx);
     glGetIntegerv(GL_VIEWPORT, state->viewport);
     state->projection = ctx->currentProjection;
 
@@ -1162,8 +1187,9 @@ static void ctr_surface_reset_target(Renderer *ren) {
 
     flush_batch(ctx);
     CtrTargetState state = ctx->targetStack[--ctx->targetStackDepth];
-    glBindFramebuffer(GL_FRAMEBUFFER, state.fbo ? state.fbo : ctx->fboId);
-    ctx->activeFbo = state.fbo ? state.fbo : ctx->fboId;
+    GLuint targetFbo = state.fbo ? state.fbo : (ctx->fboCreated ? ctx->fboId : 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, targetFbo);
+    ctx->activeFbo = targetFbo;
     glViewport(state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3]);
     glEnable(GL_SCISSOR_TEST);
     glScissor(state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3]);
@@ -1263,6 +1289,7 @@ static inline void downscale_rgba8(uint32_t *dst, const uint32_t *src, int src_w
         }
     }
 }
+
 static int32_t ctr_create_surf_ex(Renderer *ren, int32_t surfaceId, int32_t x, int32_t y, int32_t w, int32_t h,
                                   bool rb, bool sm, int32_t xo, int32_t yo) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
@@ -1290,6 +1317,9 @@ static int32_t ctr_create_surf_ex(Renderer *ren, int32_t surfaceId, int32_t x, i
         sourceW = surf->width;
         sourceH = surf->height;
         sourcePotH = surf->potH;
+        // У обычных (не экранных) сюрфейсов скейлинга нет
+        sx = 1.0f;
+        sy = 1.0f;
     }
 
     int32_t phys_l = (int32_t)floorf(x * sx);
@@ -1343,10 +1373,16 @@ static int32_t ctr_create_surf_ex(Renderer *ren, int32_t surfaceId, int32_t x, i
                 }
             }
 
+            // ИДЕАЛЬНЫЙ МАППИНГ ПИКСЕЛЕЙ: Убивает дрифт (смещение вниз)
             for (int ly = 0; ly < h; ly++) {
                 for (int lx = 0; lx < w; lx++) {
-                    int32_t abs_px = phys_l + (int32_t)((lx + 0.5f) * sx);
-                    int32_t abs_py = phys_t + (int32_t)((ly + 0.5f) * sy);
+                    // Берем абсолютную координату в игре и переводим в FBO.
+                    // floorf здесь обязателен, чтобы пиксели не съезжали.
+                    float game_abs_x = (float)x + (float)lx;
+                    float game_abs_y = (float)y + (float)ly;
+
+                    int32_t abs_px = (int32_t)floorf((game_abs_x + 0.5f) * sx);
+                    int32_t abs_py = (int32_t)floorf((game_abs_y + 0.5f) * sy);
 
                     if (abs_px >= read_l && abs_px < read_r && abs_py >= read_t && abs_py < read_b) {
                         int src_x = abs_px - read_l;
@@ -1435,7 +1471,7 @@ static int32_t ctr_create_surf_ex(Renderer *ren, int32_t surfaceId, int32_t x, i
     sprite->tpagIndices = safeMalloc(sizeof(int32_t));
     sprite->tpagIndices[0] = (int32_t) tpagIndex;
     sprite->maskCount = 0;
-    sprite->masks = nullptr;
+    sprite->masks = NULL;
 
     return (int32_t) spriteIndex;
 }
