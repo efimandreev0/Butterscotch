@@ -5500,8 +5500,37 @@ static RValue builtin_drawTextColorTransformed(VMContext *ctx, RValue *args, MAY
 STUB_RETURN_UNDEFINED(draw_text_color_ext)
 STUB_RETURN_UNDEFINED(draw_text_color_ext_transformed)
 
-STUB_RETURN_UNDEFINED(draw_surface)
-STUB_RETURN_UNDEFINED(draw_surface_ext)
+static RValue builtin_draw_surface(VMContext *ctx, RValue *args, MAYBE_UNUSED int32_t argCount) {
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer == nullptr || runner->renderer->vtable->drawSurface == nullptr) {
+        return RValue_makeUndefined();
+    }
+
+    int32_t surfaceId = RValue_toInt32(args[0]);
+    float x = (float) RValue_toReal(args[1]);
+    float y = (float) RValue_toReal(args[2]);
+    runner->renderer->vtable->drawSurface(runner->renderer, surfaceId, x, y, 1.0f, 1.0f, 0.0f, 0xFFFFFF,
+                                          runner->renderer->drawAlpha);
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_surface_ext(VMContext *ctx, RValue *args, MAYBE_UNUSED int32_t argCount) {
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer == nullptr || runner->renderer->vtable->drawSurface == nullptr) {
+        return RValue_makeUndefined();
+    }
+
+    int32_t surfaceId = RValue_toInt32(args[0]);
+    float x = (float) RValue_toReal(args[1]);
+    float y = (float) RValue_toReal(args[2]);
+    float xscale = (float) RValue_toReal(args[3]);
+    float yscale = (float) RValue_toReal(args[4]);
+    float rot = (float) RValue_toReal(args[5]);
+    uint32_t color = (uint32_t) RValue_toInt32(args[6]);
+    float alpha = (float) RValue_toReal(args[7]);
+    runner->renderer->vtable->drawSurface(runner->renderer, surfaceId, x, y, xscale, yscale, rot, color, alpha);
+    return RValue_makeUndefined();
+}
 
 static RValue builtin_drawBackground(VMContext *ctx, RValue *args, MAYBE_UNUSED int32_t argCount) {
     Runner *runner = (Runner *) ctx->runner;
@@ -5726,19 +5755,67 @@ static RValue builtinMergeColor(MAYBE_UNUSED VMContext *ctx, RValue *args, MAYBE
     return RValue_makeReal((GMLReal) (((b << 16) & 0xFF0000) | ((g << 8) & 0xFF00) | (r & 0xFF)));
 }
 
-// Surface stubs
-STUB_RETURN_ZERO(surface_create)
-STUB_RETURN_UNDEFINED(surface_free)
-STUB_RETURN_UNDEFINED(surface_set_target)
-STUB_RETURN_UNDEFINED(surface_reset_target)
-STUB_RETURN_ZERO(surface_exists)
+static RValue builtin_surface_create(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (2 > argCount) return RValue_makeReal(-1.0);
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer == nullptr || runner->renderer->vtable->createSurface == nullptr) {
+        return RValue_makeReal(-1.0);
+    }
+
+    int32_t width = RValue_toInt32(args[0]);
+    int32_t height = RValue_toInt32(args[1]);
+    return RValue_makeReal((GMLReal) runner->renderer->vtable->createSurface(runner->renderer, width, height));
+}
+
+static RValue builtin_surface_free(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (1 > argCount) return RValue_makeUndefined();
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer != nullptr && runner->renderer->vtable->freeSurface != nullptr) {
+        runner->renderer->vtable->freeSurface(runner->renderer, RValue_toInt32(args[0]));
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_surface_set_target(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (1 > argCount) return RValue_makeBool(false);
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer == nullptr || runner->renderer->vtable->surfaceSetTarget == nullptr) {
+        return RValue_makeBool(false);
+    }
+    return RValue_makeBool(runner->renderer->vtable->surfaceSetTarget(runner->renderer, RValue_toInt32(args[0])));
+}
+
+static RValue builtin_surface_reset_target(VMContext *ctx, MAYBE_UNUSED RValue *args, MAYBE_UNUSED int32_t argCount) {
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer != nullptr && runner->renderer->vtable->surfaceResetTarget != nullptr) {
+        runner->renderer->vtable->surfaceResetTarget(runner->renderer);
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_surface_exists(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (1 > argCount) return RValue_makeBool(false);
+    int32_t surfaceId = RValue_toInt32(args[0]);
+    if (surfaceId == -1) return RValue_makeBool(true);
+
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer == nullptr || runner->renderer->vtable->surfaceExists == nullptr) {
+        return RValue_makeBool(false);
+    }
+    return RValue_makeBool(runner->renderer->vtable->surfaceExists(runner->renderer, surfaceId));
+}
 // application_surface is surface ID -1 (sentinel); for it, return the window dimensions
 static RValue builtinSurfaceGetWidth(VMContext *ctx, RValue *args, MAYBE_UNUSED int32_t argCount) {
     int32_t surfaceId = (int32_t) RValue_toReal(args[0]);
     if (surfaceId == -1) {
         return RValue_makeReal((GMLReal) ctx->dataWin->gen8.defaultWindowWidth);
     }
-    logStubbedFunction(ctx, "surface_get_width");
+    Runner *runner = (Runner *) ctx->runner;
+    int32_t width = 0, height = 0;
+    if (runner->renderer != nullptr && runner->renderer->vtable->surfaceGetSize != nullptr &&
+        runner->renderer->vtable->surfaceGetSize(runner->renderer, surfaceId, &width, &height)) {
+        return RValue_makeReal((GMLReal) width);
+    }
     return RValue_makeReal(0.0);
 }
 
@@ -5747,7 +5824,12 @@ static RValue builtinSurfaceGetHeight(VMContext *ctx, RValue *args, MAYBE_UNUSED
     if (surfaceId == -1) {
         return RValue_makeReal((GMLReal) ctx->dataWin->gen8.defaultWindowHeight);
     }
-    logStubbedFunction(ctx, "surface_get_height");
+    Runner *runner = (Runner *) ctx->runner;
+    int32_t width = 0, height = 0;
+    if (runner->renderer != nullptr && runner->renderer->vtable->surfaceGetSize != nullptr &&
+        runner->renderer->vtable->surfaceGetSize(runner->renderer, surfaceId, &width, &height)) {
+        return RValue_makeReal((GMLReal) height);
+    }
     return RValue_makeReal(0.0);
 }
 
@@ -5814,11 +5896,9 @@ static RValue builtin_spriteSetOffset(VMContext *ctx, RValue *args, MAYBE_UNUSED
 // sprite_create_from_surface(surface_id, x, y, w, h, removeback, smooth, xorig, yorig)
 static RValue builtin_spriteCreateFromSurface(VMContext *ctx, RValue *args, MAYBE_UNUSED int32_t argCount) {
     Runner *runner = (Runner *) ctx->runner;
-    if (runner->renderer == nullptr || runner->renderer->vtable->createSpriteFromSurface == nullptr)
-        return
-                RValue_makeReal(-1);
+    if (runner->renderer == nullptr) return RValue_makeReal(-1);
 
-    // surface_id (arg0) is ignored - we always capture from the application surface (FBO)
+    int32_t surfaceId = RValue_toInt32(args[0]);
     int32_t x = RValue_toInt32(args[1]);
     int32_t y = RValue_toInt32(args[2]);
     int32_t w = RValue_toInt32(args[3]);
@@ -5828,8 +5908,14 @@ static RValue builtin_spriteCreateFromSurface(VMContext *ctx, RValue *args, MAYB
     int32_t xorig = RValue_toInt32(args[7]);
     int32_t yorig = RValue_toInt32(args[8]);
 
-    int32_t result = runner->renderer->vtable->createSpriteFromSurface(runner->renderer, x, y, w, h, removeback, smooth,
-                                                                       xorig, yorig);
+    int32_t result = -1;
+    if (runner->renderer->vtable->createSpriteFromSurfaceEx != nullptr) {
+        result = runner->renderer->vtable->createSpriteFromSurfaceEx(runner->renderer, surfaceId, x, y, w, h,
+                                                                     removeback, smooth, xorig, yorig);
+    } else if (runner->renderer->vtable->createSpriteFromSurface != nullptr) {
+        result = runner->renderer->vtable->createSpriteFromSurface(runner->renderer, x, y, w, h, removeback, smooth,
+                                                                   xorig, yorig);
+    }
     return RValue_makeReal((GMLReal) result);
 }
 
@@ -8081,7 +8167,6 @@ static RValue builtinAssetGetIndex(VMContext *ctx, RValue *args, int32_t argCoun
 // ===[ STUBS / MINIMAL IMPLS FOR PREVIOUSLY-UNRESOLVED BUILTINS ]===
 
 STUB_RETURN_ZERO(draw_enable_alphablend)
-STUB_RETURN_UNDEFINED(draw_clear_alpha)
 STUB_RETURN_UNDEFINED(draw_point_color)
 STUB_RETURN_UNDEFINED(draw_set_blend_mode_ext)
 STUB_RETURN_UNDEFINED(draw_set_alpha_test)
@@ -8241,8 +8326,26 @@ static RValue builtin_draw_clear(VMContext *ctx, RValue *args, MAYBE_UNUSED int3
     Runner *runner = (Runner *) ctx->runner;
     if (runner->renderer != nullptr) {
         uint32_t color = (uint32_t) RValue_toInt32(args[0]);
-        // Рисуем гигантский прямоугольник для очистки экрана (так как glClear недоступен напрямую из VM)
-        runner->renderer->vtable->drawRectangle(runner->renderer, -5000, -5000, 5000, 5000, color, 1.0f, false);
+        if (runner->renderer->vtable->clearTarget != nullptr) {
+            runner->renderer->vtable->clearTarget(runner->renderer, color, 1.0f);
+        } else {
+            runner->renderer->vtable->drawRectangle(runner->renderer, -5000, -5000, 5000, 5000, color, 1.0f, false);
+        }
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_clear_alpha(VMContext *ctx, RValue *args, MAYBE_UNUSED int32_t argCount) {
+    if (2 > argCount) return RValue_makeUndefined();
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer != nullptr) {
+        uint32_t color = (uint32_t) RValue_toInt32(args[0]);
+        float alpha = (float) RValue_toReal(args[1]);
+        if (runner->renderer->vtable->clearTarget != nullptr) {
+            runner->renderer->vtable->clearTarget(runner->renderer, color, alpha);
+        } else {
+            runner->renderer->vtable->drawRectangle(runner->renderer, -5000, -5000, 5000, 5000, color, alpha, false);
+        }
     }
     return RValue_makeUndefined();
 }

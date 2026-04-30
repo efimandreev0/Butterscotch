@@ -3176,6 +3176,13 @@ RValue VM_executeCode(VMContext *ctx, int32_t codeIndex) {
     ctx->currentCodeName = code->name;
     ctx->currentCodeIndex = codeIndex;
 
+    if (ctx->currentEventType == 0 ||
+       (ctx->currentEventType == 7 && ctx->currentEventSubtype == 4) ||
+       (ctx->currentEventType == -1 && code->name && strstr(code->name, "gml_Room_") != NULL))
+    {
+        fprintf(stderr, "[ROOM LOAD] Code execution: %s\n", code->name);
+    }
+
     setCurrentCodeLocalsSlotMap(ctx);
 
     uint32_t localsCount = computeLocalsCount(ctx, code);
@@ -3246,6 +3253,13 @@ RValue VM_callCodeIndex(VMContext *ctx, int32_t codeIndex, RValue *args, int32_t
     ctx->codeEnd = code->length;
     ctx->currentCodeName = code->name;
     ctx->currentCodeIndex = codeIndex;
+
+    if (ctx->currentEventType == 0 ||
+      (ctx->currentEventType == 7 && ctx->currentEventSubtype == 4) ||
+      (ctx->currentEventType == -1 && ctx->callStack->savedCodeName && strstr(ctx->callStack->savedCodeName, "gml_Room_") != NULL))
+    {
+        fprintf(stderr, "[ROOM LOAD]%*s-> Script execution: %s\n", ctx->callDepth * 2, "", code->name);
+    }
 
     setCurrentCodeLocalsSlotMap(ctx);
 

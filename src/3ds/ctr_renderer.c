@@ -296,6 +296,9 @@ static void ctr_init(Renderer *ren, DataWin *dw) {
     ctx->pageCount = dw->tpag.count;
     ctx->pages = calloc(ctx->pageCount, sizeof(PageData));
 
+    ctx->originalTpagCount = dw->tpag.count;
+    ctx->originalSpriteCount = dw->sprt.count;
+
     ctx->batchCap = BATCH_CAP;
     ctx->batchVerts = linearAlloc(ctx->batchCap * 6 * sizeof(VertexData));
 
@@ -322,6 +325,18 @@ static void ctr_init(Renderer *ren, DataWin *dw) {
 
 static void ctr_destroy(Renderer *ren) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
+
+    for (uint32_t i = 0; i < ctx->surfaceCount; i++) {
+        if (ctx->surfaces[i].fbo) glDeleteFramebuffers(1, &ctx->surfaces[i].fbo);
+        if (ctx->surfaces[i].tex) glDeleteTextures(1, &ctx->surfaces[i].tex);
+    }
+    free(ctx->surfaces);
+
+    if (ctx->fboCreated) {
+        glDeleteFramebuffers(1, &ctx->fboId);
+        glDeleteTextures(1, &ctx->fboTexId);
+    }
+
     glDeleteTextures(1, &ctx->whiteTex);
 
     for (uint32_t i = 0; i < ctx->pageCount; i++) {
@@ -335,6 +350,10 @@ static void ctr_destroy(Renderer *ren) {
     free(ctx);
 }
 
+static void ensure_fbo(CtrRenderer *ctx) {
+    if (ctx->fboCreated && ctx->fboLogicW == ctx->winW && ctx->fboLogicH == ctx->winH) return; // Условие изменено ниже в begin_frame
+}
+
 static void ctr_begin_frame(Renderer *ren, int32_t gw, int32_t gh, int32_t ww, int32_t wh) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
     flush_batch(ctx);
@@ -343,20 +362,81 @@ static void ctr_begin_frame(Renderer *ren, int32_t gw, int32_t gh, int32_t ww, i
     ctx->winH = wh;
     ctx->gameW = gw;
     ctx->gameH = gh;
+
+    // Рассчитываем физические (ужатые) размеры главного FBO, чтобы не допустить OOM
+    int drawW, drawH;
+    if ((ctx->gameW * ctx->winH) / ctx->gameH < ctx->winW) {
+        drawW = (ctx->gameW * ctx->winH) / ctx->gameH;
+        drawH = ctx->winH;
+    } else {
+        drawW = ctx->winW;
+        drawH = (ctx->gameH * ctx->winW) / ctx->gameW;
+    }
+
+    ctx->scaleX = (float)drawW / (float)ctx->gameW;
+    ctx->scaleY = (float)drawH / (float)ctx->gameH;
+
+    if (!ctx->fboCreated || ctx->fboLogicW != drawW || ctx->fboLogicH != drawH) {
+        if (ctx->fboCreated) {
+            glDeleteFramebuffers(1, &ctx->fboId);
+            glDeleteTextures(1, &ctx->fboTexId);
+        }
+
+        glGenTextures(1, &ctx->fboTexId);
+        glBindTexture(GL_TEXTURE_2D, ctx->fboTexId);
+        // Создаём текстуру физических размеров (чтобы влезла в VRAM)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, drawW, drawH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        glGenFramebuffers(1, &ctx->fboId);
+        glBindFramebuffer(GL_FRAMEBUFFER, ctx->fboId);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ctx->fboTexId, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+        ctx->fboLogicW = drawW;
+        ctx->fboLogicH = drawH;
+        ctx->fboPotW = next_pow2(drawW);
+        ctx->fboPotH = next_pow2(drawH);
+        ctx->fboCreated = true;
+    }
+
+    ctx->fboFrameCleared = false;
+    ctx->targetStackDepth = 0;
+}
+
+// Re-bind the FBO (novaBeginEye between eyes unbinds it) and lazily clear
+static void bind_fbo_for_drawing(CtrRenderer *ctx) {
+    if (!ctx->fboCreated) return;
+    glBindFramebuffer(GL_FRAMEBUFFER, ctx->fboId);
+    ctx->activeFbo = ctx->fboId;
+    if (!ctx->fboFrameCleared) {
+        glDisable(GL_SCISSOR_TEST);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        ctx->fboFrameCleared = true;
+    }
 }
 
 static void set_viewport(CtrRenderer *ctx, int32_t px, int32_t py, int32_t pw, int32_t ph) {
-    float scale = fminf((float) ctx->winW / ctx->gameW, (float) ctx->winH / ctx->gameH);
-    int32_t bw = roundf(ctx->gameW * scale), bh = roundf(ctx->gameH * scale);
-    int32_t bx = (ctx->winW - bw) / 2, by = (ctx->winH - bh) / 2;
-    glViewport(bx + roundf(px * scale), by + roundf(py * scale), fmaxf(1, roundf(pw * scale)),
-               fmaxf(1, roundf(ph * scale)));
+    int32_t spx = px * ctx->scaleX;
+    int32_t spy = py * ctx->scaleY;
+    int32_t spw = pw * ctx->scaleX;
+    int32_t sph = ph * ctx->scaleY;
+
+    // OpenGL Y is bottom-up inside FBO
+    int32_t glY = ctx->fboLogicH - spy - sph;
+    glViewport(spx, glY, fmaxf(1, spw), fmaxf(1, sph));
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(spx, glY, fmaxf(1, spw), fmaxf(1, sph));
 }
 
 static void ctr_begin_view(Renderer *ren, int32_t vx, int32_t vy, int32_t vw, int32_t vh, int32_t px, int32_t py,
                            int32_t pw, int32_t ph, float angle) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
     flush_batch(ctx);
+    bind_fbo_for_drawing(ctx);
     set_viewport(ctx, px, py, pw, ph);
 
     Matrix4f proj, rot, res;
@@ -374,6 +454,7 @@ static void ctr_begin_view(Renderer *ren, int32_t vx, int32_t vy, int32_t vw, in
     }
     glMatrixMode(GL_PROJECTION);
     glLoadMatrixf(proj.m);
+    ctx->currentProjection = proj;
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 }
@@ -381,17 +462,60 @@ static void ctr_begin_view(Renderer *ren, int32_t vx, int32_t vy, int32_t vw, in
 static void ctr_begin_gui(Renderer *ren, int32_t gw, int32_t gh, int32_t px, int32_t py, int32_t pw, int32_t ph) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
     flush_batch(ctx);
+    bind_fbo_for_drawing(ctx);
     set_viewport(ctx, px, py, pw, ph);
+
     Matrix4f proj;
     Matrix4f_identity(&proj);
     Matrix4f_ortho(&proj, 0, gw, gh, 0, -1.f, 1.f);
     glMatrixMode(GL_PROJECTION);
     glLoadMatrixf(proj.m);
+    ctx->currentProjection = proj;
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
 }
 
 static void ctr_end_frame(Renderer *ren) {
-    flush_batch((CtrRenderer *) ren);
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    flush_batch(ctx);
+
+    if (ctx->fboCreated) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDisable(GL_SCISSOR_TEST);
+
+        glViewport(0, 0, ctx->winW, ctx->winH);
+
+        Matrix4f proj;
+        Matrix4f_identity(&proj);
+        Matrix4f_ortho(&proj, 0.f, ctx->winW, ctx->winH, 0.f, -1.f, 1.f);
+        glMatrixMode(GL_PROJECTION);
+        glLoadMatrixf(proj.m);
+        glMatrixMode(GL_MODELVIEW);
+        glLoadIdentity();
+
+        int drawX = (ctx->winW - ctx->fboLogicW) / 2;
+        int drawY = (ctx->winH - ctx->fboLogicH) / 2;
+
+        float u1 = (float) ctx->fboLogicW / (float) ctx->fboPotW;
+        float v1 = (float) ctx->fboLogicH / (float) ctx->fboPotH;
+
+        uint8_t white[4] = {255, 255, 255, 255};
+        push_quad(ctx, ctx->fboTexId, drawX, drawY, drawX + ctx->fboLogicW, drawY, drawX + ctx->fboLogicW, drawY + ctx->fboLogicH, drawX,
+                  drawY + ctx->fboLogicH, 0.f, 0.f, u1, v1, white);
+        flush_batch(ctx);
+    }
+
     g_frame++;
+}
+
+static void ctr_end_view(Renderer *ren) {
+    flush_batch((CtrRenderer *) ren);
+    glDisable(GL_SCISSOR_TEST);
+}
+
+static void ctr_end_gui(Renderer *ren) {
+    flush_batch((CtrRenderer *) ren);
+    glDisable(GL_SCISSOR_TEST);
 }
 
 static void ctr_flush(Renderer *ren) { flush_batch((CtrRenderer *) ren); }
@@ -841,7 +965,8 @@ static void ctr_on_room(Renderer *ren, int32_t rm) {
     if (rm < 0 || rm >= dw->room.count) return;
     Room *room = &dw->room.rooms[rm];
 
-    for (uint32_t i = 0; i < ctx->pageCount; i++) ctx->pages[i].keepResident = false;
+    for (uint32_t i = 0; i < ctx->originalTpagCount && i < ctx->pageCount; i++)
+        ctx->pages[i].keepResident = false;
     for (uint32_t i = 0; i < dw->font.count; i++) mark_res(ctx, dw->font.fonts[i].tpagIndex);
 
     if (room->backgrounds) {
@@ -889,7 +1014,6 @@ static void ctr_on_room(Renderer *ren, int32_t rm) {
 
 static void ctr_set_blend(Renderer *ren, int32_t mode) {
     flush_batch((CtrRenderer *) ren);
-    //bm_normal = 0, bm_add = 1, bm_max = 2, bm_sub = 3
     if (mode == 1) glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     else if (mode == 3) glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_COLOR);
     else glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -903,147 +1027,400 @@ static void set_3d_depth(Renderer *ren, float depth) {
     novaSet3DDepth(z);
 }
 
-static int32_t ctr_create_surf(Renderer *ren, int32_t x, int32_t y, int32_t w, int32_t h, bool rb, bool sm, int32_t xo,
-                               int32_t yo) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+static uint32_t findOrAllocTpagSlot(CtrRenderer *ctx) {
     DataWin *dw = ctx->base.dataWin;
-    flush_batch(ctx);
+    for (uint32_t i = ctx->originalTpagCount; i < dw->tpag.count; i++) {
+        if (dw->tpag.items[i].texturePageId == -1) return i;
+    }
+    uint32_t newIndex = dw->tpag.count;
+    dw->tpag.count++;
+    dw->tpag.items = safeRealloc(dw->tpag.items, dw->tpag.count * sizeof(TexturePageItem));
+    memset(&dw->tpag.items[newIndex], 0, sizeof(TexturePageItem));
+    dw->tpag.items[newIndex].texturePageId = -1;
 
-    int vw = w, vh = h;
-    static void *fbo_vram_buf = NULL;
-    if (!fbo_vram_buf) {
-        fbo_vram_buf = vramAlloc(640 * 480 * 4);
-        if (!fbo_vram_buf) fbo_vram_buf = linearAlloc(640 * 480 * 4);
+    if (newIndex >= ctx->pageCount) {
+        uint32_t oldCount = ctx->pageCount;
+        ctx->pageCount = newIndex + 1;
+        ctx->pages = safeRealloc(ctx->pages, ctx->pageCount * sizeof(PageData));
+        memset(&ctx->pages[oldCount], 0, (ctx->pageCount - oldCount) * sizeof(PageData));
+    }
+    return newIndex;
+}
+
+static CtrSurface *get_surface(CtrRenderer *ctx, int32_t surfaceId) {
+    if (surfaceId < 0 || (uint32_t) surfaceId >= ctx->surfaceCount) return NULL;
+    return ctx->surfaces[surfaceId].used ? &ctx->surfaces[surfaceId] : NULL;
+}
+
+static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    if (width <= 0 || height <= 0) return -1;
+    // Лимит во избежание VRAM OOM
+    if (width > 1024) width = 1024;
+    if (height > 1024) height = 1024;
+
+    uint32_t slot = 0;
+    for (; slot < ctx->surfaceCount; slot++) {
+        CtrSurface *candidate = &ctx->surfaces[slot];
+        if (candidate->used) continue;
+        if (candidate->fbo == 0 || (candidate->width == width && candidate->height == height)) break;
+    }
+    if (slot == ctx->surfaceCount) {
+        ctx->surfaceCount++;
+        ctx->surfaces = safeRealloc(ctx->surfaces, ctx->surfaceCount * sizeof(CtrSurface));
+        memset(&ctx->surfaces[slot], 0, sizeof(CtrSurface));
     }
 
-    uint32_t *pixels = (uint32_t *) fbo_vram_buf;
-    if (!pixels) return -1;
+    CtrSurface *surf = &ctx->surfaces[slot];
+    if (surf->fbo != 0) {
+        surf->used = true;
+        return (int32_t) slot;
+    }
 
-    float scale = fminf((float) ctx->winW / ctx->gameW, (float) ctx->winH / ctx->gameH);
-    int32_t bw = roundf(ctx->gameW * scale), bh = roundf(ctx->gameH * scale);
-    int32_t bx = (ctx->winW - bw) / 2, by = (ctx->winH - bh) / 2;
+    memset(surf, 0, sizeof(*surf));
+    GLuint restoreFbo = ctx->activeFbo;
 
-    int px = bx + roundf(x * scale);
-    int py = by + roundf(y * scale);
-    int pw = roundf(w * scale);
-    int ph = roundf(h * scale);
+    glGenTextures(1, &surf->tex);
+    glBindTexture(GL_TEXTURE_2D, surf->tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    if (pw > 640) pw = 640;
-    if (ph > 480) ph = 480;
+    glGenFramebuffers(1, &surf->fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, surf->fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, surf->tex, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, restoreFbo);
+    ctx->activeFbo = restoreFbo;
 
-    glReadPixels(px, ctx->winH - py - ph, pw, ph, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    surf->used = true;
+    surf->width = width;
+    surf->height = height;
+    surf->potW = next_pow2(width);
+    surf->potH = next_pow2(height);
+    return (int32_t) slot;
+}
 
-    uint32_t newTpagIdx = dw->tpag.count;
-    dw->tpag.items = realloc(dw->tpag.items, (newTpagIdx + 1) * sizeof(TexturePageItem));
-    dw->tpag.count++;
+static void ctr_free_surface(Renderer *ren, int32_t surfaceId) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrSurface *surf = get_surface(ctx, surfaceId);
+    if (!surf) return;
 
-    TexturePageItem *tpag = &dw->tpag.items[newTpagIdx];
-    memset(tpag, 0, sizeof(TexturePageItem));
+    flush_batch(ctx);
+    if (ctx->activeFbo == surf->fbo) {
+        glBindFramebuffer(GL_FRAMEBUFFER, ctx->fboId);
+        ctx->activeFbo = ctx->fboId;
+    }
+
+    surf->used = false;
+}
+
+static bool ctr_surface_exists(Renderer *ren, int32_t surfaceId) {
+    if (surfaceId == -1) return true;
+    return get_surface((CtrRenderer *) ren, surfaceId) != NULL;
+}
+
+static bool ctr_surface_get_size(Renderer *ren, int32_t surfaceId, int32_t *width, int32_t *height) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    if (surfaceId == -1) {
+        if (width) *width = ctx->gameW;
+        if (height) *height = ctx->gameH;
+        return true;
+    }
+
+    CtrSurface *surf = get_surface(ctx, surfaceId);
+    if (!surf) return false;
+    if (width) *width = surf->width;
+    if (height) *height = surf->height;
+    return true;
+}
+
+static bool ctr_surface_set_target(Renderer *ren, int32_t surfaceId) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrSurface *surf = get_surface(ctx, surfaceId);
+    if (!surf || ctx->targetStackDepth >= 8) return false;
+
+    flush_batch(ctx);
+    CtrTargetState *state = &ctx->targetStack[ctx->targetStackDepth++];
+    state->fbo = ctx->activeFbo;
+    glGetIntegerv(GL_VIEWPORT, state->viewport);
+    state->projection = ctx->currentProjection;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, surf->fbo);
+    ctx->activeFbo = surf->fbo;
+    glViewport(0, 0, surf->width, surf->height);
+    glDisable(GL_SCISSOR_TEST);
+
+    Matrix4f proj;
+    Matrix4f_identity(&proj);
+    Matrix4f_ortho(&proj, 0, surf->width, surf->height, 0, -1.f, 1.f);
+    glMatrixMode(GL_PROJECTION);
+    glLoadMatrixf(proj.m);
+    ctx->currentProjection = proj;
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    return true;
+}
+
+static void ctr_surface_reset_target(Renderer *ren) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    if (ctx->targetStackDepth <= 0) return;
+
+    flush_batch(ctx);
+    CtrTargetState state = ctx->targetStack[--ctx->targetStackDepth];
+    glBindFramebuffer(GL_FRAMEBUFFER, state.fbo ? state.fbo : ctx->fboId);
+    ctx->activeFbo = state.fbo ? state.fbo : ctx->fboId;
+    glViewport(state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3]);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3]);
+    glMatrixMode(GL_PROJECTION);
+    glLoadMatrixf(state.projection.m);
+    ctx->currentProjection = state.projection;
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+}
+
+static void push_render_texture_quad(CtrRenderer *ctx, GLuint tex, int drawWidth, int drawHeight, int texWidth, int texHeight, int potW, int potH, float x,
+                                     float y, float xscale, float yscale, float angleDeg, uint32_t color,
+                                     float alpha) {
+    uint8_t c[4];
+    col2rgb(color, alpha, c);
+    if (!c[3]) return;
+
+    float x0 = 0.f, y0 = 0.f;
+    float x1 = drawWidth * xscale, y1 = 0.f;
+    float x2 = drawWidth * xscale, y2 = drawHeight * yscale;
+    float x3 = 0.f, y3 = drawHeight * yscale;
+
+    if (angleDeg != 0.f) {
+        float rad = -angleDeg * (M_PI / 180.f);
+        float sn = sinf(rad), cs = cosf(rad);
+        float pts[4][2] = {{x0, y0}, {x1, y1}, {x2, y2}, {x3, y3}};
+        for (int i = 0; i < 4; i++) {
+            float px = pts[i][0], py = pts[i][1];
+            pts[i][0] = px * cs - py * sn;
+            pts[i][1] = px * sn + py * cs;
+        }
+        x0 = pts[0][0]; y0 = pts[0][1];
+        x1 = pts[1][0]; y1 = pts[1][1];
+        x2 = pts[2][0]; y2 = pts[2][1];
+        x3 = pts[3][0]; y3 = pts[3][1];
+    }
+
+    float u1 = (float) texWidth / (float) potW;
+    float v1 = (float) texHeight / (float) potH;
+
+    push_quad(ctx, tex, x + x0, y + y0, x + x1, y + y1, x + x2, y + y2, x + x3, y + y3, 0.f, 0.f, u1, v1, c);
+}
+
+static void ctr_draw_surface(Renderer *ren, int32_t surfaceId, float x, float y, float xscale, float yscale,
+                             float angleDeg, uint32_t color, float alpha) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    if (surfaceId == -1) {
+        if (!ctx->fboCreated) return;
+        // application_surface масштабируется до логического размера игры
+        push_render_texture_quad(ctx, ctx->fboTexId, ctx->gameW, ctx->gameH, ctx->fboLogicW, ctx->fboLogicH, ctx->fboPotW, ctx->fboPotH, x, y,
+                                 xscale, yscale, angleDeg, color, alpha);
+        return;
+    }
+
+    CtrSurface *surf = get_surface(ctx, surfaceId);
+    if (!surf) return;
+    push_render_texture_quad(ctx, surf->tex, surf->width, surf->height, surf->width, surf->height, surf->potW, surf->potH, x, y, xscale, yscale,
+                             angleDeg, color, alpha);
+}
+
+static void ctr_clear_target(Renderer *ren, uint32_t color, float alpha) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    flush_batch(ctx);
+    glClearColor(BGR_R(color) / 255.f, BGR_G(color) / 255.f, BGR_B(color) / 255.f, fmaxf(0.f, fminf(1.f, alpha)));
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+}
+
+static int32_t ctr_create_surf_ex(Renderer *ren, int32_t surfaceId, int32_t x, int32_t y, int32_t w, int32_t h,
+                                  bool rb, bool sm, int32_t xo, int32_t yo) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    DataWin *dw = ren->dataWin;
+
+    if (w <= 0 || h <= 0) return -1;
+
+    GLuint sourceFbo = 0;
+    int32_t sourceW = 0, sourceH = 0;
+
+    // Пересчитываем координаты, если обращаемся к даунскейленному FBO
+    int32_t fbo_x = x, fbo_y = y, fbo_w = w, fbo_h = h;
+
+    if (surfaceId == -1) {
+        if (!ctx->fboCreated) return -1;
+        sourceFbo = ctx->fboId;
+        sourceW = ctx->fboLogicW;
+        sourceH = ctx->fboLogicH;
+
+        fbo_x = (int32_t)(x * ctx->scaleX);
+        fbo_y = (int32_t)(y * ctx->scaleY);
+        fbo_w = (int32_t)(w * ctx->scaleX);
+        fbo_h = (int32_t)(h * ctx->scaleY);
+    } else {
+        CtrSurface *surf = get_surface(ctx, surfaceId);
+        if (!surf) return -1;
+        sourceFbo = surf->fbo;
+        sourceW = surf->width;
+        sourceH = surf->height;
+    }
+
+    if (fbo_x < 0) { fbo_w += fbo_x; fbo_x = 0; }
+    if (fbo_y < 0) { fbo_h += fbo_y; fbo_y = 0; }
+    if (fbo_x + fbo_w > sourceW) fbo_w = sourceW - fbo_x;
+    if (fbo_y + fbo_h > sourceH) fbo_h = sourceH - fbo_y;
+    if (fbo_w <= 0 || fbo_h <= 0) return -1;
+
+    flush_batch(ctx);
+    GLuint restoreFbo = ctx->activeFbo;
+    glBindFramebuffer(GL_FRAMEBUFFER, sourceFbo);
+
+    int32_t glY = sourceH - fbo_y - fbo_h;
+
+    uint8_t *pixels = malloc((size_t) fbo_w * (size_t) fbo_h * 4);
+    if (!pixels) {
+        glBindFramebuffer(GL_FRAMEBUFFER, restoreFbo);
+        ctx->activeFbo = restoreFbo;
+        return -1;
+    }
+
+    glReadPixels(fbo_x, glY, fbo_w, fbo_h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glBindFramebuffer(GL_FRAMEBUFFER, restoreFbo);
+    ctx->activeFbo = restoreFbo;
+
+    // glReadPixels returns rows bottom-up; flip vertically.
+    size_t rowBytes = (size_t) fbo_w * 4;
+    uint8_t *rowTmp = malloc(rowBytes);
+    if (rowTmp) {
+        for (int row = 0; row < fbo_h / 2; row++) {
+            uint8_t *top = pixels + (size_t) row * rowBytes;
+            uint8_t *bot = pixels + (size_t) (fbo_h - 1 - row) * rowBytes;
+            memcpy(rowTmp, top, rowBytes);
+            memcpy(top, bot, rowBytes);
+            memcpy(bot, rowTmp, rowBytes);
+        }
+        free(rowTmp);
+    }
+
+    if (rb) {
+        uint8_t kr = pixels[0], kg = pixels[1], kb = pixels[2];
+        size_t total = (size_t) fbo_w * (size_t) fbo_h;
+        for (size_t i = 0; i < total; i++) {
+            uint8_t *p = pixels + i * 4;
+            if (p[0] == kr && p[1] == kg && p[2] == kb) p[3] = 0;
+        }
+    }
+
+    GLuint newTex;
+    glGenTextures(1, &newTex);
+    glBindTexture(GL_TEXTURE_2D, newTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fbo_w, fbo_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, sm ? GL_LINEAR : GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, sm ? GL_LINEAR : GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    free(pixels);
+
+    uint32_t tpagIndex = findOrAllocTpagSlot(ctx);
+    TexturePageItem *tpag = &dw->tpag.items[tpagIndex];
     tpag->sourceX = 0;
     tpag->sourceY = 0;
-    tpag->sourceWidth = pw;
-    tpag->sourceHeight = ph;
+    tpag->sourceWidth = (uint16_t) fbo_w;
+    tpag->sourceHeight = (uint16_t) fbo_h;
     tpag->targetX = 0;
     tpag->targetY = 0;
-    tpag->boundingWidth = vw;
-    tpag->boundingHeight = vh;
-    tpag->texturePageId = 0xFFFF; //mark as dyn
+    tpag->targetWidth = (uint16_t) w; // Игровой (логический) размер!
+    tpag->targetHeight = (uint16_t) h;
+    tpag->boundingWidth = (uint16_t) w;
+    tpag->boundingHeight = (uint16_t) h;
+    tpag->texturePageId = (int16_t) tpagIndex;
 
-    ctx->pages = realloc(ctx->pages, dw->tpag.count * sizeof(PageData));
-    PageData *page = &ctx->pages[newTpagIdx];
-    memset(page, 0, sizeof(PageData));
+    PageData *page = &ctx->pages[tpagIndex];
+    memset(page, 0, sizeof(*page));
     page->loaded = true;
     page->keepResident = true;
-    page->origW = pw;
-    page->origH = ph;
+    page->origW = fbo_w;
+    page->origH = fbo_h;
     page->chunksX = 1;
     page->chunksY = 1;
 
     AtlasChunk *chunk = &page->chunks[0][0];
+    chunk->tex = newTex;
     chunk->srcX = 0;
     chunk->srcY = 0;
-    chunk->width = pw;
-    chunk->height = ph;
-    chunk->potW = next_pow2(pw);
-    chunk->potH = next_pow2(ph);
+    chunk->width = fbo_w;
+    chunk->height = fbo_h;
+    chunk->potW = next_pow2(fbo_w);
+    chunk->potH = next_pow2(fbo_h);
 
-    uint16_t *tex_data = linearAlloc(chunk->potW * chunk->potH * 2);
-    if (tex_data) {
-        for (int cy = 0; cy < ph; cy++) {
-            for (int cx = 0; cx < pw; cx++) {
-                uint32_t pxl = pixels[(ph - 1 - cy) * pw + cx];
-                uint8_t r = pxl & 0xFF;
-                uint8_t g = (pxl >> 8) & 0xFF;
-                uint8_t b = (pxl >> 16) & 0xFF;
-                uint8_t a = (pxl >> 24) & 0xFF;
-                tex_data[cy * chunk->potW + cx] = pack_rgba4444(r, g, b, a);
-            }
-        }
+    uint32_t spriteIndex = DataWin_allocSpriteSlot(dw, ctx->originalSpriteCount);
+    Sprite *sprite = &dw->sprt.sprites[spriteIndex];
+    sprite->width = (uint32_t) w;
+    sprite->height = (uint32_t) h;
 
-        glGenTextures(1, &chunk->tex);
-        glBindTexture(GL_TEXTURE_2D, chunk->tex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, chunk->potW, chunk->potH, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4,
-                     tex_data);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, sm ? GL_LINEAR : GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, sm ? GL_LINEAR : GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    // Переводим originX/Y если спрайт был вырезан с даунскейлом
+    if (fbo_w != w) sprite->originX = (int32_t)(xo * ((float)w / fbo_w));
+    else sprite->originX = xo;
+    if (fbo_h != h) sprite->originY = (int32_t)(yo * ((float)h / fbo_h));
+    else sprite->originY = yo;
 
-        linearFree(tex_data);
-    }
+    sprite->textureCount = 1;
+    sprite->tpagIndices = safeMalloc(sizeof(int32_t));
+    sprite->tpagIndices[0] = (int32_t) tpagIndex;
+    sprite->maskCount = 0;
+    sprite->masks = nullptr;
 
-    ctx->pageCount = dw->tpag.count;
-
-    uint32_t newSprIdx = dw->sprt.count;
-    dw->sprt.sprites = realloc(dw->sprt.sprites, (newSprIdx + 1) * sizeof(Sprite));
-    dw->sprt.count++;
-
-    Sprite *spr = &dw->sprt.sprites[newSprIdx];
-    memset(spr, 0, sizeof(Sprite));
-    spr->originX = xo;
-    spr->originY = yo;
-    spr->textureCount = 1;
-    spr->tpagIndices = malloc(sizeof(int32_t));
-    spr->tpagIndices[0] = newTpagIdx;
-
-    return newSprIdx;
+    return (int32_t) spriteIndex;
 }
 
-static void ctr_del_sprite(Renderer *ren, int32_t s) {
+static int32_t ctr_create_surf(Renderer *ren, int32_t x, int32_t y, int32_t w, int32_t h, bool rb, bool sm, int32_t xo,
+                               int32_t yo) {
+    return ctr_create_surf_ex(ren, -1, x, y, w, h, rb, sm, xo, yo);
+}
+
+static void ctr_del_sprite(Renderer *ren, int32_t spriteIndex) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
-    DataWin *dw = ctx->base.dataWin;
-    if (s < 0 || s >= dw->sprt.count) return;
+    DataWin *dw = ren->dataWin;
 
-    Sprite *spr = &dw->sprt.sprites[s];
-    if (spr->textureCount == 0 || !spr->tpagIndices) return;
+    if (spriteIndex < 0 || (uint32_t) spriteIndex >= dw->sprt.count) return;
+    if ((uint32_t) spriteIndex < ctx->originalSpriteCount) return;
 
-    int tpagIdx = spr->tpagIndices[0];
-    if (tpagIdx >= 0 && tpagIdx < ctx->pageCount) {
-        PageData *page = &ctx->pages[tpagIdx];
-        if (page->loaded) {
-            for (int cx = 0; cx < page->chunksX; cx++) {
-                for (int cy = 0; cy < page->chunksY; cy++) {
-                    if (page->chunks[cx][cy].tex) {
-                        glDeleteTextures(1, &page->chunks[cx][cy].tex);
-                        page->chunks[cx][cy].tex = 0;
+    Sprite *sprite = &dw->sprt.sprites[spriteIndex];
+    if (sprite->textureCount == 0) return;
+
+    flush_batch(ctx);
+
+    for (uint32_t i = 0; i < sprite->textureCount; i++) {
+        int32_t tpagIdx = sprite->tpagIndices[i];
+        if (tpagIdx < 0 || (uint32_t) tpagIdx < ctx->originalTpagCount) continue;
+
+        TexturePageItem *tpag = &dw->tpag.items[tpagIdx];
+        if ((uint32_t) tpagIdx < ctx->pageCount) {
+            PageData *page = &ctx->pages[tpagIdx];
+            if (page->loaded) {
+                for (int cx = 0; cx < page->chunksX; cx++) {
+                    for (int cy = 0; cy < page->chunksY; cy++) {
+                        if (page->chunks[cx][cy].tex) {
+                            glDeleteTextures(1, &page->chunks[cx][cy].tex);
+                            page->chunks[cx][cy].tex = 0;
+                        }
                     }
                 }
             }
-            page->loaded = false;
+            memset(page, 0, sizeof(*page));
         }
+        tpag->texturePageId = -1;
     }
 
-    spr->textureCount = 0;
-    free(spr->tpagIndices);
-    spr->tpagIndices = NULL;
-}
-
-static void ctr_end_view(Renderer *ren) {
-    flush_batch((CtrRenderer *) ren);
-}
-
-static void ctr_end_gui(Renderer *ren) {
-    flush_batch((CtrRenderer *) ren);
+    free(sprite->tpagIndices);
+    const char *keepName = sprite->name;
+    memset(sprite, 0, sizeof(Sprite));
+    sprite->name = keepName;
 }
 
 static RendererVtable vtable = {
@@ -1056,7 +1433,12 @@ static RendererVtable vtable = {
     .drawLine = ctr_draw_line, .drawLineColor = ctr_draw_line_c,
     .drawTriangle = ctr_draw_tri, .drawTriangleColor = ctr_draw_tri_c,
     .drawText = ctr_draw_text, .drawTextColor = ctr_draw_text_c, .flush = ctr_flush,
-    .createSpriteFromSurface = ctr_create_surf, .deleteSprite = ctr_del_sprite,
+    .createSpriteFromSurface = ctr_create_surf, .createSpriteFromSurfaceEx = ctr_create_surf_ex,
+    .deleteSprite = ctr_del_sprite,
+    .createSurface = ctr_create_surface, .freeSurface = ctr_free_surface,
+    .surfaceExists = ctr_surface_exists, .surfaceGetSize = ctr_surface_get_size,
+    .surfaceSetTarget = ctr_surface_set_target, .surfaceResetTarget = ctr_surface_reset_target,
+    .drawSurface = ctr_draw_surface, .clearTarget = ctr_clear_target,
     .drawTile = ctr_draw_tile, .drawTiled = ctr_draw_tiled,
     .drawCircle = ctr_draw_circle, .drawEllipse = ctr_draw_ellipse, .drawRoundrect = ctr_draw_rr,
     .onRoomChanged = ctr_on_room, .set3DDepthOffset = set_3d_depth, .setBlendMode = ctr_set_blend

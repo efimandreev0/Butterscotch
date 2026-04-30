@@ -21,7 +21,7 @@ u32 __ctru_heap_size = 0;
 u32 __ctru_linear_heap_size = 25 * 1024 * 1024;
 u32 __stacksize__ = 64 * 1024;
 
-#define delta
+//#define delta
 #ifdef delta
 #define DATA_PATH "sdmc:/3ds/butterscotch/delta/chapter3_windows/data.orig.win"
 #define CACHE_DIR "sdmc:/3ds/butterscotch/cache"
@@ -140,17 +140,25 @@ int main(int argc, char **argv) {
         Room *rm = run->currentRoom;
         int gw = dw->gen8.defaultWindowWidth, gh = dw->gen8.defaultWindowHeight;
         bool views_en = rm->flags & 1;
+        float displayScaleX = 1.f;
+        float displayScaleY = 1.f;
 
         if (views_en) {
-            int mr = 0, mb = 0;
+            int minL = 0x7fffffff, minT = 0x7fffffff;
+            int maxR = -0x7fffffff, maxB = -0x7fffffff;
             for (int i = 0; i < MAX_VIEWS; i++) {
                 if (!run->views[i].enabled) continue;
+                if (run->views[i].portX < minL) minL = run->views[i].portX;
+                if (run->views[i].portY < minT) minT = run->views[i].portY;
                 int r = run->views[i].portX + run->views[i].portWidth;
                 int b = run->views[i].portY + run->views[i].portHeight;
-                if (r > mr) mr = r;
-                if (b > mb) mb = b;
+                if (r > maxR) maxR = r;
+                if (b > maxB) maxB = b;
             }
-            if (mr > 0 && mb > 0) { gw = mr; gh = mb; }
+            if (maxR > minL && maxB > minT) {
+                displayScaleX = (float) gw / (float) (maxR - minL);
+                displayScaleY = (float) gh / (float) (maxB - minT);
+            }
         }
 
         ren->vtable->beginFrame(ren, gw, gh, NOVA_SCREEN_W, NOVA_SCREEN_H);
@@ -181,11 +189,16 @@ int main(int argc, char **argv) {
 
                     run->viewCurrent = i;
                     novaSet3DDepth(0.05f);
-                    ren->vtable->beginView(ren, v->viewX, v->viewY, v->viewWidth, v->viewHeight, v->portX, v->portY, v->portWidth, v->portHeight, v->viewAngle);
+                    int portX = (int) ((float) v->portX * displayScaleX + 0.5f);
+                    int portY = (int) ((float) v->portY * displayScaleY + 0.5f);
+                    int portW = (int) ((float) v->portWidth * displayScaleX + 0.5f);
+                    int portH = (int) ((float) v->portHeight * displayScaleY + 0.5f);
+
+                    ren->vtable->beginView(ren, v->viewX, v->viewY, v->viewWidth, v->viewHeight, portX, portY, portW, portH, v->viewAngle);
                     Runner_draw(run);
                     ren->vtable->endView(ren);
 
-                    ren->vtable->beginGUI(ren, run->guiWidth > 0 ? run->guiWidth : v->portWidth, run->guiHeight > 0 ? run->guiHeight : v->portHeight, v->portX, v->portY, v->portWidth, v->portHeight);
+                    ren->vtable->beginGUI(ren, run->guiWidth > 0 ? run->guiWidth : portW, run->guiHeight > 0 ? run->guiHeight : portH, portX, portY, portW, portH);
                     Runner_drawGUI(run);
                     ren->vtable->endGUI(ren);
                     ren->vtable->flush(ren);

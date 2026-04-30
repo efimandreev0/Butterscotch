@@ -65,7 +65,27 @@ typedef struct {
     int32_t (*createSpriteFromSurface)(Renderer *renderer, int32_t x, int32_t y, int32_t w, int32_t h, bool removeback,
                                        bool smooth, int32_t xorig, int32_t yorig);
 
+    int32_t (*createSpriteFromSurfaceEx)(Renderer *renderer, int32_t surfaceId, int32_t x, int32_t y, int32_t w,
+                                         int32_t h, bool removeback, bool smooth, int32_t xorig, int32_t yorig);
+
     void (*deleteSprite)(Renderer *renderer, int32_t spriteIndex);
+
+    int32_t (*createSurface)(Renderer *renderer, int32_t width, int32_t height);
+
+    void (*freeSurface)(Renderer *renderer, int32_t surfaceId);
+
+    bool (*surfaceExists)(Renderer *renderer, int32_t surfaceId);
+
+    bool (*surfaceGetSize)(Renderer *renderer, int32_t surfaceId, int32_t *width, int32_t *height);
+
+    bool (*surfaceSetTarget)(Renderer *renderer, int32_t surfaceId);
+
+    void (*surfaceResetTarget)(Renderer *renderer);
+
+    void (*drawSurface)(Renderer *renderer, int32_t surfaceId, float x, float y, float xscale, float yscale,
+                        float angleDeg, uint32_t color, float alpha);
+
+    void (*clearTarget)(Renderer *renderer, uint32_t color, float alpha);
 
     // Optional: platform-specific tile rendering (nullptr = use default drawSpritePart path)
     void (*drawTile)(Renderer *renderer, RoomTile *tile, float offsetX, float offsetY);
