@@ -1,8 +1,9 @@
-﻿//
+//
 // Created by efimandreev0 on 30.04.2026.
 //
 
 #include "icon_parse.h"
+#include "stb_image.h"
 
 #define ICON_LOG(...) do { \
     fprintf(stderr, "[ICON] " __VA_ARGS__); \
@@ -81,7 +82,7 @@ static int decode_icon_dib_to_rgba(const uint8_t *dib, size_t dib_size, uint8_t 
 
     const uint8_t *and_mask = xor_mask + xor_size;
     if ((size_t)(and_mask - dib) + and_size > dib_size) {
-        and_mask = NULL; // truncated AND mask -> ignore
+        and_mask = NULL;
     }
 
     int has_valid_alpha = 0;
@@ -155,28 +156,39 @@ static int decode_icon_dib_to_rgba(const uint8_t *dib, size_t dib_size, uint8_t 
     return 1;
 }
 
-static GLuint decode_icon_blob_to_texture(const uint8_t *img, size_t img_size) {
-    if (!img || img_size < 8) return 0;
+void IconImage_free(IconImage *image) {
+    if (!image) return;
+    stbi_image_free(image->pixels);
+    image->pixels = NULL;
+    image->width = 0;
+    image->height = 0;
+}
+
+static bool decode_icon_blob_to_image(const uint8_t *img, size_t img_size, IconImage *out) {
+    if (!img || img_size < 8 || !out) return false;
+    memset(out, 0, sizeof(*out));
 
     if (img[0] == 0x89 && img[1] == 'P' && img[2] == 'N' && img[3] == 'G' &&
         img[4] == 0x0D && img[5] == 0x0A && img[6] == 0x1A && img[7] == 0x0A)
     {
         int w = 0, h = 0, comp = 0;
         uint8_t *pixels = stbi_load_from_memory(img, (int)img_size, &w, &h, &comp, 4);
-        if (!pixels) return 0;
-        GLuint tex = upload_rgba_texture(pixels, w, h);
-        stbi_image_free(pixels);
-        return tex;
+        if (!pixels) return false;
+        out->pixels = pixels;
+        out->width = w;
+        out->height = h;
+        return true;
     }
 
     uint8_t *rgba = NULL;
     int w = 0, h = 0;
     if (decode_icon_dib_to_rgba(img, img_size, &rgba, &w, &h)) {
-        GLuint tex = upload_rgba_texture(rgba, w, h);
-        free(rgba);
-        return tex;
+        out->pixels = rgba;
+        out->width = w;
+        out->height = h;
+        return true;
     }
-    return 0;
+    return false;
 }
 
 typedef struct { uint8_t *data; size_t size; } MemFile;
@@ -256,13 +268,17 @@ static int res_find_id_entry(const uint8_t *rsrc, size_t rsrc_size, uint32_t dir
     return 0;
 }
 
-GLuint extract_icon_from_exe_pe(const char *path) {
-    MemFile mf;
-    if (!read_file(path, &mf)) return 0;
+bool extract_icon_from_exe_pe(const char *path, IconImage *out) {
+    //here we just extracting icon from .exe
 
-    if (mf.size < 0x40 || rd16(mf.data) != MZ_SIG) { free_file(&mf); return 0; }
+    memset(out, 0, sizeof(*out));
+
+    MemFile mf;
+    if (!read_file(path, &mf)) return false;
+
+    if (mf.size < 0x40 || rd16(mf.data) != MZ_SIG) { free_file(&mf); return false; }
     uint32_t pe_off = rd32(mf.data + 0x3C);
-    if (pe_off + 24 > mf.size || rd32(mf.data + pe_off) != PE_SIG) { free_file(&mf); return 0; }
+    if (pe_off + 24 > mf.size || rd32(mf.data + pe_off) != PE_SIG) { free_file(&mf); return false; }
 
     uint16_t sec_count = rd16(mf.data + pe_off + 6);
     uint16_t opt_size  = rd16(mf.data + pe_off + 20);
@@ -272,14 +288,14 @@ GLuint extract_icon_from_exe_pe(const char *path) {
     uint32_t opt_off = pe_off + 24;
     uint32_t dd_off = opt_off + (is64 ? 0x70 : 0x60);
 
-    if (dd_off + 8 * (IMAGE_DIRECTORY_RESOURCE + 1) > mf.size) { free_file(&mf); return 0; }
+    if (dd_off + 8 * (IMAGE_DIRECTORY_RESOURCE + 1) > mf.size) { free_file(&mf); return false; }
 
     uint32_t rsrc_rva = rd32(mf.data + dd_off + IMAGE_DIRECTORY_RESOURCE * 8);
     uint32_t sec_tbl_off = opt_off + opt_size;
     uint32_t rsrc_off = 0;
 
     if (!rsrc_rva || !pe_rva_to_off(rsrc_rva, mf.data, mf.size, sec_tbl_off, sec_count, &rsrc_off)) {
-        free_file(&mf); return 0;
+        free_file(&mf); return false;
     }
 
     const uint8_t *rsrc = mf.data + rsrc_off;
@@ -288,7 +304,7 @@ GLuint extract_icon_from_exe_pe(const char *path) {
     uint32_t group_type_dir;
     int is_dir;
     if (!res_find_id_entry(rsrc, rsrc_size, 0, RT_GROUP_ICON, &group_type_dir, &is_dir) || !is_dir) {
-        free_file(&mf); return 0;
+        free_file(&mf); return false;
     }
 
     uint16_t named_grps = rd16(rsrc + group_type_dir + 12);
@@ -348,54 +364,41 @@ GLuint extract_icon_from_exe_pe(const char *path) {
         }
     }
 
-    if (best_icon_id < 0) { free_file(&mf); return 0; }
+    if (best_icon_id < 0) { free_file(&mf); return false; }
 
     uint32_t icon_type_dir;
     if (!res_find_id_entry(rsrc, rsrc_size, 0, RT_ICON, &icon_type_dir, &is_dir) || !is_dir) {
-        free_file(&mf); return 0;
+        free_file(&mf); return false;
     }
     uint32_t icon_name_dir;
     if (!res_find_id_entry(rsrc, rsrc_size, icon_type_dir, best_icon_id, &icon_name_dir, &is_dir) || !is_dir) {
-        free_file(&mf); return 0;
+        free_file(&mf); return false;
     }
     uint32_t icon_lang_dir;
     if (!res_find_id_entry(rsrc, rsrc_size, icon_name_dir, 0xFFFFFFFFu, &icon_lang_dir, &is_dir) || is_dir) {
-        free_file(&mf); return 0;
+        free_file(&mf); return false;
     }
 
     uint32_t icon_blob_rva = rd32(rsrc + icon_lang_dir);
     uint32_t icon_blob_sz  = rd32(rsrc + icon_lang_dir + 4);
     uint32_t icon_off;
     if (!pe_rva_to_off(icon_blob_rva, mf.data, mf.size, sec_tbl_off, sec_count, &icon_off) || icon_off + icon_blob_sz > mf.size) {
-        free_file(&mf); return 0;
+        free_file(&mf); return false;
     }
 
-    GLuint tex = decode_icon_blob_to_texture(mf.data + icon_off, icon_blob_sz);
+    bool ok = decode_icon_blob_to_image(mf.data + icon_off, icon_blob_sz, out);
     free_file(&mf);
-    return tex;
+    return ok;
 }
 
-GLuint upload_rgba_texture(const uint8_t *pixels, int w, int h) {
-    if (!pixels || w <= 0 || h <= 0) return 0;
-    GLuint tex = 0;
-    glGenTextures(1, &tex);
-    if (!tex) return 0;
-
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    return tex;
-}
-
-GLuint load_texture_from_file(const char *path) {
+bool load_image_from_file(const char *path, IconImage *out) {
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
     int w, h, comp;
     uint8_t *pixels = stbi_load(path, &w, &h, &comp, 4);
-    if (!pixels) return 0;
-    GLuint tex = upload_rgba_texture(pixels, w, h);
-    stbi_image_free(pixels);
-    return tex;
+    if (!pixels) return false;
+    out->pixels = pixels;
+    out->width = w;
+    out->height = h;
+    return true;
 }

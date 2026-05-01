@@ -25,8 +25,8 @@ set(PLATFORM "" CACHE STRING "Platform backend")
 set(BUTTERSCOTCH_COMMIT_HASH "unknown" CACHE STRING "Git commit hash")
 set(BUTTERSCOTCH_COMMIT_DATE "unknown" CACHE STRING "Git commit date")
 add_compile_definitions(
-    BUTTERSCOTCH_COMMIT_HASH="${BUTTERSCOTCH_COMMIT_HASH}"
-    BUTTERSCOTCH_COMMIT_DATE="${BUTTERSCOTCH_COMMIT_DATE}"
+        BUTTERSCOTCH_COMMIT_HASH="${BUTTERSCOTCH_COMMIT_HASH}"
+        BUTTERSCOTCH_COMMIT_DATE="${BUTTERSCOTCH_COMMIT_DATE}"
 )
 
 if(PLATFORM STREQUAL "")
@@ -53,9 +53,7 @@ file(GLOB SOURCES src/*.c)
 # Platform specific files builds
 file(GLOB PLATFORM_SOURCES src/${PLATFORM}/*.c)
 
-add_executable(butterscotch ${SOURCES} ${PLATFORM_SOURCES}
-        src/3ds/icon_parse.h
-        src/3ds/icon_parse.c)
+add_executable(butterscotch ${SOURCES} ${PLATFORM_SOURCES})
 target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 # stb_ds
@@ -136,7 +134,7 @@ if(PLATFORM STREQUAL "glfw")
 
     #gamecontrollerdb
     add_custom_command(TARGET butterscotch POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${CMAKE_SOURCE_DIR}/vendor/gamecontrollerdb.txt
             $<TARGET_FILE_DIR:butterscotch>/gamecontrollerdb.txt
     )
@@ -172,7 +170,7 @@ elseif(PLATFORM STREQUAL "ps2")
 
     # Platform identifier for PS2-specific code paths (e.g., scratchpad allocation)
     add_compile_definitions(PLATFORM_PS2)
-    
+
     # PS2 renderer hot path logs
     option(ENABLE_PS2_RENDERER_LOGS "Enable hot path logs in the PS2 renderer" OFF)
     if(ENABLE_PS2_RENDERER_LOGS)
@@ -206,54 +204,54 @@ elseif(PLATFORM STREQUAL "ps2")
         file(MAKE_DIRECTORY ${IRX_GEN_DIR})
 
         add_custom_command(
-            OUTPUT ${IRX_GEN_DIR}/freesio2_irx.c
-            COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/freesio2.irx ${IRX_GEN_DIR}/freesio2_irx.c freesio2_irx
-            DEPENDS ${IRX_DIR}/freesio2.irx
-            COMMENT "Embedding freesio2.irx"
+                OUTPUT ${IRX_GEN_DIR}/freesio2_irx.c
+                COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/freesio2.irx ${IRX_GEN_DIR}/freesio2_irx.c freesio2_irx
+                DEPENDS ${IRX_DIR}/freesio2.irx
+                COMMENT "Embedding freesio2.irx"
         )
         add_custom_command(
-            OUTPUT ${IRX_GEN_DIR}/mcman_irx.c
-            COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/mcman.irx ${IRX_GEN_DIR}/mcman_irx.c mcman_irx
-            DEPENDS ${IRX_DIR}/mcman.irx
-            COMMENT "Embedding mcman.irx"
+                OUTPUT ${IRX_GEN_DIR}/mcman_irx.c
+                COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/mcman.irx ${IRX_GEN_DIR}/mcman_irx.c mcman_irx
+                DEPENDS ${IRX_DIR}/mcman.irx
+                COMMENT "Embedding mcman.irx"
         )
         add_custom_command(
-            OUTPUT ${IRX_GEN_DIR}/mcserv_irx.c
-            COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/mcserv.irx ${IRX_GEN_DIR}/mcserv_irx.c mcserv_irx
-            DEPENDS ${IRX_DIR}/mcserv.irx
-            COMMENT "Embedding mcserv.irx"
+                OUTPUT ${IRX_GEN_DIR}/mcserv_irx.c
+                COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/mcserv.irx ${IRX_GEN_DIR}/mcserv_irx.c mcserv_irx
+                DEPENDS ${IRX_DIR}/mcserv.irx
+                COMMENT "Embedding mcserv.irx"
         )
         add_custom_command(
-            OUTPUT ${IRX_GEN_DIR}/freepad_irx.c
-            COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/freepad.irx ${IRX_GEN_DIR}/freepad_irx.c freepad_irx
-            DEPENDS ${IRX_DIR}/freepad.irx
-            COMMENT "Embedding freepad.irx"
+                OUTPUT ${IRX_GEN_DIR}/freepad_irx.c
+                COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/freepad.irx ${IRX_GEN_DIR}/freepad_irx.c freepad_irx
+                DEPENDS ${IRX_DIR}/freepad.irx
+                COMMENT "Embedding freepad.irx"
         )
         # We need the USB mass storage IRX modules for writing gmon.out when not running from host: and for keyboard support
         add_custom_command(
-            OUTPUT ${IRX_GEN_DIR}/usbd_irx.c
-            COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/usbd.irx ${IRX_GEN_DIR}/usbd_irx.c usbd_irx
-            DEPENDS ${IRX_DIR}/usbd.irx
-            COMMENT "Embedding usbd.irx"
+                OUTPUT ${IRX_GEN_DIR}/usbd_irx.c
+                COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/usbd.irx ${IRX_GEN_DIR}/usbd_irx.c usbd_irx
+                DEPENDS ${IRX_DIR}/usbd.irx
+                COMMENT "Embedding usbd.irx"
         )
         add_custom_command(
-            OUTPUT ${IRX_GEN_DIR}/ps2kbd_irx.c
-            COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/ps2kbd.irx ${IRX_GEN_DIR}/ps2kbd_irx.c ps2kbd_irx
-            DEPENDS ${IRX_DIR}/ps2kbd.irx
-            COMMENT "Embedding ps2kbd.irx"
+                OUTPUT ${IRX_GEN_DIR}/ps2kbd_irx.c
+                COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/ps2kbd.irx ${IRX_GEN_DIR}/ps2kbd_irx.c ps2kbd_irx
+                DEPENDS ${IRX_DIR}/ps2kbd.irx
+                COMMENT "Embedding ps2kbd.irx"
         )
         if(ENABLE_PS2_AUDIO)
             add_custom_command(
-                OUTPUT ${IRX_GEN_DIR}/freesd_irx.c
-                COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/freesd.irx ${IRX_GEN_DIR}/freesd_irx.c freesd_irx
-                DEPENDS ${IRX_DIR}/freesd.irx
-                COMMENT "Embedding freesd.irx"
+                    OUTPUT ${IRX_GEN_DIR}/freesd_irx.c
+                    COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/freesd.irx ${IRX_GEN_DIR}/freesd_irx.c freesd_irx
+                    DEPENDS ${IRX_DIR}/freesd.irx
+                    COMMENT "Embedding freesd.irx"
             )
             add_custom_command(
-                OUTPUT ${IRX_GEN_DIR}/audsrv_irx.c
-                COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/audsrv.irx ${IRX_GEN_DIR}/audsrv_irx.c audsrv_irx
-                DEPENDS ${IRX_DIR}/audsrv.irx
-                COMMENT "Embedding audsrv.irx"
+                    OUTPUT ${IRX_GEN_DIR}/audsrv_irx.c
+                    COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/audsrv.irx ${IRX_GEN_DIR}/audsrv_irx.c audsrv_irx
+                    DEPENDS ${IRX_DIR}/audsrv.irx
+                    COMMENT "Embedding audsrv.irx"
             )
         endif()
 
@@ -271,27 +269,27 @@ elseif(PLATFORM STREQUAL "ps2")
             target_link_options(butterscotch PRIVATE -pg)
 
             add_custom_command(
-                OUTPUT ${IRX_GEN_DIR}/bdm_irx.c
-                COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/bdm.irx ${IRX_GEN_DIR}/bdm_irx.c bdm_irx
-                DEPENDS ${IRX_DIR}/bdm.irx
-                COMMENT "Embedding bdm.irx (profiler)"
+                    OUTPUT ${IRX_GEN_DIR}/bdm_irx.c
+                    COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/bdm.irx ${IRX_GEN_DIR}/bdm_irx.c bdm_irx
+                    DEPENDS ${IRX_DIR}/bdm.irx
+                    COMMENT "Embedding bdm.irx (profiler)"
             )
             add_custom_command(
-                OUTPUT ${IRX_GEN_DIR}/bdmfs_fatfs_irx.c
-                COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/bdmfs_fatfs.irx ${IRX_GEN_DIR}/bdmfs_fatfs_irx.c bdmfs_fatfs_irx
-                DEPENDS ${IRX_DIR}/bdmfs_fatfs.irx
-                COMMENT "Embedding bdmfs_fatfs.irx (profiler)"
+                    OUTPUT ${IRX_GEN_DIR}/bdmfs_fatfs_irx.c
+                    COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/bdmfs_fatfs.irx ${IRX_GEN_DIR}/bdmfs_fatfs_irx.c bdmfs_fatfs_irx
+                    DEPENDS ${IRX_DIR}/bdmfs_fatfs.irx
+                    COMMENT "Embedding bdmfs_fatfs.irx (profiler)"
             )
             add_custom_command(
-                OUTPUT ${IRX_GEN_DIR}/usbmass_bd_irx.c
-                COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/usbmass_bd.irx ${IRX_GEN_DIR}/usbmass_bd_irx.c usbmass_bd_irx
-                DEPENDS ${IRX_DIR}/usbmass_bd.irx
-                COMMENT "Embedding usbmass_bd.irx (profiler)"
+                    OUTPUT ${IRX_GEN_DIR}/usbmass_bd_irx.c
+                    COMMAND $ENV{PS2SDK}/bin/bin2c ${IRX_DIR}/usbmass_bd.irx ${IRX_GEN_DIR}/usbmass_bd_irx.c usbmass_bd_irx
+                    DEPENDS ${IRX_DIR}/usbmass_bd.irx
+                    COMMENT "Embedding usbmass_bd.irx (profiler)"
             )
             target_sources(butterscotch PRIVATE
-                ${IRX_GEN_DIR}/bdm_irx.c
-                ${IRX_GEN_DIR}/bdmfs_fatfs_irx.c
-                ${IRX_GEN_DIR}/usbmass_bd_irx.c
+                    ${IRX_GEN_DIR}/bdm_irx.c
+                    ${IRX_GEN_DIR}/bdmfs_fatfs_irx.c
+                    ${IRX_GEN_DIR}/usbmass_bd_irx.c
             )
         endif()
     else()
@@ -347,57 +345,52 @@ elseif(PLATFORM STREQUAL "3ds")
 
     target_include_directories(butterscotch PUBLIC vendor/stb/image)
 
-    if(NOT DEFINED NOVAGL_DIR)
-        if(DEFINED ENV{NOVAGL_DIR})
-            set(NOVAGL_DIR "$ENV{NOVAGL_DIR}")
-        else()
-            set(NOVAGL_DIR "${CMAKE_SOURCE_DIR}/../NovaGL")
-        endif()
-    endif()
+    set(SHADER_SRC "${CMAKE_SOURCE_DIR}/src/3ds/shaders/render2d.v.pica")
 
-    set(GL2CITRO3D_BUILD_EXAMPLES OFF CACHE BOOL "Build NovaGL examples" FORCE)
-    add_subdirectory(${NOVAGL_DIR} ${CMAKE_BINARY_DIR}/novagl-build)
-    target_include_directories(butterscotch PRIVATE ${NOVAGL_DIR}/src)
+    ctr_add_shader_library(render2d_shader "${SHADER_SRC}")
+    dkp_add_embedded_binary_library(3ds_shaders render2d_shader)
+
+    target_include_directories(butterscotch PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/.dkp-generated/3ds_shaders")
 
     if(DEFINED ENV{DEVKITPRO})
         target_include_directories(butterscotch PRIVATE
-            $ENV{DEVKITPRO}/libctru/include
-            $ENV{DEVKITPRO}/portlibs/3ds/include
+                $ENV{DEVKITPRO}/libctru/include
+                $ENV{DEVKITPRO}/portlibs/3ds/include
         )
         target_link_directories(butterscotch PRIVATE
-            $ENV{DEVKITPRO}/libctru/lib
-            $ENV{DEVKITPRO}/portlibs/3ds/lib
+                $ENV{DEVKITPRO}/libctru/lib
+                $ENV{DEVKITPRO}/portlibs/3ds/lib
         )
     endif()
 
     target_link_libraries(butterscotch
-        SDL_mixer
-        mad
-        vorbisidec
-        ogg
-        mikmod
-        SDL
-        NovaGL
-        citro3d
-        ctru
-        bz2
-        m
+            SDL_mixer
+            mad
+            vorbisidec
+            ogg
+            mikmod
+            SDL
+            citro3d
+            ctru
+            bz2
+            m
+            3ds_shaders
     )
 
     target_compile_options(butterscotch PRIVATE
-        -O3
-        -flto
-        -marm
-        -ffast-math
-        -funroll-loops
-        -fomit-frame-pointer
-        -ffunction-sections
-        -fdata-sections
+            -O3
+            -flto
+            -marm
+            -ffast-math
+            -funroll-loops
+            -fomit-frame-pointer
+            -ffunction-sections
+            -fdata-sections
     )
 
     target_link_options(butterscotch PRIVATE
-        -flto
-        -Wl,--gc-sections
+            -flto
+            -Wl,--gc-sections
     )
 
     ctr_create_3dsx(butterscotch)

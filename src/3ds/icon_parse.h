@@ -1,20 +1,25 @@
-﻿//
+//
 // Created by efimandreev0 on 30.04.2026.
 //
 
 #ifndef BUTTERSCOTCH_ICON_PARSE_H
 #define BUTTERSCOTCH_ICON_PARSE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <NovaGL.h>
-#include "stb_image.h"
 
-GLuint extract_icon_from_exe_pe(const char *path);
-GLuint load_texture_from_file(const char *path);
-GLuint upload_rgba_texture(const uint8_t *pixels, int w, int h);
+typedef struct {
+    uint8_t *pixels;
+    int width;
+    int height;
+} IconImage;
+
+bool extract_icon_from_exe_pe(const char *path, IconImage *out);
+bool load_image_from_file(const char *path, IconImage *out);
+void IconImage_free(IconImage *image);
 
 uint16_t rd16(const uint8_t *p);
 uint32_t rd32(const uint8_t *p);
