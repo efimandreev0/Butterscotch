@@ -25,6 +25,8 @@
 
 #define MAX_BACKGROUNDS 8
 
+extern char g_next_game_path[256];
+extern bool g_game_change_requested;
 // ===[ STUB LOGGING ]===
 
 #ifdef ENABLE_VM_STUB_LOGS
@@ -4186,6 +4188,24 @@ static RValue builtinWindowHasFocus(VMContext *ctx, MAYBE_UNUSED RValue *args, M
 }
 
 // ===[ Game State Functions ]===
+
+static RValue builtinGameChange(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeUndefined();
+
+    char *new_game = RValue_toString(args[0]);
+
+    strncpy(g_next_game_path, new_game, sizeof(g_next_game_path) - 1);
+    g_next_game_path[sizeof(g_next_game_path) - 1] = '\0';
+    g_game_change_requested = true;
+
+    free(new_game);
+
+    Runner *runner = (Runner *)ctx->runner;
+    runner->shouldExit = true;
+
+    return RValue_makeUndefined();
+}
+
 static RValue builtinGameRestart(VMContext *ctx, MAYBE_UNUSED RValue *args, MAYBE_UNUSED int32_t argCount) {
     ctx->runner->pendingRoom = ROOM_RESTARTGAME;
     return RValue_makeUndefined();
@@ -8436,6 +8456,17 @@ static RValue builtin_draw_triangle_color(VMContext *ctx, RValue *args, int32_t 
     return RValue_makeUndefined();
 }
 
+static RValue builtin_draw_ellipse(VMContext *ctx, RValue *args, int32_t argCount) {
+    if (7 > argCount) return RValue_makeUndefined();
+    Runner *runner = (Runner *) ctx->runner;
+    if (runner->renderer == nullptr) return RValue_makeUndefined();
+    Renderer_drawEllipse(runner->renderer,
+                         (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]),
+                         (float) RValue_toReal(args[2]), (float) RValue_toReal(args[3]),
+                         RValue_toBool(args[6]));
+    return RValue_makeUndefined();
+}
+
 static RValue builtin_draw_ellipse_color(VMContext *ctx, RValue *args, int32_t argCount) {
     if (7 > argCount) return RValue_makeUndefined();
     Runner *runner = (Runner *) ctx->runner;
@@ -8625,6 +8656,7 @@ void VMBuiltins_registerAll(VMContext *ctx) {
     VM_registerBuiltin(ctx, "draw_line_colour", builtin_draw_line_color);
     VM_registerBuiltin(ctx, "draw_triangle_color", builtin_draw_triangle_color);
     VM_registerBuiltin(ctx, "draw_triangle_colour", builtin_draw_triangle_color);
+    VM_registerBuiltin(ctx, "draw_ellipse", builtin_draw_ellipse);
     VM_registerBuiltin(ctx, "draw_ellipse_color", builtin_draw_ellipse_color);
     VM_registerBuiltin(ctx, "draw_ellipse_colour", builtin_draw_ellipse_color);
     VM_registerBuiltin(ctx, "draw_roundrect", builtin_draw_roundrect);
@@ -8783,6 +8815,7 @@ void VMBuiltins_registerAll(VMContext *ctx) {
     VM_registerBuiltin(ctx, "window_has_focus", builtinWindowHasFocus);
 
     // Game
+    VM_registerBuiltin(ctx, "game_change", builtinGameChange);
     VM_registerBuiltin(ctx, "game_restart", builtinGameRestart);
     VM_registerBuiltin(ctx, "game_end", builtinGameEnd);
     VM_registerBuiltin(ctx, "game_save", builtin_game_save);

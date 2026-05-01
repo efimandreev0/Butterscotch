@@ -1055,9 +1055,9 @@ static GLuint safe_restore_fbo(CtrRenderer *ctx) {
     return ctx->fboCreated ? ctx->fboId : 0;
 }
 
-static void clear_surface_fbo(CtrRenderer *ctx, CtrSurface *surf) {
+static void wipe_surface(CtrRenderer *ctx, CtrSurface *surf) {
     flush_batch(ctx);
-    GLuint restoreFbo = safe_restore_fbo(ctx);
+    GLuint prev = ctx->activeFbo;
 
     glBindFramebuffer(GL_FRAMEBUFFER, surf->fbo);
     ctx->activeFbo = surf->fbo;
@@ -1066,8 +1066,9 @@ static void clear_surface_fbo(CtrRenderer *ctx, CtrSurface *surf) {
     glClearColor(0.f, 0.f, 0.f, 0.f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    glBindFramebuffer(GL_FRAMEBUFFER, restoreFbo);
-    ctx->activeFbo = restoreFbo;
+    GLuint restore = prev ? prev : (ctx->fboCreated ? ctx->fboId : 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, restore);
+    ctx->activeFbo = restore;
 }
 
 static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) {
@@ -1089,14 +1090,15 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
     }
 
     CtrSurface *surf = &ctx->surfaces[slot];
-    if (surf->fbo != 0) {
+    if (surf->fbo != 0 && surf->width == width && surf->height == height) {
         surf->used = true;
-        clear_surface_fbo(ctx, surf);
+        wipe_surface(ctx, surf);
         return (int32_t) slot;
     }
 
+    if (surf->fbo) glDeleteFramebuffers(1, &surf->fbo);
+    if (surf->tex) glDeleteTextures(1, &surf->tex);
     memset(surf, 0, sizeof(*surf));
-    GLuint restoreFbo = safe_restore_fbo(ctx);
 
     surf->width = width;
     surf->height = height;
@@ -1106,8 +1108,8 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
     glGenTextures(1, &surf->tex);
     glBindTexture(GL_TEXTURE_2D, surf->tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, surf->potW, surf->potH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
@@ -1115,12 +1117,8 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
     glBindFramebuffer(GL_FRAMEBUFFER, surf->fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, surf->tex, 0);
 
-    ctx->activeFbo = surf->fbo;
     surf->used = true;
-    clear_surface_fbo(ctx, surf);
-
-    glBindFramebuffer(GL_FRAMEBUFFER, restoreFbo);
-    ctx->activeFbo = restoreFbo;
+    wipe_surface(ctx, surf);
 
     return (int32_t) slot;
 }
@@ -1165,6 +1163,9 @@ static bool ctr_surface_set_target(Renderer *ren, int32_t surfaceId) {
     if (!surf || ctx->targetStackDepth >= 8) return false;
 
     flush_batch(ctx);
+    ctx->batchTex = 0;
+    ctx->batchCount = 0;
+
     CtrTargetState *state = &ctx->targetStack[ctx->targetStackDepth++];
     state->fbo = safe_restore_fbo(ctx);
     glGetIntegerv(GL_VIEWPORT, state->viewport);
@@ -1173,12 +1174,12 @@ static bool ctr_surface_set_target(Renderer *ren, int32_t surfaceId) {
     glBindFramebuffer(GL_FRAMEBUFFER, surf->fbo);
     ctx->activeFbo = surf->fbo;
 
-    glViewport(0, surf->potH - surf->height, surf->width, surf->height);
     glDisable(GL_SCISSOR_TEST);
+    glViewport(0, surf->potH - surf->height, surf->width, surf->height);
 
     Matrix4f proj;
     Matrix4f_identity(&proj);
-    Matrix4f_ortho(&proj, 0, surf->width, surf->height, 0, -1.f, 1.f);
+    Matrix4f_ortho(&proj, 0.f, (float)surf->width, (float)surf->height, 0.f, -1.f, 1.f);
     glMatrixMode(GL_PROJECTION);
     glLoadMatrixf(proj.m);
     ctx->currentProjection = proj;
@@ -1192,13 +1193,23 @@ static void ctr_surface_reset_target(Renderer *ren) {
     if (ctx->targetStackDepth <= 0) return;
 
     flush_batch(ctx);
+    ctx->batchTex = 0;
+    ctx->batchCount = 0;
+
     CtrTargetState state = ctx->targetStack[--ctx->targetStackDepth];
     GLuint targetFbo = state.fbo ? state.fbo : (ctx->fboCreated ? ctx->fboId : 0);
+
     glBindFramebuffer(GL_FRAMEBUFFER, targetFbo);
     ctx->activeFbo = targetFbo;
+
     glViewport(state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3]);
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3]);
+    if (state.viewport[2] > 0 && state.viewport[3] > 0) {
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3]);
+    } else {
+        glDisable(GL_SCISSOR_TEST);
+    }
+
     glMatrixMode(GL_PROJECTION);
     glLoadMatrixf(state.projection.m);
     ctx->currentProjection = state.projection;
@@ -1251,6 +1262,9 @@ static void ctr_draw_surface(Renderer *ren, int32_t surfaceId, float x, float y,
 
     CtrSurface *surf = get_surface(ctx, surfaceId);
     if (!surf) return;
+
+    flush_batch(ctx);
+
     push_render_texture_quad(ctx, surf->tex, surf->width, surf->height, surf->width, surf->height, surf->potW, surf->potH, x, y, xscale, yscale,
                              angleDeg, color, alpha);
 }
