@@ -34,6 +34,37 @@ extern char g_current_cache_dir[256];
      GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
      GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
+#define MAX_GC_TARGETS 64
+static C3D_RenderTarget* g_gc_targets[MAX_GC_TARGETS];
+static int g_gc_target_count = 0;
+
+static void safe_delete_target(CtrRenderer *ctx, C3D_RenderTarget *target) {
+    if (!target) return;
+    if (ctx->inFrame && g_gc_target_count < MAX_GC_TARGETS) {
+        g_gc_targets[g_gc_target_count++] = target;
+    } else {
+        C3D_RenderTargetDelete(target);
+    }
+}
+
+static void gc_clear_targets() {
+    for (int i = 0; i < g_gc_target_count; i++) {
+        if (g_gc_targets[i]) {
+            C3D_RenderTargetDelete(g_gc_targets[i]);
+        }
+    }
+    g_gc_target_count = 0;
+}
+
+static void gc_add_target(C3D_RenderTarget* tgt) {
+    if (!tgt) return;
+    if (g_gc_target_count < MAX_GC_TARGETS) {
+        g_gc_targets[g_gc_target_count++] = tgt;
+    } else {
+        C3D_RenderTargetDelete(tgt); // На случай переполнения
+    }
+}
+
 typedef struct {
     uint32_t magic;
     uint32_t w, h;
@@ -185,6 +216,9 @@ static void flush_batch(CtrRenderer *ctx) {
         ctx->batchTex   = NULL;
         return;
     }
+
+    GSPGPU_FlushDataCache(ctx->vbuf + ctx->batchStart, ctx->batchVerts * sizeof(CtrVertex));
+
     C3D_TexBind(0, ctx->batchTex);
     C3D_DrawArrays(GPU_TRIANGLES, ctx->batchStart, ctx->batchVerts);
     ctx->batchStart += ctx->batchVerts;
@@ -484,7 +518,7 @@ static bool surface_alloc_storage(CtrSurface *surf, int width, int height) {
     C3D_TexSetWrap  (&surf->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
     surf->target = C3D_RenderTargetCreateFromTex(&surf->tex, GPU_TEXFACE_2D, 0,
-                                                 GPU_RB_DEPTH16);
+                                                 -1);
     if (!surf->target) {
         C3D_TexDelete(&surf->tex);
         return false;
@@ -492,14 +526,26 @@ static bool surface_alloc_storage(CtrSurface *surf, int width, int height) {
     return true;
 }
 
-static void surface_release_storage(CtrSurface *surf) {
-    if (surf->target) { C3D_RenderTargetDelete(surf->target); surf->target = NULL; }
-    if (surf->tex.data) { C3D_TexDelete(&surf->tex); memset(&surf->tex, 0, sizeof(surf->tex)); }
+static void surface_release_storage(CtrRenderer *ctx, CtrSurface *surf) {
+    if (surf->target) {
+        safe_delete_target(ctx, surf->target);
+        surf->target = NULL;
+    }
+    if (surf->tex.data) {
+        C3D_TexDelete(&surf->tex);
+        memset(&surf->tex, 0, sizeof(surf->tex));
+    }
 }
 
 static void destroy_app_surface(CtrRenderer *ctx) {
-    if (ctx->appTarget) { C3D_RenderTargetDelete(ctx->appTarget); ctx->appTarget = NULL; }
-    if (ctx->appTex.data) { C3D_TexDelete(&ctx->appTex); memset(&ctx->appTex, 0, sizeof(ctx->appTex)); }
+    if (ctx->appTarget) {
+        safe_delete_target(ctx, ctx->appTarget);
+        ctx->appTarget = NULL;
+    }
+    if (ctx->appTex.data) {
+        C3D_TexDelete(&ctx->appTex);
+        memset(&ctx->appTex, 0, sizeof(ctx->appTex));
+    }
     ctx->appReady = false;
 }
 
@@ -520,7 +566,7 @@ static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh) {
     C3D_TexSetWrap  (&ctx->appTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
     ctx->appTarget = C3D_RenderTargetCreateFromTex(&ctx->appTex, GPU_TEXFACE_2D, 0,
-                                                   GPU_RB_DEPTH16);
+                                                   -1);
     if (!ctx->appTarget) {
         C3D_TexDelete(&ctx->appTex);
         memset(&ctx->appTex, 0, sizeof(ctx->appTex));
@@ -629,7 +675,7 @@ static void ctr_destroy(Renderer *ren) {
     CtrRenderer *ctx = (CtrRenderer *)ren;
 
     for (uint32_t i = 0; i < ctx->surfaceCount; i++) {
-        surface_release_storage(&ctx->surfaces[i]);
+        surface_release_storage(ctx, &ctx->surfaces[i]);
     }
     free(ctx->surfaces);
     ctx->surfaces      = NULL;
@@ -667,6 +713,7 @@ static void ctr_destroy(Renderer *ren) {
 
 static void ctr_begin_frame(Renderer *ren, int32_t gw, int32_t gh, int32_t ww, int32_t wh) {
     CtrRenderer *ctx = (CtrRenderer *)ren;
+    gc_clear_targets();
     ctx->winW  = ww;
     ctx->winH  = wh;
     ctx->gameW = gw;
@@ -748,6 +795,11 @@ static void ctr_end_frame(Renderer *ren) {
     C3D_FrameEnd(0);
     ctx->inFrame = false;
     g_frame++;
+
+    for (int i = 0; i < g_gc_target_count; i++) {
+        C3D_RenderTargetDelete(g_gc_targets[i]);
+    }
+    g_gc_target_count = 0;
 }
 
 static void ctr_flush(Renderer *ren) { flush_batch((CtrRenderer *)ren); }
@@ -1293,8 +1345,7 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
     uint32_t slot = 0;
     for (; slot < ctx->surfaceCount; slot++) {
         CtrSurface *cand = &ctx->surfaces[slot];
-        if (cand->used) continue;
-        if (cand->target == NULL || (cand->width == width && cand->height == height)) break;
+        if (!cand->used) break;
     }
     if (slot == ctx->surfaceCount) {
         ctx->surfaceCount++;
@@ -1308,11 +1359,16 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
         surf->used = true;
         flush_batch(ctx);
         if (ctx->inFrame) C3D_FrameSplit(0);
+
+        C3D_RenderTarget *oldTgt = ctx->activeTarget;
+        C3D_FrameDrawOn(surf->target);
         C3D_RenderTargetClear(surf->target, C3D_CLEAR_ALL, 0x00000000, 0);
+        if (oldTgt) C3D_FrameDrawOn(oldTgt);
+
         return (int32_t)slot;
     }
 
-    surface_release_storage(surf);
+    surface_release_storage(ctx, surf);
     memset(surf, 0, sizeof(*surf));
     if (!surface_alloc_storage(surf, width, height)) {
         memset(surf, 0, sizeof(*surf));
@@ -1322,7 +1378,11 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
 
     flush_batch(ctx);
     if (ctx->inFrame) C3D_FrameSplit(0);
+    C3D_RenderTarget *oldTgt = ctx->activeTarget;
+    C3D_FrameDrawOn(surf->target);
     C3D_RenderTargetClear(surf->target, C3D_CLEAR_ALL, 0x00000000, 0);
+    if (oldTgt) C3D_FrameDrawOn(oldTgt);
+
     return (int32_t)slot;
 }
 
@@ -1339,7 +1399,7 @@ static void ctr_free_surface(Renderer *ren, int32_t surfaceId) {
 }
 
 static bool ctr_surface_exists(Renderer *ren, int32_t surfaceId) {
-    if (surfaceId == -1) return true;
+    if (surfaceId < 0) return false;
     return get_surface((CtrRenderer *)ren, surfaceId) != NULL;
 }
 
@@ -1492,85 +1552,81 @@ static uint32_t findOrAllocTpagSlot(CtrRenderer *ctx) {
 static int32_t ctr_create_surf_ex(Renderer *ren, int32_t surfaceId,
                                   int32_t x, int32_t y, int32_t w, int32_t h,
                                   bool removeback, bool smooth, int32_t xo, int32_t yo) {
-
-    //idk what the fuck here, really strange thing
-
+    (void)removeback;
     CtrRenderer *ctx = (CtrRenderer *)ren;
     DataWin *dw = ren->dataWin;
-    (void)removeback;
 
     if (w <= 0 || h <= 0) return -1;
 
-    C3D_Tex *srcTex; int sourceW, sourceH;
+    C3D_Tex *srcTex;
+    int sourcePotW, sourcePotH;
+
     if (surfaceId == -1) {
         if (!ctx->appReady) return -1;
-        srcTex  = &ctx->appTex;
-        sourceW = ctx->appLogicW;
-        sourceH = ctx->appLogicH;
+        srcTex     = &ctx->appTex;
+        sourcePotW = ctx->appPotW;
+        sourcePotH = ctx->appPotH;
     } else {
         CtrSurface *surf = get_surface(ctx, surfaceId);
         if (!surf) return -1;
-        srcTex  = &surf->tex;
-        sourceW = surf->width;
-        sourceH = surf->height;
+        srcTex     = &surf->tex;
+        sourcePotW = surf->potW;
+        sourcePotH = surf->potH;
     }
-    (void)sourceW;
-    (void)sourceH;
 
-    flush_batch(ctx);
-    C3D_FrameSplit(0);
+    C3D_RenderTarget *oldTgt = ctx->activeTarget ? ctx->activeTarget : ctx->appTarget;
+    C3D_Mtx oldProj = ctx->currentProjection;
+    int oldVp[4] = { ctx->currentViewport[0], ctx->currentViewport[1], ctx->currentViewport[2], ctx->currentViewport[3] };
+    int oldBlend = ctx->currentBlendMode;
 
     int potW = next_pow2(w), potH = next_pow2(h);
-
     CtrAtlasChunk dstChunk;
     memset(&dstChunk, 0, sizeof(dstChunk));
-    if (!C3D_TexInit(&dstChunk.tex, (u16)potW, (u16)potH, GPU_RGBA8)) return -1;
-    C3D_TexSetFilter(&dstChunk.tex, smooth ? GPU_LINEAR : GPU_NEAREST,
-                                    smooth ? GPU_LINEAR : GPU_NEAREST);
-    C3D_TexSetWrap  (&dstChunk.tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
-    {
-        u32 fullSize = (u32)srcTex->width * srcTex->height * 4;
-        u32 *tmp = linearAlloc(fullSize);
-        if (tmp) {
-            u32 transferOut =
-                GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
-                GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-                GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-                GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
-            C3D_SyncDisplayTransfer((u32 *)srcTex->data,
-                                    GX_BUFFER_DIM(srcTex->width, srcTex->height),
-                                    tmp,
-                                    GX_BUFFER_DIM(srcTex->width, srcTex->height),
-                                    transferOut);
+    if (!C3D_TexInitVRAM(&dstChunk.tex, (u16)potW, (u16)potH, GPU_RGBA8)) {
+        if (!C3D_TexInit(&dstChunk.tex, (u16)potW, (u16)potH, GPU_RGBA8)) return -1;
+    }
+    C3D_TexSetFilter(&dstChunk.tex, smooth ? GPU_LINEAR : GPU_NEAREST, smooth ? GPU_LINEAR : GPU_NEAREST);
+    C3D_TexSetWrap(&dstChunk.tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
-            u32 *cropped = linearAlloc((size_t)potW * potH * 4);
-            if (cropped) {
-                memset(cropped, 0, (size_t)potW * potH * 4);
-                int srcOffsetY = (int)srcTex->height - y - h;
-                if (srcOffsetY < 0) srcOffsetY = 0;
-                for (int row = 0; row < h; row++) {
-                    int sy = srcOffsetY + row;
-                    if (sy < 0 || sy >= (int)srcTex->height) continue;
-                    if (x < 0 || x + w > (int)srcTex->width) continue;
-                    memcpy(&cropped[row * potW],
-                           &tmp[sy * (int)srcTex->width + x],
-                           (size_t)w * 4);
-                }
-                u32 transferTile =
-                    GX_TRANSFER_FLIP_VERT(1) | GX_TRANSFER_OUT_TILED(1) | GX_TRANSFER_RAW_COPY(0) |
-                    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-                    GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-                    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
-                C3D_SyncDisplayTransfer(cropped, GX_BUFFER_DIM(potW, potH),
-                                        (u32 *)dstChunk.tex.data,
-                                        GX_BUFFER_DIM(potW, potH),
-                                        transferTile);
-                C3D_TexFlush(&dstChunk.tex);
-                linearFree(cropped);
-            }
-            linearFree(tmp);
-        }
+    C3D_RenderTarget *tmpTarget = C3D_RenderTargetCreateFromTex(&dstChunk.tex, GPU_TEXFACE_2D, 0, -1);
+    if (tmpTarget) {
+        bind_target(ctx, tmpTarget);
+        C3D_RenderTargetClear(tmpTarget, C3D_CLEAR_ALL, 0x00000000, 0);
+
+        flush_batch(ctx);
+        C3D_SetViewport(0, 0, w, h);
+        C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+
+        C3D_Mtx proj;
+        Mtx_Identity(&proj);
+        Mtx_Ortho(&proj, 0.f, (float)w, (float)h, 0.f, -1.f, 1.f, true);
+        apply_projection(ctx, &proj);
+
+        float u0 = (float)x / (float)sourcePotW;
+        float u1 = (float)(x + w) / (float)sourcePotW;
+        float vTop = (float)(sourcePotH - y) / (float)sourcePotH;
+        float vBot = (float)(sourcePotH - (y + h)) / (float)sourcePotH;
+
+        float white[4] = {1.f, 1.f, 1.f, 1.f};
+
+        push_quad(ctx, srcTex,
+                  0, 0,  w, 0,
+                  w, h,  0, h,
+                  u0, vBot, u1, vTop, white);
+
+        flush_batch(ctx);
+        C3D_FrameSplit(0);
+
+        gc_add_target(tmpTarget);
+
+        bind_target(ctx, oldTgt);
+        set_viewport_logical(ctx, oldTgt, oldVp[0], oldVp[1], oldVp[2], oldVp[3]);
+        apply_projection(ctx, &oldProj);
+        apply_blend(ctx, oldBlend);
+    } else {
+        C3D_TexDelete(&dstChunk.tex);
+        return -1;
     }
 
     dstChunk.valid  = true;
