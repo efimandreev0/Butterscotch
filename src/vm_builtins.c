@@ -6371,6 +6371,9 @@ static RValue builtinMakeColorHsv(MAYBE_UNUSED VMContext* ctx, RValue* args, int
     GMLReal s = RValue_toReal(args[1]) / 255.0;
     GMLReal v = RValue_toReal(args[2]) / 255.0;
 
+    h = GMLReal_fmod(h, 360.0);
+    if (h < 0.0) h += 360.0;
+
     GMLReal c = v * s;
     GMLReal x = c * (1.0 - GMLReal_fabs(GMLReal_fmod(h / 60.0, 2.0) - 1.0));
     GMLReal m = v - c;
@@ -6382,6 +6385,12 @@ static RValue builtinMakeColorHsv(MAYBE_UNUSED VMContext* ctx, RValue* args, int
     else if (180.0 > h && h >= 120.0) { r1 = 0; g1 = c; b1 = x; }
     else if (120.0 > h && h >= 60.0)  { r1 = x; g1 = c; b1 = 0; }
     else                               { r1 = c; g1 = x; b1 = 0; }
+    if (h >= 300.0)      { r1 = c; g1 = 0; b1 = x; }
+    else if (h >= 240.0) { r1 = x; g1 = 0; b1 = c; }
+    else if (h >= 180.0) { r1 = 0; g1 = x; b1 = c; }
+    else if (h >= 120.0) { r1 = 0; g1 = c; b1 = x; }
+    else if (h >= 60.0)  { r1 = x; g1 = c; b1 = 0; }
+    else                  { r1 = c; g1 = x; b1 = 0; }
 
     int32_t r = (int32_t) GMLReal_round((r1 + m) * 255.0);
     int32_t g = (int32_t) GMLReal_round((g1 + m) * 255.0);

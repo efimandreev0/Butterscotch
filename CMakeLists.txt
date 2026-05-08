@@ -1,12 +1,17 @@
 cmake_minimum_required(VERSION 3.21)
 
-if(PLATFORM STREQUAL "3ds")
-    if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+    if(PLATFORM STREQUAL "3ds")
         if(NOT DEFINED ENV{DEVKITPRO})
             message(FATAL_ERROR "Please define DEVKITPRO environment variable to point to your SDK path!")
         endif()
-
         set(CMAKE_TOOLCHAIN_FILE "$ENV{DEVKITPRO}/cmake/3DS.cmake" CACHE PATH "toolchain file")
+
+    elseif(PLATFORM STREQUAL "vita")
+        if(NOT DEFINED ENV{VITASDK})
+            message(FATAL_ERROR "Please define VITASDK environment variable to point to your SDK path!")
+        endif()
+        set(CMAKE_TOOLCHAIN_FILE "$ENV{VITASDK}/share/vita.toolchain.cmake" CACHE PATH "toolchain file")
     endif()
 endif()
 
@@ -66,6 +71,8 @@ if(PLATFORM STREQUAL "ctr-cache-tool")
 
     add_executable(ctr-cache-preprocess
         tools/ctr_cache_preprocess.c
+        tools/ctr_audio_preprocess.c     # audio bundle is part of the same tool
+        tools/ctr_adpcm_encode.c         # DSP-ADPCM encoder for SFX
         src/binary_reader.c
         src/data_win.c
         src/3ds/ctr_texture_cache.c
@@ -84,8 +91,15 @@ if(PLATFORM STREQUAL "ctr-cache-tool")
         ${CMAKE_SOURCE_DIR}/vendor/bzip2
         ${CMAKE_SOURCE_DIR}/vendor/stb/ds
         ${CMAKE_SOURCE_DIR}/vendor/stb/image
+        ${CMAKE_SOURCE_DIR}/vendor/stb/vorbis
     )
     target_link_libraries(ctr-cache-preprocess m)
+    if(NOT MSVC)
+        # stb_vorbis emits a wall of unused-but-set / sign-conversion warnings
+        # we can't fix without forking the upstream single-header.
+        set_source_files_properties(tools/ctr_audio_preprocess.c PROPERTIES
+            COMPILE_FLAGS "-Wno-unused-but-set-variable -Wno-unused-function -Wno-sign-compare -Wno-unused-variable")
+    endif()
 
     # Silence the slew of warnings the upstream bzip2 sources emit (unused
     # parameters, sign conversions etc.) - they are not our code to clean up.
@@ -103,6 +117,7 @@ if(PLATFORM STREQUAL "ctr-cache-tool")
 
     return()
 endif()
+
 
 file(GLOB SOURCES src/*.c)
 # Platform specific files builds
@@ -401,6 +416,80 @@ elseif(PLATFORM STREQUAL "ps2")
                 ${CMAKE_SOURCE_DIR}/ps2dev-headers/gcc-include
         )
     endif()
+elseif(PLATFORM STREQUAL "vita")
+    add_compile_definitions(USE_FLOAT_REALS)
+    add_compile_definitions(NO_RVALUE_INT64)
+    add_compile_definitions(PLATFORM_PSVITA)
+
+    option(ENABLE_VM_GML_PROFILER "Enable Butterscotch VM/interpreter profiler" ON)
+    if(ENABLE_VM_GML_PROFILER)
+        add_compile_definitions(ENABLE_VM_GML_PROFILER)
+    endif()
+
+    option(ENABLE_VM_TRACING "Enable Butterscotch VM/interpreter tracing checks" OFF)
+    if(ENABLE_VM_TRACING)
+        add_compile_definitions(ENABLE_VM_TRACING)
+    endif()
+
+    option(ENABLE_VM_OPCODE_PROFILER "Enable Butterscotch VM opcode count profiler" OFF)
+    if(ENABLE_VM_OPCODE_PROFILER)
+        add_compile_definitions(ENABLE_VM_OPCODE_PROFILER)
+    endif()
+
+    option(ENABLE_VM_RESOLVE_LOGS "Log every var read/write that fails to resolve to an instance (very noisy on 3DS)" OFF)
+    if(ENABLE_VM_RESOLVE_LOGS)
+        add_compile_definitions(ENABLE_VM_RESOLVE_LOGS)
+    endif()
+
+    option(ENABLE_SPATIAL_GRID_LOGS "Enable Spatial Grid logs" OFF)
+    if(ENABLE_SPATIAL_GRID_LOGS)
+        add_compile_definitions(ENABLE_SPATIAL_GRID_LOGS)
+    endif()
+
+    option(ENABLE_VM_STUB_LOGS "Enable VM unknown/stubbed function logs" ON)
+    if(ENABLE_VM_STUB_LOGS)
+        add_compile_definitions(ENABLE_VM_STUB_LOGS)
+    endif()
+
+    target_include_directories(butterscotch PUBLIC vendor/stb/image)
+    target_include_directories(butterscotch PUBLIC vendor/stb/vorbis)
+
+    target_link_libraries(butterscotch
+            -Wl,--whole-archive pthread -Wl,--no-whole-archive
+            m
+            z
+            stdc++
+            vorbis
+            vorbisfile
+            ogg
+            vitaGL
+            vitashark
+            soloud
+            mathneon
+            SceShaccCgExt
+            taihen_stub
+            kubridge_stub
+            SceAppMgr_stub
+            SceAppUtil_stub
+            SceAudio_stub
+            SceAudioIn_stub
+            SceCtrl_stub
+            SceCommonDialog_stub
+            SceDisplay_stub
+            SceKernelDmacMgr_stub
+            SceRazorHud_stub
+            SceRazorCapture_stub
+            SceFios2_stub
+            SceGxm_stub
+            SceLibcBridge_stub
+            SceShaccCg_stub
+            SceSysmodule_stub
+            ScePower_stub
+            SceTouch_stub
+            SceVshBridge_stub
+            SceMotion_stub
+            SceNpTrophy_stub
+    )
 elseif(PLATFORM STREQUAL "3ds")
     add_compile_definitions(USE_FLOAT_REALS)
     add_compile_definitions(NO_RVALUE_INT64)

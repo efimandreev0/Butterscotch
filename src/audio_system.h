@@ -38,6 +38,12 @@ typedef struct {
     bool (*groupIsLoaded)(AudioSystem* audio, int32_t groupIndex);
     int32_t (*createStream)(AudioSystem* audio, const char* filename);
     bool (*destroyStream)(AudioSystem* audio, int32_t streamIndex);
+    // Optional: invoked by Runner whenever the active room changes.
+    // Backends use this to bulk-prefetch any sound the room is likely to
+    // need (currently: every sound that has ever been played in the current
+    // session) so battle scenes don't stutter on first-play decode.
+    // Pass NULL if the backend doesn't care.
+    void (*onRoomChanged)(AudioSystem* audio, int32_t roomIndex);
 } AudioSystemVtable;
 
 // ===[ AudioSystem Base Struct ]===

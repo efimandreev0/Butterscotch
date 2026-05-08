@@ -1,5 +1,6 @@
 #include "data_win.h"
 #include "ctr_texture_cache.h"
+#include "ctr_audio_preprocess.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -115,16 +116,28 @@ static int process_one(const char *dataWinPath, const char *cacheDir, const char
 
     char atlasPath[512];
     CtrTextureCache_indexPath(atlasPath, sizeof(atlasPath));
-    bool ok = CtrTextureCache_indexIsCurrentPath(atlasPath);
+    bool textureOk = CtrTextureCache_indexIsCurrentPath(atlasPath);
     DataWin_free(dw);
 
-    if (!ok) {
+    if (!textureOk) {
         fprintf(stderr, "[%s] cache build failed or produced stale atlas: %s\n",
                 label, atlasPath);
+        // Audio is independent: bail before the audio pass on a texture failure
+        // to keep error output focused.
         return 1;
     }
+    fprintf(stderr, "[%s] textures ready: %s\n", label, atlasPath);
 
-    fprintf(stderr, "[%s] ready: %s\n", label, atlasPath);
+    // Audio side. Re-parses data.win because its parser options are different
+    // (we want SOND/AGRP/AUDO and don't need the texture metadata). Failures
+    // here are non-fatal — the runtime falls back to "no audio" silently if
+    // audio.bin is missing or unreadable.
+    int audioRc = CtrAudioPreprocess_run(dataWinPath, cacheDir, label);
+    if (audioRc != 0) {
+        fprintf(stderr, "[%s] audio preprocess failed (rc=%d) — runtime will boot without audio\n",
+                label, audioRc);
+    }
+
     return 0;
 }
 

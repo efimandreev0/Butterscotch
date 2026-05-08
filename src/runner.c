@@ -423,6 +423,11 @@ void Runner_drawBackgrounds(Runner* runner, bool foreground) {
         if (!bg->visible || bg->foreground != foreground) continue;
         if (0 > bg->backgroundIndex) continue;
 
+        float assumed_depth = foreground ? -10000.0f : 150000.0f;
+        if (runner->renderer->vtable->set3DDepthOffset) {
+            runner->renderer->vtable->set3DDepthOffset(runner->renderer, assumed_depth);
+        }
+
         int32_t tpagIndex = Renderer_resolveBackgroundTPAGIndex(dataWin, bg->backgroundIndex);
         // Bound check on BOTH ends: < 0 is the "unresolved" sentinel from
         // resolveAllTPAGReferences, but a stale/garbage value can still pass
@@ -490,6 +495,10 @@ static void fireDrawSubtype(Runner* runner, Drawable* drawables, int32_t drawabl
         int32_t ownerObjectIndex = -1;
         int32_t codeId = ResolvedEventTable_lookup(&runner->eventTable, inst->objectIndex, slot, &ownerObjectIndex);
         if (0 > codeId) continue;
+
+        if (runner->renderer->vtable->set3DDepthOffset) {
+            runner->renderer->vtable->set3DDepthOffset(runner->renderer, (float)inst->depth);
+        }
         Runner_executeResolvedEvent(runner, inst, EVENT_DRAW, subtype, codeId, ownerObjectIndex);
     }
 }
@@ -651,6 +660,11 @@ void Runner_draw(Runner* runner) {
     // Draw interleaved tiles and instances
     repeat(drawableCount, i) {
         Drawable* d = &drawables[i];
+
+        if (runner->renderer->vtable->set3DDepthOffset) {
+            runner->renderer->vtable->set3DDepthOffset(runner->renderer, (float)d->depth);
+        }
+
         if (d->type == DRAWABLE_TILE) {
             if (runner->renderer != nullptr) {
                 RoomTile* tile = &room->tiles[d->tileIndex];
@@ -1223,6 +1237,15 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
 
     if (runner->renderer != nullptr && runner->renderer->vtable->onRoomChanged != nullptr) {
         runner->renderer->vtable->onRoomChanged(runner->renderer, roomIndex);
+    }
+
+    // Same idea as renderer prefetch: warm any audio that this session has
+    // already touched. Battle scenes get pummelled with audio_play_sound
+    // calls in the same frame as a fresh enemy spawns, so the per-call
+    // decode latency stacks into a ~50-200 ms hitch unless we pre-load.
+    if (runner->audioSystem != nullptr &&
+        runner->audioSystem->vtable->onRoomChanged != nullptr) {
+        runner->audioSystem->vtable->onRoomChanged(runner->audioSystem, roomIndex);
     }
 
     SavedRoomState* savedState = &runner->savedRoomStates[roomIndex];

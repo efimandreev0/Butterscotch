@@ -1,15 +1,13 @@
 <h1 align="center">🥧 Butterscotch 🥧</h1>
 
+## Original Discord:
 <!-- Badges, about the GitHub repository itself -->
 <p align="center">
 <a href="https://discord.gg/2gQR7t3WJR"><img src="https://img.shields.io/discord/1406856655920168971?color=5865F2&logo=discord&logoColor=white&label=discord"></a>
 </p>
 
 > [!IMPORTANT]  
-> This project DOES contain the usage of Generative AI in the code.
-
-> [!IMPORTANT]
-> Butterscotch-3DS is simply just a GML runner in C for the 3DS and game compatability is NOT guarenteed, nor does it have features like bottom screen or other 3DS exclusive quirks.
+> This project was created using Generative AI
 
 ## Running on Nintendo 3DS
 

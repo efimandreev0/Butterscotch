@@ -521,7 +521,7 @@ static void parseSOND(BinaryReader* reader, DataWin* dw) {
 
     if (count == 0) { free(ptrs); s->sounds = nullptr; return; }
 
-    s->sounds = safeMalloc(count * sizeof(Sound));
+    s->sounds = bigMalloc(count * sizeof(Sound));
     repeat(count, i) {
         BinaryReader_seek(reader, ptrs[i]);
         Sound* snd = &s->sounds[i];
@@ -574,7 +574,7 @@ static void parseSPRT(BinaryReader* reader, DataWin* dw, bool skipLoadingPrecise
 
     if (count == 0) { free(ptrs); s->sprites = nullptr; return; }
 
-    s->sprites = safeCalloc(count, sizeof(Sprite));
+    s->sprites = bigCalloc(count, sizeof(Sprite));
     repeat(count, i) {
         BinaryReader_seek(reader, ptrs[i]);
         Sprite* spr = &s->sprites[i];
@@ -1099,7 +1099,7 @@ static void parseOBJT(BinaryReader* reader, DataWin* dw) {
         }
     }
 
-    o->objects = safeMalloc(count * sizeof(GameObject));
+    o->objects = bigMalloc(count * sizeof(GameObject));
     repeat(count, i) {
         BinaryReader_seek(reader, ptrs[i]);
         GameObject* obj = &o->objects[i];
@@ -1802,7 +1802,7 @@ static void parseTPAG(BinaryReader* reader, DataWin* dw) {
     // Выделяем на 1 элемент больше. Этот последний слот будет "фейковым" для всех -1 индексов.
     // Это лечит краш движка (unmapped Read16 @ 0x00000012) из-за попытки прочитать boundingHeight по NULL указателю.
     t->count = count + 1;
-    t->items = safeMalloc(t->count * sizeof(TexturePageItem));
+    t->items = bigMalloc(t->count * sizeof(TexturePageItem));
 
     repeat(count, i) {
         BinaryReader_seek(reader, ptrs[i]);
@@ -2007,7 +2007,7 @@ static void parseCODE(BinaryReader* reader, DataWin* dw, uint32_t chunkLength, s
         return;
     }
 
-    c->entries = safeMalloc(codeCount * sizeof(CodeEntry));
+    c->entries = bigMalloc(codeCount * sizeof(CodeEntry));
     repeat(codeCount, i) {
         BinaryReader_seek(reader, codePtrs[i]);
         CodeEntry* entry = &c->entries[i];
@@ -2064,7 +2064,7 @@ static void parseVARI(BinaryReader* reader, DataWin* dw, uint32_t chunkLength) {
     v->variableCount = (chunkLength - 12) / 20;
 
     if (v->variableCount > 0) {
-        v->variables = safeMalloc(v->variableCount * sizeof(Variable));
+        v->variables = bigMalloc(v->variableCount * sizeof(Variable));
         repeat(v->variableCount, i) {
             Variable* var = &v->variables[i];
             var->name = readStringPtr(reader, dw);
@@ -2084,7 +2084,7 @@ static void parseFUNC(BinaryReader* reader, DataWin* dw) {
     // Part 1: Functions SimpleList
     f->functionCount = BinaryReader_readUint32(reader);
     if (f->functionCount > 0) {
-        f->functions = safeMalloc(f->functionCount * sizeof(Function));
+        f->functions = bigMalloc(f->functionCount * sizeof(Function));
         repeat(f->functionCount, i) {
             f->functions[i].name = readStringPtr(reader, dw);
             f->functions[i].occurrences = BinaryReader_readUint32(reader);
@@ -2619,8 +2619,8 @@ void DataWin_free(DataWin* dw) {
         free(dw->extn.extensions);
     }
 
-    // SOND
-    free(dw->sond.sounds);
+    // SOND (allocated via bigMalloc — see parseSOND)
+    bigFree(dw->sond.sounds);
 
     // AGRP
     free(dw->agrp.audioGroups);
@@ -2638,7 +2638,8 @@ void DataWin_free(DataWin* dw) {
             // Runtime-allocated sprites (indices >= parsedCount) own their synthesized name
             if (i >= dw->sprt.parsedCount) free((char*) dw->sprt.sprites[i].name);
         }
-        free(dw->sprt.sprites);
+        // The spine itself was bigCalloc'd in parseSPRT.
+        bigFree(dw->sprt.sprites);
     }
 
 
@@ -2716,7 +2717,8 @@ void DataWin_free(DataWin* dw) {
                 }
             }
         }
-        free(dw->objt.objects);
+        // The objects array spine was bigMalloc'd in parseOBJT.
+        bigFree(dw->objt.objects);
     }
 
     // ROOM
@@ -2727,17 +2729,17 @@ void DataWin_free(DataWin* dw) {
         free(dw->room.rooms);
     }
 
-    // TPAG
-    free(dw->tpag.items);
+    // TPAG (bigMalloc in parseTPAG)
+    bigFree(dw->tpag.items);
 
-    // CODE
-    free(dw->code.entries);
+    // CODE (bigMalloc in parseCODE)
+    bigFree(dw->code.entries);
 
-    // VARI
-    free(dw->vari.variables);
+    // VARI (bigMalloc in parseVARI)
+    bigFree(dw->vari.variables);
 
-    // FUNC
-    free(dw->func.functions);
+    // FUNC (bigMalloc in parseFUNC)
+    bigFree(dw->func.functions);
     if (dw->func.codeLocals) {
         repeat(dw->func.codeLocalsCount, i) {
             free(dw->func.codeLocals[i].locals);
@@ -2858,8 +2860,15 @@ uint32_t DataWin_allocSpriteSlot(DataWin* dw, uint32_t startIndex) {
         }
     }
     newIndex = dw->sprt.count;
+    uint32_t oldSpritesCount = dw->sprt.count;
     dw->sprt.count++;
-    dw->sprt.sprites = safeRealloc(dw->sprt.sprites, dw->sprt.count * sizeof(Sprite));
+    // sprt.sprites came out of bigCalloc in parseSPRT (linear arena on 3DS),
+    // so we must grow with bigRealloc — feeding the linear pointer into a
+    // regular realloc smashes the heap allocator and crashes in malloc
+    // internals (`_malloc_update_mallinfo`).
+    dw->sprt.sprites = bigRealloc(dw->sprt.sprites,
+                                  (size_t)oldSpritesCount * sizeof(Sprite),
+                                  (size_t)dw->sprt.count * sizeof(Sprite));
     memset(&dw->sprt.sprites[newIndex], 0, sizeof(Sprite));
 assignName:
     // Match the native runner: set a "__newsprite<N>" name so asset_get_index can find it.

@@ -15,6 +15,25 @@
 
 #include "stb_ds.h"
 
+// Big-array allocator. The 3DS heap is tiny (~25 MB of usable space after
+// the runtime, asset metadata and stb_ds tables grab their share); a single
+// modern data.win can blow past it just on globalVars + funcCallCache +
+// per-code locals maps. Push those to linear RAM instead — we have ~48 MB
+// of it and the access patterns are sequential array reads/writes that the
+// L1 cache handles equally well from either arena.
+#ifdef __3DS__
+#include <3ds.h>
+#define VM_BIG_ALLOC(sz)         linearAlloc(sz)
+#define VM_BIG_CALLOC(n, sz)     ({ size_t _b = (size_t)(n) * (size_t)(sz); \
+                                    void* _p = linearAlloc(_b); \
+                                    if (_p) memset(_p, 0, _b); _p; })
+#define VM_BIG_FREE(ptr)         do { if ((ptr) != nullptr) linearFree(ptr); } while (0)
+#else
+#define VM_BIG_ALLOC(sz)         malloc(sz)
+#define VM_BIG_CALLOC(n, sz)     calloc((n), (sz))
+#define VM_BIG_FREE(ptr)         free(ptr)
+#endif
+
 // Maximum number of local variables per code entry (stack-allocated arrays in VM_executeCode/VM_callCodeIndex)
 #define MAX_CODE_LOCALS 128
 
@@ -3267,16 +3286,26 @@ VMContext* VM_create(DataWin* dataWin) {
     }
 
     ctx->globalVarCount = maxGlobalVarID;
-    ctx->globalVars = safeCalloc(maxGlobalVarID, sizeof(RValue));
+    // Big array (~1 MB on Deltarune Chapter 3 with 63841 globals); push it
+    // to linear RAM via VM_BIG_CALLOC to keep heap headroom for stb_ds
+    // hashmaps and Mix_Chunk PCM that can't live elsewhere.
+    ctx->globalVars = (RValue*) VM_BIG_CALLOC(maxGlobalVarID, sizeof(RValue));
+    if (ctx->globalVars == nullptr) {
+        fprintf(stderr, "FATAL: VM_BIG_CALLOC(%u, %zu) for globalVars failed\n",
+                maxGlobalVarID, sizeof(RValue));
+        abort();
+    }
     repeat(maxGlobalVarID, i) {
         ctx->globalVars[i].type = RVALUE_UNDEFINED;
     }
 
     ctx->currentCodeIndex = -1;
 
-    // V17+ static initialization tracking
+    // V17+ static initialization tracking. One byte per CODE entry; in big
+    // games (Deltarune Chapter 3 has ~30k entries) this is still under
+    // 32 KB but the extra heap pressure is silly when we have linear room.
     if (dataWin->gen8.bytecodeVersion >= 17) {
-        ctx->staticInitialized = safeCalloc(dataWin->code.count, sizeof(bool));
+        ctx->staticInitialized = (bool*) VM_BIG_CALLOC(dataWin->code.count, sizeof(bool));
     } else {
         ctx->staticInitialized = nullptr;
     }
@@ -3369,7 +3398,11 @@ VMContext* VM_create(DataWin* dataWin) {
     // We NEED to do it with the "code.count" because YoYo Games in their infinite wisdom thought "what if... we just didn't include some local variables in the localVars map? heck, sometimes we can just NOT include any CodeLocals!"... fun!
     ctx->codeLocalsSlotMaps = nullptr;
     if (dataWin->gen8.bytecodeVersion >= 17) {
-        ctx->codeLocalsSlotMaps = safeCalloc(dataWin->code.count, sizeof(*ctx->codeLocalsSlotMaps));
+        // One IntIntHashMap header per CODE entry. The internal entries arrays
+        // each hashmap allocates lazily stay on the heap (small, per-script),
+        // but the spine array itself is large enough to be worth offloading.
+        ctx->codeLocalsSlotMaps = VM_BIG_CALLOC(dataWin->code.count,
+                                                sizeof(*ctx->codeLocalsSlotMaps));
     }
 
     // Register built-in functions
@@ -3377,8 +3410,14 @@ VMContext* VM_create(DataWin* dataWin) {
 
     // Pre-resolve all FUNC entries to cached builtin pointers or script code indices.
     // This eliminates per-call string hash lookups in handleCall.
+    // ~130 KB on Deltarune Chapter 3 (11012 funcs × 12 bytes); to linear.
     ctx->funcCallCacheCount = dataWin->func.functionCount;
-    ctx->funcCallCache = safeMalloc(dataWin->func.functionCount * sizeof(FuncCallCache));
+    ctx->funcCallCache = (FuncCallCache*) VM_BIG_ALLOC(
+        dataWin->func.functionCount * sizeof(FuncCallCache));
+    if (ctx->funcCallCache == nullptr) {
+        fprintf(stderr, "FATAL: VM_BIG_ALLOC for funcCallCache failed\n");
+        abort();
+    }
     uint32_t missingFuncCount = 0;
     repeat(dataWin->func.functionCount, i) {
         const char* name = dataWin->func.functions[i].name;
@@ -4277,8 +4316,8 @@ void VM_free(VMContext* ctx) {
     ctx->opcodeRValueTypeCounts = nullptr;
 #endif
 
-    // Free global vars array itself
-    free(ctx->globalVars);
+    // Free global vars array itself (allocated via VM_BIG_ALLOC).
+    VM_BIG_FREE(ctx->globalVars);
     repeat((int32_t) hmlen(ctx->globalArrayMap), i) {
         RValue_free(&ctx->globalArrayMap[i].value);
     }
@@ -4313,8 +4352,8 @@ void VM_free(VMContext* ctx) {
     shfree(ctx->stackToBeTraced);
 #endif
 
-    // Free function call cache
-    free(ctx->funcCallCache);
+    // Free function call cache (allocated via VM_BIG_ALLOC).
+    VM_BIG_FREE(ctx->funcCallCache);
 
     // Free cross-reference map
     if (ctx->crossRefMap != nullptr) {
@@ -4328,15 +4367,17 @@ void VM_free(VMContext* ctx) {
     shfree(ctx->builtinMap);
     ctx->registeredBuiltinFunctions = false;
 
-    // Free V17+ static tracking
-    free(ctx->staticInitialized);
+    // Free V17+ static tracking (allocated via VM_BIG_ALLOC).
+    VM_BIG_FREE(ctx->staticInitialized);
 
     // Free per-code varID -> slot maps (BC17+ only; nullptr otherwise).
+    // The IntIntHashMap_free on each entry releases its internal heap-side
+    // entries[] array; the spine itself was VM_BIG_ALLOC'd.
     if (ctx->codeLocalsSlotMaps != nullptr) {
         repeat(ctx->dataWin->code.count, i) {
             IntIntHashMap_free(&ctx->codeLocalsSlotMaps[i]);
         }
-        free(ctx->codeLocalsSlotMaps);
+        VM_BIG_FREE(ctx->codeLocalsSlotMaps);
         ctx->codeLocalsSlotMaps = nullptr;
     }
 
