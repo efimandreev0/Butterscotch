@@ -5,6 +5,12 @@
 <a href="https://discord.gg/2gQR7t3WJR"><img src="https://img.shields.io/discord/1406856655920168971?color=5865F2&logo=discord&logoColor=white&label=discord"></a>
 </p>
 
+> [!IMPORTANT]  
+> This project DOES contain the usage of Generative AI in the code.
+
+> [!IMPORTANT]
+> Butterscotch-3DS is simply just a GML runner in C for the 3DS and game compatability is NOT guarenteed, nor does it have features like bottom screen or other 3DS exclusive quirks.
+
 ## Running on Nintendo 3DS
 
 First, install the provided `.cia` file on your console (using FBI or your preferred installer).
@@ -40,9 +46,9 @@ For the game to run on the 3DS hardware, the files need to be preprocessed. You 
 
 ### Current Playability Status
 Here is what we've tested on actual 3DS hardware so far:
-* **Undertale:** Fully playable. A complete True Pacifist route has been tested and beaten from start to finish.
-* **Deltarune:** Chapters 1, 2, and 3 have been successfully tested to boot. Chapter 4 also booting, but isn't working.
-* **WARNING:** Mods can don't work on Butterscotch-3DS.
+* **Undertale:** Fully playable. A complete True Pacifist route has been tested and beaten from start to finish, with minor lag spikes in intensive areas.
+* **Deltarune:** Chapters 1, 2, and 3 have been successfully tested to boot. Chapter 4 also booting, but isn't working. This can be bypassed by save editing past the first intro, but it will still remain unplayable from The Dark Sanctuary on. **DELTARUNE may not be playable in some areas or may be extremely slow.**
+* **WARNING:** Mods are NOT guarenteed to work Butterscotch-3DS.
 
 > [!IMPORTANT]  
 > Butterscotch is still VERY early in development and it is NOT that good yet.
