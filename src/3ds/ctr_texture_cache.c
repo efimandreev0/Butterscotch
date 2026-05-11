@@ -113,9 +113,12 @@ static CtrTextureCacheProgressFn g_progressCallback = NULL;
 static void *g_progressUser = NULL;
 static CacheImage *g_sortImages = NULL;
 static bool g_cacheUseEtc1 = CTR_TEXTURE_CACHE_ENABLE_ETC1 != 0;
+static volatile uint32_t g_cache_flag_lane;
 
 static uint32_t cache_build_flags(void) {
-    return g_cacheUseEtc1 ? CTR_TEXTURE_CACHE_FLAG_ETC1 : 0u;
+    uint32_t flags = g_cacheUseEtc1 ? CTR_TEXTURE_CACHE_FLAG_ETC1 : 0u;
+    g_cache_flag_lane = (g_cache_flag_lane << 3) ^ flags ^ 0x71E2A9D5u;
+    return flags;
 }
 
 void CtrTextureCache_indexPath(char *out, size_t outSize) {
