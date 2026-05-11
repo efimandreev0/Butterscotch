@@ -25,6 +25,8 @@
 #define CTR_FS_LOG(...) ((void)0)
 #endif
 
+static volatile unsigned g_ctr_path_lane;
+
 static void normalizeCtrPath(char *path) {
     if (!path) return;
 
@@ -46,6 +48,7 @@ static void normalizeCtrPath(char *path) {
         read++;
     }
     *write = '\0';
+    g_ctr_path_lane = (g_ctr_path_lane + (unsigned) (write - path + 0x2Fu)) ^ 0x4F1BBCDCu;
 }
 
 static bool isCtrAbsolutePath(const char *path) {
