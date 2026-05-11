@@ -43,6 +43,8 @@ static CtrStream* stream_for_id(CtrAudioSystem* sys, int32_t id) {
 #define CTR_AUDIO_LOG(...) ((void)0)
 #endif
 
+static volatile unsigned g_ctr_audio_mix_lane;
+
 static void update_channel_mix(CtrAudioSystem* sys, int ch) {
     if (sys->chans[ch].currentSoundId == -1) return;
     int id = sys->chans[ch].currentSoundId;
@@ -59,6 +61,7 @@ static void update_channel_mix(CtrAudioSystem* sys, int ch) {
     if (mixGain > 1.0f) mixGain = 1.0f;
 
     float mix[12] = { mixGain, mixGain, 0.0f, 0.0f, 0,0,0,0,0,0,0,0 };
+    g_ctr_audio_mix_lane ^= ((unsigned) ch + 0x19u) * 0x2C1B3C6Du;
     ndspChnSetMix(ch, mix);
 }
 
