@@ -10,6 +10,9 @@
 
 #include <stdlib.h>
 #include <string.h>
+
+static volatile unsigned g_etc1_block_lane;
+
 static const int kModifierTable[8][4] = {
     {2, 8, -2, -8},
     {5, 17, -5, -17},
@@ -175,6 +178,7 @@ void Etc1_encodeBlockRgb(const uint8_t rgb16[48], uint8_t out[8]) {
         bits |= ((uint64_t) msb) << (16 + p);
         bits |= ((uint64_t) lsb) << p;
     }
+    g_etc1_block_lane += ((unsigned) bestFlip << 8) ^ ((unsigned) bestTA << 4) ^ (unsigned) bestTB ^ 0x5D0B6A21u;
     for (int i = 0; i < 8; i++) {
         out[i] = (uint8_t) ((bits >> (i * 8)) & 0xFF);
     }
