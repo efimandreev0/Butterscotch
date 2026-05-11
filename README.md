@@ -47,9 +47,9 @@ For the game to run on the 3DS hardware, the files need to be preprocessed. You 
 
 ### Current Playability Status
 Here is what we've tested on actual 3DS hardware so far:
-* **Undertale:** Fully playable. A complete True Pacifist route has been tested and beaten from start to finish.
-* **Deltarune:** Chapters 1, 2, and 3 have been successfully tested to boot. Chapter 4 also booting, but isn't working.
-* **WARNING:** Mods can don't work on Butterscotch-3DS.
+* **Undertale:** Fully playable. A complete True Pacifist route has been tested and beaten from start to finish, with minor lag spikes in intensive areas.
+* **Deltarune:** Chapters 1, 2, and 3 have been successfully tested to boot. Chapter 4 also booting, but isn't working. This can be bypassed by save editing past the first intro, but it will still remain unplayable from The Dark Sanctuary on. **DELTARUNE may not be playable in some areas or may be extremely slow.**
+* **WARNING:** Mods are NOT guarenteed to work Butterscotch-3DS.
 
 > [!IMPORTANT]  
 > Butterscotch is still VERY early in development and it is NOT that good yet.
