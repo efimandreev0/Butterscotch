@@ -1,13 +1,16 @@
 <h1 align="center">🥧 Butterscotch 🥧</h1>
 
-## Original Discord:
-<!-- Badges, about the GitHub repository itself -->
-<p align="center">
-<a href="https://discord.gg/2gQR7t3WJR"><img src="https://img.shields.io/discord/1406856655920168971?color=5865F2&logo=discord&logoColor=white&label=discord"></a>
-</p>
+## There's a community port of Butterscotch for 3DS. 
+## Original repo you can see [Here](https://github.com/MrPowerGamerBR/Butterscotch)
+
 
 > [!IMPORTANT]  
 > This project was created using Generative AI
+
+## About 3DS
+
+Please, don't ask questions about 3DS in original Butterscotch server.
+Also, you can read about all authors of this project in AUTHORS.MD
 
 ## Running on Nintendo 3DS
 

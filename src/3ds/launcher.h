@@ -1,4 +1,10 @@
-// Created by Notebook on 03.05.2026.
+// Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
+//
+// This file is part of Butterscotch (Nintendo 3DS port).
+//
+// Butterscotch is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, version 3.
 
 #ifndef BUTTERSCOTCH_LAUNCHER_H
 #define BUTTERSCOTCH_LAUNCHER_H
@@ -105,6 +111,11 @@ typedef enum {
 
 #define LAUNCHER_SETTINGS_VERSION 4u
 
+typedef enum {
+    LAUNCHER_LETTERBOX_CONTAIN = 0,
+    LAUNCHER_LETTERBOX_COVER = 1,
+} LauncherLetterboxMode;
+
 typedef struct {
     uint32_t magic;
     uint32_t version;
@@ -115,7 +126,8 @@ typedef struct {
     LauncherBackdropMode backdrop_mode;
     int os_type;
     LauncherInputMode input_mode;
-    int _reserved[5];
+    int letterbox_mode;
+    int _reserved[4];
     LauncherControlMap global_controls;
 } LauncherSettings;
 

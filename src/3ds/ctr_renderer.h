@@ -1,3 +1,11 @@
+// Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
+//
+// This file is part of Butterscotch (Nintendo 3DS port).
+//
+// Butterscotch is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, version 3.
+
 #pragma once
 
 #include "renderer.h"
@@ -134,6 +142,7 @@ typedef struct CtrRenderer {
     bool stereoEnabled;
     int32_t pendingLoads[CTR_PENDING_LOADS_MAX];
     uint32_t pendingLoadCount;
+    int appLetterboxMode;
 } CtrRenderer;
 
 Renderer *CtrRenderer_create(void);
@@ -165,6 +174,10 @@ typedef enum {
     CTR_BACKDROP_BLACK,
     CTR_BACKDROP_STRETCH,
 } CtrBackdropMode;
+typedef enum {
+    CTR_LETTERBOX_COVER = 0,
+    CTR_LETTERBOX_CONTAIN = 1,
+} CtrLetterboxMode;
 
 void CtrRenderer_setGameScreen(CtrGameScreen which);
 
@@ -173,6 +186,10 @@ CtrGameScreen CtrRenderer_getGameScreen(void);
 void CtrRenderer_setBackdropMode(CtrBackdropMode mode);
 
 CtrBackdropMode CtrRenderer_getBackdropMode(void);
+
+void CtrRenderer_setLetterboxMode(CtrLetterboxMode mode);
+
+CtrLetterboxMode CtrRenderer_getLetterboxMode(void);
 
 void CtrRenderer_setLetterboxTheme(float topR, float topG, float topB,
                                    float botR, float botG, float botB,

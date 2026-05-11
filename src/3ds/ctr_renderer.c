@@ -1,3 +1,11 @@
+// Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
+//
+// This file is part of Butterscotch (Nintendo 3DS port).
+//
+// Butterscotch is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, version 3.
+
 #include "ctr_renderer.h"
 #include "matrix_math.h"
 #include "text_utils.h"
@@ -52,6 +60,7 @@ static int g_gc_target_count = 0;
 
 static CtrGameScreen g_ctr_game_screen = CTR_GAME_SCREEN_TOP;
 static CtrBackdropMode g_ctr_backdrop_mode = CTR_BACKDROP_GRADIENT;
+static CtrLetterboxMode g_ctr_letterbox_mode = CTR_LETTERBOX_CONTAIN;
 
 static struct {
     float bgTop[3];
@@ -82,6 +91,15 @@ void CtrRenderer_setBackdropMode(CtrBackdropMode mode) {
 }
 
 CtrBackdropMode CtrRenderer_getBackdropMode(void) { return g_ctr_backdrop_mode; }
+
+void CtrRenderer_setLetterboxMode(CtrLetterboxMode mode) {
+    int value = (int) mode;
+    if (value != CTR_LETTERBOX_COVER && value != CTR_LETTERBOX_CONTAIN) mode = CTR_LETTERBOX_CONTAIN;
+    if (g_ctr_letterbox_mode == mode) return;
+    g_ctr_letterbox_mode = mode;
+}
+
+CtrLetterboxMode CtrRenderer_getLetterboxMode(void) { return g_ctr_letterbox_mode; }
 
 void CtrRenderer_setLetterboxTheme(float topR, float topG, float topB,
                                    float botR, float botG, float botB,
@@ -215,6 +233,26 @@ static void cover_aspect(int srcW, int srcH, int dstW, int dstH, int *outW, int 
         w = dstW;
         h = (int) floorf((float) dstW / srcAspect + 0.5f);
     }
+    *outW = clamp_int(w, 1, 1024);
+    *outH = clamp_int(h, 1, 1024);
+}
+static void contain_aspect(int srcW, int srcH, int dstW, int dstH, int *outW, int *outH) {
+    if (srcW < 1) srcW = 1;
+    if (srcH < 1) srcH = 1;
+    if (dstW < 1) dstW = 1;
+    if (dstH < 1) dstH = 1;
+    float srcAspect = (float) srcW / (float) srcH;
+    float dstAspect = (float) dstW / (float) dstH;
+    int w, h;
+    if (srcAspect > dstAspect) {
+        w = dstW;
+        h = (int) floorf((float) dstW / srcAspect + 0.5f);
+    } else {
+        h = dstH;
+        w = (int) floorf((float) dstH * srcAspect + 0.5f);
+    }
+    if (w > dstW) w = dstW;
+    if (h > dstH) h = dstH;
     *outW = clamp_int(w, 1, 1024);
     *outH = clamp_int(h, 1, 1024);
 }
@@ -1829,10 +1867,16 @@ static void destroy_right_app_surface(CtrRenderer *ctx) {
 static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh, int targetW, int targetH) {
     int renderW = 1;
     int renderH = 1;
-    cover_aspect(gw, gh, targetW, targetH, &renderW, &renderH);
+    if (g_ctr_letterbox_mode == CTR_LETTERBOX_CONTAIN) {
+        contain_aspect(gw, gh, targetW, targetH, &renderW, &renderH);
+    } else {
+        cover_aspect(gw, gh, targetW, targetH, &renderW, &renderH);
+    }
+
     if (ctx->appReady &&
         ctx->appLogicW == gw && ctx->appLogicH == gh &&
-        ctx->appScreenW == targetW && ctx->appScreenH == targetH) {
+        ctx->appScreenW == targetW && ctx->appScreenH == targetH &&
+        ctx->appLetterboxMode == (int) g_ctr_letterbox_mode) {
         return true;
     }
 
@@ -1844,12 +1888,15 @@ static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh, int targetW, in
     ctx->appScreenH = targetH;
     ctx->appRenderW = renderW;
     ctx->appRenderH = renderH;
+    ctx->appLetterboxMode = (int) g_ctr_letterbox_mode;
 
     bool appTargetReady = false;
     for (int divisor = 1; divisor <= 4 && !appTargetReady; divisor <<= 1) {
         if (divisor > 1) {
-            ctx->appRenderW = clamp_int(renderW / divisor, targetW, renderW);
-            ctx->appRenderH = clamp_int(renderH / divisor, targetH, renderH);
+            int loW = (renderW >= targetW) ? targetW : 1;
+            int loH = (renderH >= targetH) ? targetH : 1;
+            ctx->appRenderW = clamp_int(renderW / divisor, loW, renderW);
+            ctx->appRenderH = clamp_int(renderH / divisor, loH, renderH);
         }
         ctx->appPotW = next_pow2(ctx->appRenderW);
         ctx->appPotH = next_pow2(ctx->appRenderH);
@@ -2270,20 +2317,31 @@ static void ctr_end_frame(Renderer *ren) {
             apply_projection(ctx, &proj);
 
             draw_letterbox_backdrop(ctx);
-
-            int drawW = ctx->winW;
-            int drawH = ctx->winH;
-            int drawX = 0;
-            int drawY = 0;
-
-            float cropX = fmaxf(0.f, ((float) ctx->appRenderW - (float) ctx->winW) * 0.5f);
-            float cropY = fmaxf(0.f, ((float) ctx->appRenderH - (float) ctx->winH) * 0.5f);
-            float sampleW = fminf((float) ctx->appRenderW, (float) ctx->winW);
-            float sampleH = fminf((float) ctx->appRenderH, (float) ctx->winH);
-            float u0 = cropX / (float) ctx->appPotW;
-            float u1 = (cropX + sampleW) / (float) ctx->appPotW;
-            float v0 = 1.f - (cropY / (float) ctx->appPotH);
-            float v1 = 1.f - ((cropY + sampleH) / (float) ctx->appPotH);
+            int drawW, drawH, drawX, drawY;
+            float sampleX, sampleY, sampleW, sampleH;
+            if (ctx->appLetterboxMode == (int) CTR_LETTERBOX_CONTAIN) {
+                drawW = ctx->appRenderW;
+                drawH = ctx->appRenderH;
+                drawX = (ctx->winW - drawW) / 2;
+                drawY = (ctx->winH - drawH) / 2;
+                sampleX = 0.f;
+                sampleY = 0.f;
+                sampleW = (float) ctx->appRenderW;
+                sampleH = (float) ctx->appRenderH;
+            } else {
+                drawW = ctx->winW;
+                drawH = ctx->winH;
+                drawX = 0;
+                drawY = 0;
+                sampleX = fmaxf(0.f, ((float) ctx->appRenderW - (float) ctx->winW) * 0.5f);
+                sampleY = fmaxf(0.f, ((float) ctx->appRenderH - (float) ctx->winH) * 0.5f);
+                sampleW = fminf((float) ctx->appRenderW, (float) ctx->winW);
+                sampleH = fminf((float) ctx->appRenderH, (float) ctx->winH);
+            }
+            float u0 = sampleX / (float) ctx->appPotW;
+            float u1 = (sampleX + sampleW) / (float) ctx->appPotW;
+            float v0 = 1.f - (sampleY / (float) ctx->appPotH);
+            float v1 = 1.f - ((sampleY + sampleH) / (float) ctx->appPotH);
             float white[4] = {1.f, 1.f, 1.f, 1.f};
 
             push_quad(ctx, &ctx->appTex,

@@ -1,4 +1,10 @@
-// Created by Notebook on 03.05.2026.
+// Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
+//
+// This file is part of Butterscotch (Nintendo 3DS port).
+//
+// Butterscotch is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, version 3.
 
 #include "launcher.h"
 
@@ -505,6 +511,10 @@ static void launcher_push_theme_to_renderer(void) {
                                   g_settings.show_side_particles ? t->side_particle_alpha : 0.f);
     CtrRenderer_setGameScreen((CtrGameScreen) g_settings.game_screen);
     CtrRenderer_setBackdropMode((CtrBackdropMode) g_settings.backdrop_mode);
+    CtrRenderer_setLetterboxMode(
+        g_settings.letterbox_mode == LAUNCHER_LETTERBOX_COVER
+            ? CTR_LETTERBOX_COVER
+            : CTR_LETTERBOX_CONTAIN);
 }
 
 static const char *launcher_backdrop_label(LauncherBackdropMode mode) {
@@ -541,6 +551,7 @@ void launcher_apply_settings(const LauncherSettings *s) {
     g_settings.backdrop_mode = s->backdrop_mode;
     g_settings.os_type = s->os_type;
     g_settings.input_mode = s->input_mode;
+    g_settings.letterbox_mode = s->letterbox_mode;
     g_settings.global_controls = s->global_controls;
     launcher_normalize_control_map(&g_settings.global_controls);
     int backdropValue = (int) g_settings.backdrop_mode;
@@ -553,6 +564,10 @@ void launcher_apply_settings(const LauncherSettings *s) {
     }
     if (launcher_os_type_index_of(g_settings.os_type) < 0) {
         g_settings.os_type = OS_WINDOWS;
+    }
+    if (g_settings.letterbox_mode != LAUNCHER_LETTERBOX_CONTAIN &&
+        g_settings.letterbox_mode != LAUNCHER_LETTERBOX_COVER) {
+        g_settings.letterbox_mode = LAUNCHER_LETTERBOX_CONTAIN;
     }
     launcher_push_theme_to_renderer();
 }
@@ -596,6 +611,10 @@ void launcher_load_settings(void) {
         if (tmp.version < 4u || tmp.input_mode < 0 ||
             tmp.input_mode >= LAUNCHER_INPUT_MODE_COUNT) {
             tmp.input_mode = LAUNCHER_INPUT_KEYBOARD;
+        }
+        if (tmp.letterbox_mode != LAUNCHER_LETTERBOX_CONTAIN &&
+            tmp.letterbox_mode != LAUNCHER_LETTERBOX_COVER) {
+            tmp.letterbox_mode = LAUNCHER_LETTERBOX_CONTAIN;
         }
         launcher_normalize_control_map(&tmp.global_controls);
         g_settings = tmp;

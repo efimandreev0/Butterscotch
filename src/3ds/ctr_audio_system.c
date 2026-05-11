@@ -1,3 +1,11 @@
+// Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
+//
+// This file is part of Butterscotch (Nintendo 3DS port).
+//
+// Butterscotch is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, version 3.
+
 #include "ctr_audio_system.h"
 #include "ctr_audio_cache.h"
 
@@ -7,11 +15,13 @@
 #include <malloc.h>
 #include <3ds.h>
 #include <tremor/ivorbisfile.h>
+#include "stb_ds.h"
 
 #define FORMAT_PCM16 1
 #define FORMAT_ADPCM 2
 #define CTR_INSTANCE_ID_BASE 100000
-#define CTR_STREAM_MAX_BYTES (8u * 1024u * 1024u)
+#define CTR_STREAM_MAX_BYTES (24u * 1024u * 1024u)
+#define CTR_STREAM_TARGET_RATE 22050u
 
 static inline bool is_stream_id(int32_t id) {
     return id >= CTR_STREAM_ID_BASE && id < (CTR_STREAM_ID_BASE + MAX_CTR_STREAMS);
@@ -157,6 +167,7 @@ static void ctr_init(AudioSystem *base, MAYBE_UNUSED DataWin *dw, FileSystem *fs
     sys->masterGain = 1.0f;
     sys->nextInstanceId = CTR_INSTANCE_ID_BASE;
     CTR_AUDIO_LOG("init: dw=%p fs=%p", (void*)dw, (void*)fs);
+    arrput(sys->base.audioGroups, dw);
 
     for (int i = 0; i < MAX_CTR_CHANNELS; i++) {
         sys->chans[i].currentSoundId = -1;
@@ -267,6 +278,14 @@ static void ctr_destroy(AudioSystem *base) {
             linearFree(sys->streams[i].data);
             sys->streams[i].used = false;
         }
+    }
+    if (sys->base.audioGroups != NULL) {
+        for (int32_t i = 1; i < (int32_t) arrlen(sys->base.audioGroups); i++) {
+            if (sys->base.audioGroups[i] != NULL) {
+                DataWin_free(sys->base.audioGroups[i]);
+            }
+        }
+        arrfree(sys->base.audioGroups);
     }
     if (sys->audioBin) fclose(sys->audioBin);
     if (sys->soundBank) free(sys->soundBank);
@@ -415,8 +434,8 @@ static int32_t ctr_play(AudioSystem *base, int32_t id, int32_t prio, bool loop) 
     CTR_AUDIO_LOG("play failed: id=%ld no channel accepted newPrio=%d", (long)id, score_prio);
     return -1;
 }
-
 static void ctr_stop(AudioSystem *base, int32_t soundOrInstance) {
+    if (soundOrInstance < 0) return;
     CtrAudioSystem *sys = (CtrAudioSystem *) base;
     for (int i = 0; i < MAX_CTR_CHANNELS; i++) {
         if (sys->chans[i].currentSoundId == soundOrInstance || sys->chans[i].instanceId == soundOrInstance) {
@@ -440,6 +459,7 @@ static void ctr_stop_all(AudioSystem *base) {
 }
 
 static bool ctr_is_playing(AudioSystem *base, int32_t id) {
+    if (id < 0) return false;
     CtrAudioSystem *sys = (CtrAudioSystem *) base;
     for (int i = 0; i < MAX_CTR_CHANNELS; i++) {
         if (sys->chans[i].currentSoundId == id || sys->chans[i].instanceId == id) {
@@ -450,6 +470,7 @@ static bool ctr_is_playing(AudioSystem *base, int32_t id) {
 }
 
 static void ctr_pause(AudioSystem *base, int32_t id) {
+    if (id < 0) return;
     CtrAudioSystem *sys = (CtrAudioSystem *) base;
     for (int i = 0; i < MAX_CTR_CHANNELS; i++) {
         if (sys->chans[i].currentSoundId == id || sys->chans[i].instanceId == id) {
@@ -460,6 +481,7 @@ static void ctr_pause(AudioSystem *base, int32_t id) {
 }
 
 static void ctr_resume(AudioSystem *base, int32_t id) {
+    if (id < 0) return;
     CtrAudioSystem *sys = (CtrAudioSystem *) base;
     for (int i = 0; i < MAX_CTR_CHANNELS; i++) {
         if (sys->chans[i].currentSoundId == id || sys->chans[i].instanceId == id) {
@@ -480,6 +502,7 @@ static void ctr_resume_all(MAYBE_UNUSED AudioSystem *base) {
 }
 
 static void ctr_set_gain(AudioSystem *base, int32_t id, float g, MAYBE_UNUSED uint32_t t) {
+    if (id < 0) return;
     CtrAudioSystem *sys = (CtrAudioSystem *) base;
     for (int i = 0; i < MAX_CTR_CHANNELS; i++) {
         if (sys->chans[i].currentSoundId == id || sys->chans[i].instanceId == id) {
@@ -491,6 +514,7 @@ static void ctr_set_gain(AudioSystem *base, int32_t id, float g, MAYBE_UNUSED ui
 }
 
 static float ctr_get_gain(AudioSystem *base, int32_t id) {
+    if (id < 0) return 0.0f;
     CtrAudioSystem *sys = (CtrAudioSystem *) base;
     for (int i = 0; i < MAX_CTR_CHANNELS; i++) {
         if (sys->chans[i].currentSoundId == id || sys->chans[i].instanceId == id) return sys->chans[i].gain;
@@ -535,6 +559,7 @@ static uint32_t total_frames_for(CtrAudioSystem* sys, int32_t soundOrInstance) {
 }
 
 static void ctr_set_pitch(AudioSystem *base, int32_t id, float p) {
+    if (id < 0) return;
     CtrAudioSystem *sys = (CtrAudioSystem *) base;
     for (int i = 0; i < MAX_CTR_CHANNELS; i++) {
         if (sys->chans[i].currentSoundId == id || sys->chans[i].instanceId == id) {
@@ -549,6 +574,7 @@ static void ctr_set_pitch(AudioSystem *base, int32_t id, float p) {
 }
 
 static float ctr_get_pitch(AudioSystem *base, int32_t id) {
+    if (id < 0) return 1.0f;
     CtrAudioSystem *sys = (CtrAudioSystem *) base;
     for (int i = 0; i < MAX_CTR_CHANNELS; i++) {
         if (sys->chans[i].currentSoundId == id || sys->chans[i].instanceId == id) return sys->chans[i].pitch;
@@ -557,6 +583,7 @@ static float ctr_get_pitch(AudioSystem *base, int32_t id) {
 }
 
 static float ctr_get_pos(AudioSystem *base, int32_t id) {
+    if (id < 0) return 0.0f;
     CtrAudioSystem *sys = (CtrAudioSystem *) base;
     for (int i = 0; i < MAX_CTR_CHANNELS; i++) {
         if (sys->chans[i].currentSoundId == id || sys->chans[i].instanceId == id) {
@@ -567,9 +594,145 @@ static float ctr_get_pos(AudioSystem *base, int32_t id) {
     }
     return 0.0f;
 }
+static bool resolve_channel_payload(CtrAudioSystem* sys, int ch,
+                                    const void** outData, uint32_t* outDataSize,
+                                    uint32_t* outSampleRate, uint32_t* outTotalFrames,
+                                    uint8_t* outChannels, uint8_t* outFormat) {
+    int32_t id = sys->chans[ch].currentSoundId;
+    if (id < 0) return false;
 
-static void ctr_set_pos(MAYBE_UNUSED AudioSystem *sys, MAYBE_UNUSED int32_t id, MAYBE_UNUSED float pos) {
-    CTR_AUDIO_LOG("set position ignored: target=%ld pos=%.3f", (long)id, pos);
+    if (is_stream_id(id)) {
+        CtrStream* st = stream_for_id(sys, id);
+        if (!st) return false;
+        *outData         = st->data;
+        *outDataSize     = st->dataSize;
+        *outSampleRate   = st->sampleRate;
+        *outTotalFrames  = st->totalFrames;
+        *outChannels     = st->channels;
+        *outFormat       = st->format;
+        return true;
+    }
+
+    if ((uint32_t) id >= sys->soundCount || sys->soundBank == NULL) return false;
+    void* data = NULL;
+    uint32_t size = 0;
+    for (int i = 0; i < MAX_LRU_CACHE; i++) {
+        if (sys->cache[i].data != NULL && sys->cache[i].id == id) {
+            data = sys->cache[i].data;
+            size = sys->cache[i].size;
+            break;
+        }
+    }
+    if (!data) return false;
+
+    CtrSoundDef* def = &sys->soundBank[id];
+    *outData         = data;
+    *outDataSize     = size;
+    *outSampleRate   = def->sampleRate;
+    *outTotalFrames  = def->totalFrames;
+    *outChannels     = def->channels;
+    *outFormat       = def->format;
+    return true;
+}
+static void ctr_set_pos(AudioSystem* base, int32_t id, float pos) {
+    if (id < 0) return;
+    CtrAudioSystem* sys = (CtrAudioSystem*) base;
+    if (pos < 0.0f) pos = 0.0f;
+
+    int ch = -1;
+    for (int i = 0; i < MAX_CTR_CHANNELS; i++) {
+        if (sys->chans[i].currentSoundId == id || sys->chans[i].instanceId == id) {
+            ch = i;
+            break;
+        }
+    }
+    if (ch < 0) {
+        CTR_AUDIO_LOG("set_pos: no channel for target=%ld pos=%.3f", (long) id, pos);
+        return;
+    }
+
+    const void* data = NULL;
+    uint32_t dataSize = 0, sampleRate = 0, totalFrames = 0;
+    uint8_t channels = 0, format = 0;
+    if (!resolve_channel_payload(sys, ch,
+                                 &data, &dataSize, &sampleRate, &totalFrames,
+                                 &channels, &format)) {
+        CTR_AUDIO_LOG("set_pos: cannot resolve payload ch=%d target=%ld", ch, (long) id);
+        return;
+    }
+    if (sampleRate == 0 || totalFrames == 0 || data == NULL) {
+        CTR_AUDIO_LOG("set_pos: invalid payload (rate=%lu frames=%lu data=%p)",
+                      (unsigned long) sampleRate, (unsigned long) totalFrames, data);
+        return;
+    }
+    uint64_t target64 = (uint64_t) (pos * (double) sampleRate);
+    if (totalFrames > 0 && target64 >= totalFrames) target64 = totalFrames - 1;
+    uint32_t targetFrame = (uint32_t) target64;
+    uint32_t byteOffset   = 0;
+    uint32_t remainingFrm = totalFrames - targetFrame;
+    if (format == FORMAT_ADPCM) {
+        uint32_t blockIdx = targetFrame / 14u;
+        targetFrame       = blockIdx * 14u;
+        byteOffset        = blockIdx * 8u;
+        remainingFrm      = totalFrames - targetFrame;
+    } else {
+        byteOffset = targetFrame * (uint32_t) channels * 2u;
+    }
+    if (byteOffset >= dataSize) {
+        CTR_AUDIO_LOG("set_pos: byteOffset=%lu past buffer size=%lu, ignoring",
+                      (unsigned long) byteOffset, (unsigned long) dataSize);
+        return;
+    }
+
+    CtrChannelState* chan = &sys->chans[ch];
+    bool wasLooping = chan->loop;
+    ndspChnWaveBufClear(ch);
+    memset(&chan->waveBuf, 0, sizeof(chan->waveBuf));
+    chan->waveBuf.data_vaddr = (const uint8_t*) data + byteOffset;
+    if (format == FORMAT_ADPCM) {
+        chan->waveBuf.nsamples = remainingFrm;
+        memset(&chan->adpcmState, 0, sizeof(chan->adpcmState));
+        chan->waveBuf.adpcm_data = &chan->adpcmState;
+    } else if (channels == 2) {
+        chan->waveBuf.nsamples = remainingFrm * 2u;
+    } else {
+        chan->waveBuf.nsamples = remainingFrm;
+    }
+    chan->waveBuf.looping = false;
+    if (wasLooping) {
+        memset(&chan->loopWaveBuf, 0, sizeof(chan->loopWaveBuf));
+        chan->loopWaveBuf.data_vaddr = data;
+        if (format == FORMAT_ADPCM) {
+            chan->loopWaveBuf.nsamples   = totalFrames;
+            memset(&chan->loopAdpcmState, 0, sizeof(chan->loopAdpcmState));
+            chan->loopWaveBuf.adpcm_data = &chan->loopAdpcmState;
+        } else if (channels == 2) {
+            chan->loopWaveBuf.nsamples = totalFrames * 2u;
+        } else {
+            chan->loopWaveBuf.nsamples = totalFrames;
+        }
+        chan->loopWaveBuf.looping = true;
+        chan->hasLoopTail = true;
+    } else {
+        chan->hasLoopTail = false;
+        memset(&chan->loopWaveBuf, 0, sizeof(chan->loopWaveBuf));
+    }
+    DSP_FlushDataCache((void*) data, dataSize);
+    ndspChnSetPaused(ch, false);
+    ndspChnWaveBufAdd(ch, &chan->waveBuf);
+    if (chan->hasLoopTail) {
+        ndspChnWaveBufAdd(ch, &chan->loopWaveBuf);
+    }
+
+    chan->playFrame = sys->frame;
+    update_channel_mix(sys, ch);
+
+    CTR_AUDIO_LOG("set_pos: target=%ld ch=%d pos=%.3fs frame=%u/%u offset=%uB remaining=%u%s playing=%d",
+                  (long) id, ch, pos,
+                  (unsigned) targetFrame, (unsigned) totalFrames,
+                  (unsigned) byteOffset, (unsigned) remainingFrm,
+                  chan->hasLoopTail ? " (+loop tail)" : "",
+                  ndspChnIsPlaying(ch) ? 1 : 0);
 }
 
 static float ctr_get_length(AudioSystem *base, int32_t id) {
@@ -593,6 +756,11 @@ static float ctr_get_length(AudioSystem *base, int32_t id) {
 
 static void ctr_set_master(AudioSystem *base, float g) {
     CtrAudioSystem *sys = (CtrAudioSystem *) base;
+    if (g <= 0.0f) {
+        fprintf(stderr, "[CTR_AUDIO] WARNING: master gain set to %.3f -- all audio is now MUTED. "
+                        "If this isn't intentional, check the game's options ini (dr.ini, config.ini, ...).\n", g);
+        fflush(stderr);
+    }
     CTR_AUDIO_LOG("master gain: %.3f", g);
     sys->masterGain = g;
     for (int i = 0; i < MAX_CTR_CHANNELS; i++) {
@@ -603,12 +771,62 @@ static void ctr_set_master(AudioSystem *base, float g) {
 static void ctr_set_chans(MAYBE_UNUSED AudioSystem *sys, MAYBE_UNUSED int32_t cnt) {
     CTR_AUDIO_LOG("set channel count ignored: %ld", (long)cnt);
 }
-static void ctr_grp_load(MAYBE_UNUSED AudioSystem *sys, MAYBE_UNUSED int32_t grp) {
-    CTR_AUDIO_LOG("group load ignored: %ld", (long)grp);
+static void ctr_grp_load(AudioSystem *base, int32_t grp) {
+    CtrAudioSystem *sys = (CtrAudioSystem *) base;
+    if (grp < 0) {
+        CTR_AUDIO_LOG("group load: invalid index %ld", (long) grp);
+        return;
+    }
+    if (grp == 0) {
+        CTR_AUDIO_LOG("group load: %ld is the main data.win, already loaded", (long) grp);
+        return;
+    }
+    if (sys->base.audioGroups != NULL && (int32_t) arrlen(sys->base.audioGroups) > grp &&
+        sys->base.audioGroups[grp] != NULL) {
+        CTR_AUDIO_LOG("group load: %ld already loaded (audo count=%lu)",
+                      (long) grp,
+                      (unsigned long) sys->base.audioGroups[grp]->audo.count);
+        return;
+    }
+    while ((int32_t) arrlen(sys->base.audioGroups) <= grp) {
+        arrput(sys->base.audioGroups, NULL);
+    }
+
+    DataWin *parsed = NULL;
+    if (sys->fs && sys->fs->vtable && sys->fs->vtable->resolvePath) {
+        char relPath[32];
+        snprintf(relPath, sizeof(relPath), "audiogroup%ld.dat", (long) grp);
+        char* absPath = sys->fs->vtable->resolvePath(sys->fs, relPath);
+        if (absPath) {
+            DataWinParserOptions opts = {
+                .parseGen8 = true,
+                .parseAudo = true,
+                .skipTextureBlobData = true,
+                .skipAudioBlobData = true,
+            };
+            parsed = DataWin_parse(absPath, opts);
+            if (parsed != NULL) {
+                CTR_AUDIO_LOG("group load %ld: parsed '%s' audo=%lu",
+                              (long) grp, absPath, (unsigned long) parsed->audo.count);
+            } else {
+                CTR_AUDIO_LOG("group load %ld: '%s' missing or unparseable (offline cache supplies samples)",
+                              (long) grp, absPath);
+            }
+            free(absPath);
+        }
+    }
+
+    sys->base.audioGroups[grp] = parsed;
 }
-static bool ctr_grp_loaded(MAYBE_UNUSED AudioSystem *sys, MAYBE_UNUSED int32_t grp) {
-    CTR_AUDIO_LOG("group loaded query: %ld -> true", (long)grp);
-    return true;
+
+static bool ctr_grp_loaded(AudioSystem *base, int32_t grp) {
+    CtrAudioSystem *sys = (CtrAudioSystem *) base;
+    if (grp < 0) return false;
+    bool loaded = sys->base.audioGroups != NULL &&
+                  (int32_t) arrlen(sys->base.audioGroups) > grp;
+    CTR_AUDIO_LOG("group loaded query: %ld -> %s",
+                  (long) grp, loaded ? "true" : "false");
+    return loaded;
 }
 
 static int16_t* decode_wav_to_pcm16(FILE* f, uint32_t* outRate, uint8_t* outCh, uint32_t* outFrames) {
@@ -790,6 +1008,71 @@ static int32_t ctr_create_stream(AudioSystem* base, const char* filename) {
         CTR_AUDIO_LOG("create_stream: invalid decoded params (ch=%u rate=%u frames=%u)",
                       (unsigned) channels, (unsigned) rate, (unsigned) frames);
         return -1;
+    }
+    {
+        uint32_t srcRate = rate;
+        uint8_t  srcCh   = channels;
+        uint32_t srcFrames = frames;
+        int16_t* mono = pcm;
+        bool monoOwned = false;
+        if (srcCh == 2) {
+            mono = malloc((size_t) srcFrames * sizeof(int16_t));
+            if (!mono) {
+                free(pcm);
+                free(resolvedPath);
+                CTR_AUDIO_LOG("create_stream: stereo->mono alloc failed (%lu frames)",
+                              (unsigned long) srcFrames);
+                return -1;
+            }
+            for (uint32_t i = 0; i < srcFrames; i++) {
+                int32_t lhs = pcm[i * 2 + 0];
+                int32_t rhs = pcm[i * 2 + 1];
+                mono[i] = (int16_t)((lhs + rhs) >> 1);
+            }
+            monoOwned = true;
+        }
+        int16_t* finalPcm = mono;
+        uint32_t finalFrames = srcFrames;
+        bool finalOwned = monoOwned;
+        if (srcRate != CTR_STREAM_TARGET_RATE) {
+            uint64_t outCount = ((uint64_t) srcFrames * CTR_STREAM_TARGET_RATE) / (uint64_t) srcRate;
+            if (outCount == 0) outCount = 1;
+            int16_t* resampled = malloc((size_t) outCount * sizeof(int16_t));
+            if (!resampled) {
+                if (monoOwned) free(mono);
+                free(pcm);
+                free(resolvedPath);
+                CTR_AUDIO_LOG("create_stream: resample alloc failed (%lu frames)",
+                              (unsigned long) outCount);
+                return -1;
+            }
+            for (uint32_t i = 0; i < outCount; i++) {
+                uint64_t srcPos = (uint64_t) i * srcRate;
+                uint32_t idx0   = (uint32_t)(srcPos / CTR_STREAM_TARGET_RATE);
+                uint32_t frac   = (uint32_t)(srcPos % CTR_STREAM_TARGET_RATE);
+                if (idx0 >= srcFrames) idx0 = srcFrames - 1;
+                uint32_t idx1   = (idx0 + 1 < srcFrames) ? idx0 + 1 : idx0;
+                int32_t a = mono[idx0];
+                int32_t b = mono[idx1];
+                int32_t mix = a + (int32_t)(((int64_t)(b - a) * frac) / (int64_t) CTR_STREAM_TARGET_RATE);
+                if (mix >  32767) mix =  32767;
+                if (mix < -32768) mix = -32768;
+                resampled[i] = (int16_t) mix;
+            }
+            if (monoOwned) free(mono);
+            finalPcm    = resampled;
+            finalFrames = (uint32_t) outCount;
+            finalOwned  = true;
+        }
+
+        if (finalPcm != pcm) {
+            free(pcm);
+            pcm = finalPcm;
+        }
+        (void) finalOwned;
+        rate     = CTR_STREAM_TARGET_RATE;
+        channels = 1;
+        frames   = finalFrames;
     }
 
     size_t bytes = (size_t) frames * channels * sizeof(int16_t);
