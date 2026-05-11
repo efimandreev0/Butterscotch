@@ -9,6 +9,7 @@
 #define CTR_MAX_CHUNKS_X        4
 #define CTR_MAX_CHUNKS_Y        4
 #define CTR_TARGET_STACK_DEPTH  8
+#define CTR_PENDING_LOADS_MAX   32
 
 typedef struct {
     bool valid;
@@ -130,6 +131,9 @@ typedef struct CtrRenderer {
     bool preloadingAtlases;
     bool cullEnabled;
     float cullL, cullT, cullR, cullB;
+    bool stereoEnabled;
+    int32_t pendingLoads[CTR_PENDING_LOADS_MAX];
+    uint32_t pendingLoadCount;
 } CtrRenderer;
 
 Renderer *CtrRenderer_create(void);
@@ -137,6 +141,10 @@ Renderer *CtrRenderer_create(void);
 void CtrRenderer_beginEye(Renderer *ren, int eye, float slider);
 
 bool CtrRenderer_hasRightEye(Renderer *ren);
+
+void CtrRenderer_setStereoEnabled(Renderer *ren, bool enabled);
+
+bool CtrRenderer_getStereoEnabled(Renderer *ren);
 
 typedef void (*CtrRendererCacheProgressFn)(uint32_t pageIndex, uint32_t pageCount, const char *pagePath, void *user);
 

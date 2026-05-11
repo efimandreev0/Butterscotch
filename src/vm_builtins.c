@@ -3685,15 +3685,78 @@ static RValue builtinMpPotentialSettings(VMContext* ctx, RValue* args, MAYBE_UNU
 // Steam stubs
 STUB_RETURN_ZERO(steam_initialised)
 STUB_RETURN_ZERO(steam_stats_ready)
-STUB_RETURN_ZERO(steam_file_exists)
-STUB_RETURN_UNDEFINED(steam_file_write)
-STUB_RETURN_UNDEFINED(steam_file_read)
 STUB_RETURN_ZERO(steam_get_persona_name)
-STUB_RETURN_ZERO(steam_file_delete)
-STUB_RETURN_ZERO(steam_file_write_file)
 STUB_RETURN_ZERO(steam_update)
 STUB_RETURN_ZERO(steam_is_screenshot_requested)
 STUB_RETURN_ZERO(steam_utils_is_steam_running_on_steam_deck)
+
+static FileSystem* builtinRunnerFileSystem(VMContext* ctx) {
+    Runner* runner = ctx ? (Runner*) ctx->runner : nullptr;
+    return runner ? runner->fileSystem : nullptr;
+}
+
+static RValue builtin_steam_file_exists(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeBool(false);
+    FileSystem* fs = builtinRunnerFileSystem(ctx);
+    if (!fs || !fs->vtable || !fs->vtable->fileExists) return RValue_makeBool(false);
+    char* path = RValue_toString(args[0]);
+    bool ok = fs->vtable->fileExists(fs, path);
+    free(path);
+    return RValue_makeBool(ok);
+}
+
+static RValue builtin_steam_file_read(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeOwnedString(safeStrdup(""));
+    FileSystem* fs = builtinRunnerFileSystem(ctx);
+    if (!fs || !fs->vtable || !fs->vtable->readFileText) return RValue_makeOwnedString(safeStrdup(""));
+    char* path = RValue_toString(args[0]);
+    char* content = fs->vtable->readFileText(fs, path);
+    free(path);
+    return RValue_makeOwnedString(content ? content : safeStrdup(""));
+}
+
+static RValue builtin_steam_file_write(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 2) return RValue_makeBool(false);
+    FileSystem* fs = builtinRunnerFileSystem(ctx);
+    if (!fs || !fs->vtable || !fs->vtable->writeFileText) return RValue_makeBool(false);
+    char* path = RValue_toString(args[0]);
+    char* content = RValue_toString(args[1]);
+    bool ok = fs->vtable->writeFileText(fs, path, content);
+    free(content);
+    free(path);
+    return RValue_makeBool(ok);
+}
+
+static RValue builtin_steam_file_delete(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeBool(false);
+    FileSystem* fs = builtinRunnerFileSystem(ctx);
+    if (!fs || !fs->vtable || !fs->vtable->deleteFile) return RValue_makeBool(false);
+    char* path = RValue_toString(args[0]);
+    bool ok = fs->vtable->deleteFile(fs, path);
+    free(path);
+    return RValue_makeBool(ok);
+}
+
+static RValue builtin_steam_file_write_file(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 2) return RValue_makeBool(false);
+    FileSystem* fs = builtinRunnerFileSystem(ctx);
+    if (!fs || !fs->vtable || !fs->vtable->readFileBinary || !fs->vtable->writeFileBinary) return RValue_makeBool(false);
+    char* a = RValue_toString(args[0]);
+    char* b = RValue_toString(args[1]);
+    uint8_t* data = nullptr;
+    int32_t size = 0;
+    bool ok = fs->vtable->readFileBinary(fs, a, &data, &size);
+    if (ok) {
+        ok = fs->vtable->writeFileBinary(fs, b, data, size);
+    } else {
+        ok = fs->vtable->readFileBinary(fs, b, &data, &size);
+        if (ok) ok = fs->vtable->writeFileBinary(fs, a, data, size);
+    }
+    free(data);
+    free(b);
+    free(a);
+    return RValue_makeBool(ok);
+}
 
 // FMOD extension compatibility. Pizza Tower probes these on boot; audio still
 // goes through Butterscotch's native audio_* path on 3DS.
@@ -4492,6 +4555,16 @@ static RValue builtinIniSectionExists(VMContext* ctx, RValue* args, int32_t argC
 
     const char* section = (args[0].type == RVALUE_STRING ? args[0].string : "");
     return RValue_makeBool(Ini_hasSection(runner->currentIni, section));
+}
+
+static RValue builtinIniSectionDelete(VMContext* ctx, RValue* args, int32_t argCount) {
+    Runner* runner = (Runner*) ctx->runner;
+    if (1 > argCount || runner->currentIni == nullptr) return RValue_makeUndefined();
+
+    const char* section = (args[0].type == RVALUE_STRING ? args[0].string : "");
+    Ini_deleteSection(runner->currentIni, section);
+    runner->currentIniDirty = true;
+    return RValue_makeUndefined();
 }
 
 // ===[ Text File Functions ]===
@@ -10173,10 +10246,122 @@ STUB_RETURN_UNDEFINED(switch_save_data_unmount)
 
 // PS4 / Steam / Window non-applicable stubs.
 STUB_RETURN_UNDEFINED(ps4_touchpad_mouse_enable)
-STUB_RETURN_ZERO(steam_get_achievement)
-STUB_RETURN_UNDEFINED(steam_set_achievement)
 STUB_RETURN_ZERO(steam_send_screenshot)
 STUB_RETURN_UNDEFINED(window_enable_borderless_fullscreen)
+
+static bool steamAchievementNameHasPath(const char* name) {
+    if (name == nullptr) return false;
+    for (const char* p = name; *p; p++) {
+        if (*p == '/' || *p == '\\' || *p == ':') return true;
+    }
+    return false;
+}
+
+static bool steamAchievementNameHasExtension(const char* name) {
+    if (name == nullptr) return false;
+    const char* base = name;
+    for (const char* p = name; *p; p++) {
+        if (*p == '/' || *p == '\\') base = p + 1;
+    }
+    return strchr(base, '.') != nullptr;
+}
+
+static char* steamAchievementMarkerPath(const char* name, bool appendTxt) {
+    const char* safeName = name != nullptr ? name : "";
+    bool hasPath = steamAchievementNameHasPath(safeName);
+    bool hasExt = steamAchievementNameHasExtension(safeName);
+    const char* prefix = hasPath ? "" : "saves/";
+    const char* suffix = (appendTxt && !hasExt) ? ".txt" : "";
+    size_t len = strlen(prefix) + strlen(safeName) + strlen(suffix) + 1;
+    char* path = safeMalloc(len);
+    snprintf(path, len, "%s%s%s", prefix, safeName, suffix);
+    for (char* p = path; *p; p++) {
+        if (*p == '\\') *p = '/';
+    }
+    return path;
+}
+
+typedef struct SteamAchievementAlias {
+    const char* achievement;
+    const char* marker;
+} SteamAchievementAlias;
+
+static const SteamAchievementAlias kSteamAchievementAliases[] = {
+    { "GAME_START_TROPHY", "Heard in the echo" },
+};
+
+static bool steamAchievementMarkerExistsSingle(FileSystem* fs, const char* name) {
+    if (!fs || !fs->vtable || !fs->vtable->fileExists || name == nullptr || name[0] == '\0') return false;
+
+    char* path = steamAchievementMarkerPath(name, true);
+    bool exists = fs->vtable->fileExists(fs, path);
+    free(path);
+    return exists;
+}
+
+static bool steamAchievementMarkerExists(FileSystem* fs, const char* name) {
+    if (name == nullptr || name[0] == '\0') return false;
+    if (steamAchievementMarkerExistsSingle(fs, name)) return true;
+
+    for (size_t i = 0; i < sizeof(kSteamAchievementAliases) / sizeof(kSteamAchievementAliases[0]); i++) {
+        if (strcmp(name, kSteamAchievementAliases[i].achievement) == 0 &&
+            steamAchievementMarkerExistsSingle(fs, kSteamAchievementAliases[i].marker)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool steamAchievementWriteMarker(FileSystem* fs, const char* name) {
+    if (!fs || !fs->vtable || !fs->vtable->writeFileText || name == nullptr || name[0] == '\0') return false;
+
+    char* path = steamAchievementMarkerPath(name, true);
+    bool ok = fs->vtable->writeFileText(fs, path, "1");
+    free(path);
+    return ok;
+}
+
+static bool steamAchievementEnsureAliases(FileSystem* fs, const char* name) {
+    if (name == nullptr || name[0] == '\0') return true;
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(kSteamAchievementAliases) / sizeof(kSteamAchievementAliases[0]); i++) {
+        if (strcmp(name, kSteamAchievementAliases[i].achievement) == 0) {
+            const char* marker = kSteamAchievementAliases[i].marker;
+            if (!steamAchievementMarkerExistsSingle(fs, marker)) {
+                ok = steamAchievementWriteMarker(fs, marker) && ok;
+            }
+        }
+    }
+    return ok;
+}
+
+static RValue builtin_steam_get_achievement(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeBool(false);
+    FileSystem* fs = builtinRunnerFileSystem(ctx);
+    char* name = RValue_toString(args[0]);
+    bool exists = steamAchievementMarkerExists(fs, name);
+    if (exists) steamAchievementEnsureAliases(fs, name);
+    free(name);
+    return RValue_makeBool(exists);
+}
+
+static RValue builtin_steam_set_achievement(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeBool(false);
+    FileSystem* fs = builtinRunnerFileSystem(ctx);
+    if (!fs || !fs->vtable || !fs->vtable->writeFileText) return RValue_makeBool(false);
+
+    char* name = RValue_toString(args[0]);
+    if (name[0] == '\0') {
+        free(name);
+        return RValue_makeBool(false);
+    }
+
+    bool ok = steamAchievementWriteMarker(fs, name);
+    ok = steamAchievementEnsureAliases(fs, name) && ok;
+    free(name);
+    return RValue_makeBool(ok);
+}
 
 // Legacy d3d 3D model API — Undertale references these but never actually
 // hits the call sites on overworld; safe to no-op.
@@ -10652,23 +10837,79 @@ static RValue builtin_parameter_string(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED
 
 // ===[ Real: directory_create / directory_exists ]===
 
-static RValue builtin_directory_create(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
-    if (argCount < 1) return RValue_makeUndefined();
-    char* path = RValue_toString(args[0]);
+static void builtin_mkdir_one(const char* path) {
+    if (!path || !*path) return;
 #if defined(_WIN32) && !defined(__MINGW32__)
     (void)mkdir(path); // MSVC: single-arg form
 #else
     (void)mkdir(path, 0777); // POSIX / MinGW / devkitARM newlib
 #endif
+}
+
+static void builtin_mkdir_recursive(const char* path) {
+    if (!path || !*path) return;
+
+    char* buf = safeStrdup(path);
+    for (char* p = buf; *p; p++) {
+        if (*p == '\\') *p = '/';
+    }
+
+    size_t len = strlen(buf);
+    while (len > 0 && buf[len - 1] == '/') {
+        buf[--len] = '\0';
+    }
+    if (len == 0) {
+        free(buf);
+        return;
+    }
+
+    char* scan = buf;
+    char* device = strstr(buf, ":/");
+    if (device) {
+        scan = device + 2;
+    } else {
+        while (*scan == '/') scan++;
+    }
+
+    for (char* p = scan; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        builtin_mkdir_one(buf);
+        *p = '/';
+    }
+    builtin_mkdir_one(buf);
+    free(buf);
+}
+
+static char* builtin_resolve_directory_path(VMContext* ctx, const char* path) {
+#ifdef PLATFORM_3DS
+    Runner* runner = ctx ? (Runner*) ctx->runner : nullptr;
+    if (runner && runner->fileSystem && runner->fileSystem->vtable && runner->fileSystem->vtable->resolvePath) {
+        return runner->fileSystem->vtable->resolvePath(runner->fileSystem, path);
+    }
+#else
+    (void) ctx;
+#endif
+    return safeStrdup(path ? path : "");
+}
+
+static RValue builtin_directory_create(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeUndefined();
+    char* path = RValue_toString(args[0]);
+    char* resolved = builtin_resolve_directory_path(ctx, path);
+    builtin_mkdir_recursive(resolved);
+    free(resolved);
     free(path);
     return RValue_makeUndefined();
 }
 
-static RValue builtin_directory_exists(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+static RValue builtin_directory_exists(VMContext* ctx, RValue* args, int32_t argCount) {
     if (argCount < 1) return RValue_makeBool(false);
     char* path = RValue_toString(args[0]);
+    char* resolved = builtin_resolve_directory_path(ctx, path);
     struct stat st;
-    bool ok = (stat(path, &st) == 0) && S_ISDIR(st.st_mode);
+    bool ok = (stat(resolved, &st) == 0) && S_ISDIR(st.st_mode);
+    free(resolved);
     free(path);
     return RValue_makeBool(ok);
 }
@@ -11212,6 +11453,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "ini_read_string", builtinIniReadString);
     VM_registerBuiltin(ctx, "ini_read_real", builtinIniReadReal);
     VM_registerBuiltin(ctx, "ini_section_exists", builtinIniSectionExists);
+    VM_registerBuiltin(ctx, "ini_section_delete", builtinIniSectionDelete);
     VM_registerBuiltin(ctx, "ini_open_from_string", builtin_ini_open_from_string);
 
     // File

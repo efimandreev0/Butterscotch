@@ -1542,6 +1542,40 @@ static void unload_nonresident_source_pages(CtrRenderer *ctx) {
     }
 }
 
+static void queue_pending_load(CtrRenderer *ctx, int32_t id, bool isSource) {
+    int32_t enc = (id & 0x7FFFFFFF) | (isSource ? (int32_t) 0x80000000 : 0);
+    for (uint32_t i = 0; i < ctx->pendingLoadCount; i++) {
+        if (ctx->pendingLoads[i] == enc) return;
+    }
+    if (ctx->pendingLoadCount >= CTR_PENDING_LOADS_MAX) return;
+    ctx->pendingLoads[ctx->pendingLoadCount++] = enc;
+}
+
+static void load_page_dyn(CtrRenderer *ctx, DataWin *dw, int32_t idx);
+static bool load_source_page_dyn(CtrRenderer *ctx, int pageId);
+
+static void flush_pending_loads(CtrRenderer *ctx) {
+    if (ctx->pendingLoadCount == 0) return;
+    uint32_t count = ctx->pendingLoadCount;
+    int32_t snapshot[CTR_PENDING_LOADS_MAX];
+    for (uint32_t i = 0; i < count; i++) snapshot[i] = ctx->pendingLoads[i];
+    ctx->pendingLoadCount = 0;
+
+    bool savedPreloading = ctx->preloadingAtlases;
+    ctx->preloadingAtlases = true;
+    for (uint32_t i = 0; i < count; i++) {
+        int32_t enc = snapshot[i];
+        bool isSource = (enc & 0x80000000) != 0;
+        int32_t id = enc & 0x7FFFFFFF;
+        if (isSource) {
+            load_source_page_dyn(ctx, id);
+        } else {
+            load_page_dyn(ctx, ctx->base.dataWin, id);
+        }
+    }
+    ctx->preloadingAtlases = savedPreloading;
+}
+
 static bool load_source_page_dyn(CtrRenderer *ctx, int pageId) {
     CtrSourcePage *page = get_source_page(ctx, pageId);
     if (!page) return false;
@@ -1554,6 +1588,10 @@ static bool load_source_page_dyn(CtrRenderer *ctx, int pageId) {
         page->loadFailed = false;
     }
     if (page->fileOffset == 0 || !ctx->atlasFile) return false;
+    if (ctx->inFrame && !ctx->preloadingAtlases) {
+        queue_pending_load(ctx, pageId, true);
+        return false;
+    }
 
     free_old_source_pages(ctx);
 
@@ -1620,6 +1658,11 @@ static void load_page_dyn(CtrRenderer *ctx, DataWin *dw, int32_t idx) {
 
     CtrPage *page = &ctx->pages[idx];
     if (page->loaded) return;
+
+    if (ctx->inFrame && !ctx->preloadingAtlases) {
+        queue_pending_load(ctx, idx, false);
+        return;
+    }
 
     free_old_pages(ctx);
 
@@ -1846,20 +1889,25 @@ static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh, int targetW, in
     C3D_RenderTargetClear(ctx->appTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
 
     bool rightEyeReady = false;
-    if (C3D_TexInitVRAM(&ctx->appTexRight, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8) ||
-        C3D_TexInit(&ctx->appTexRight, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8)) {
-        C3D_TexSetFilter(&ctx->appTexRight, GPU_LINEAR, GPU_LINEAR);
-        C3D_TexSetWrap(&ctx->appTexRight, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
-        ctx->appTargetRight = C3D_RenderTargetCreateFromTex(&ctx->appTexRight, GPU_TEXFACE_2D, 0, -1);
-        if (ctx->appTargetRight) {
-            C3D_RenderTargetClear(ctx->appTargetRight, C3D_CLEAR_ALL, 0x000000FF, 0);
-            rightEyeReady = true;
-            CTR_RENDER_LOG("right-eye app surface ready");
+    if (ctx->stereoEnabled) {
+        if (C3D_TexInitVRAM(&ctx->appTexRight, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8) ||
+            C3D_TexInit(&ctx->appTexRight, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8)) {
+            C3D_TexSetFilter(&ctx->appTexRight, GPU_LINEAR, GPU_LINEAR);
+            C3D_TexSetWrap(&ctx->appTexRight, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+            ctx->appTargetRight = C3D_RenderTargetCreateFromTex(&ctx->appTexRight, GPU_TEXFACE_2D, 0, -1);
+            if (ctx->appTargetRight) {
+                C3D_RenderTargetClear(ctx->appTargetRight, C3D_CLEAR_ALL, 0x000000FF, 0);
+                rightEyeReady = true;
+                CTR_RENDER_LOG("right-eye app surface ready");
+            }
         }
-    }
-    if (!rightEyeReady) {
+        if (!rightEyeReady) {
+            destroy_right_app_surface(ctx);
+            fprintf(stderr, "CtrRenderer: right-eye app surface unavailable, stereoscopic pass disabled for this size\n");
+        }
+    } else {
         destroy_right_app_surface(ctx);
-        fprintf(stderr, "CtrRenderer: right-eye app surface unavailable, stereoscopic pass disabled for this size\n");
+        CTR_RENDER_LOG("right-eye app surface skipped (stereo disabled)");
     }
 
     ctx->appReady = true;
@@ -1979,7 +2027,7 @@ static void ctr_init(Renderer *ren, DataWin *dw) {
             fprintf(stderr, "CtrRenderer: failed to create top render target\n");
         }
     }
-    if (!ctx->topTargetRight) {
+    if (!ctx->topTargetRight && ctx->stereoEnabled) {
         ctx->topTargetRight = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH16);
         if (ctx->topTargetRight) {
             C3D_RenderTargetSetOutput(ctx->topTargetRight, GFX_TOP, GFX_RIGHT, DISPLAY_TRANSFER_FLAGS);
@@ -2140,6 +2188,9 @@ static void ctr_begin_frame(Renderer *ren, int32_t gw, int32_t gh, int32_t ww, i
         ctx->batchVerts = 0;
         ctx->batchTex = NULL;
         ctx->drawsSinceSplit = 0;
+    }
+    if (ctx->pendingLoadCount > 0) {
+        flush_pending_loads(ctx);
     }
 
     C3D_BufInfo *buf = C3D_GetBufInfo();
@@ -3425,6 +3476,167 @@ static void ctr_clear_target(Renderer *ren, uint32_t color, float alpha) {
     ctr_safe_frame_split(ctx);
     C3D_RenderTargetClear(ctx->activeTarget, C3D_CLEAR_ALL, rgba, 0);
 }
+static void ctr_clear_screen(Renderer *ren, uint32_t color) {
+    ctr_clear_target(ren, color, 1.0f);
+}
+
+static void ctr_draw_surface_part(Renderer *ren, int32_t surfaceId,
+                                  int32_t x, int32_t y,
+                                  int32_t left, int32_t top, int32_t width, int32_t height,
+                                  float xscale, float yscale,
+                                  uint32_t color, float alpha) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    float c[4];
+    col2fv(color, alpha, c);
+    if (c[3] <= 0.f) return;
+
+    C3D_Tex *tex;
+    int srcW, srcH, potW, potH;
+    C3D_RenderTarget *sourceTarget;
+    if (surfaceId == -1) {
+        if (!ctx->appReady) return;
+        tex = &ctx->appTex;
+        srcW = ctx->appRenderW;
+        srcH = ctx->appRenderH;
+        potW = ctx->appPotW;
+        potH = ctx->appPotH;
+        sourceTarget = ctx->appTarget;
+    } else {
+        CtrSurface *surf = get_surface(ctx, surfaceId);
+        if (!surf) return;
+        tex = &surf->tex;
+        srcW = surf->width;
+        srcH = surf->height;
+        potW = surf->potW;
+        potH = surf->potH;
+        sourceTarget = surf->target;
+    }
+    if (sourceTarget && sourceTarget == ctx->activeTarget) return;
+    if (left < 0) { width += left; x += (int32_t)(-left * xscale); left = 0; }
+    if (top  < 0) { height += top; y += (int32_t)(-top  * yscale); top  = 0; }
+    if (left + width > srcW)  width  = srcW - left;
+    if (top  + height > srcH) height = srcH - top;
+    if (width <= 0 || height <= 0) return;
+    float u0 = (float) left / (float) potW;
+    float u1 = (float) (left + width) / (float) potW;
+    float v0 = (float) (potH - top) / (float) potH;
+    float v1 = (float) (potH - (top + height)) / (float) potH;
+
+    float dstW = (float) width * xscale;
+    float dstH = (float) height * yscale;
+    float fx = (float) x;
+    float fy = (float) y;
+
+    if (quad_culled(ctx, fx, fy, fx + dstW, fy, fx + dstW, fy + dstH, fx, fy + dstH)) return;
+
+    flush_batch(ctx);
+    ctr_safe_frame_split(ctx);
+    push_quad(ctx, tex,
+              fx,        fy,
+              fx + dstW, fy,
+              fx + dstW, fy + dstH,
+              fx,        fy + dstH,
+              u0, v0, u1, v1, c);
+}
+
+static void ctr_draw_surface_stretched(Renderer *ren, int32_t surfaceId,
+                                       float x, float y, float width, float height) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    if (width <= 0.f || height <= 0.f) return;
+
+    int32_t srcW = 0, srcH = 0;
+    if (!ctr_surface_get_size(ren, surfaceId, &srcW, &srcH)) return;
+    if (srcW <= 0 || srcH <= 0) return;
+
+    float xs = width  / (float) srcW;
+    float ys = height / (float) srcH;
+    uint32_t color = ren->drawColor;
+    float alpha = ren->drawAlpha;
+    ctr_draw_surface(ren, surfaceId, x, y, xs, ys, 0.0f, color, alpha);
+    (void) ctx;
+}
+
+static void ctr_surface_resize(Renderer *ren, int32_t surfaceId, int32_t width, int32_t height) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrSurface *surf = get_surface(ctx, surfaceId);
+    if (!surf || width <= 0 || height <= 0) return;
+    if (surf->width == width && surf->height == height) return;
+    flush_batch(ctx);
+    if (ctx->inFrame) ctr_safe_frame_split(ctx);
+    bool wasActive = (ctx->activeTarget == surf->target);
+    if (wasActive) bind_target(ctx, ctx->appTarget);
+
+    surface_release_storage(ctx, surf);
+    memset(surf, 0, sizeof(*surf));
+    if (!surface_alloc_storage(surf, width, height)) {
+        return;
+    }
+    surf->used = true;
+
+    if (ctx->inFrame) {
+        C3D_RenderTarget *oldTgt = ctx->activeTarget;
+        C3D_FrameDrawOn(surf->target);
+        C3D_RenderTargetClear(surf->target, C3D_CLEAR_ALL, 0x00000000, 0);
+        if (oldTgt) {
+            C3D_FrameDrawOn(oldTgt);
+            rebind_state(ctx);
+            apply_projection(ctx, &ctx->currentProjection);
+            apply_blend(ctx, ctx->currentBlendMode);
+        }
+    }
+}
+static void ctr_surface_copy(Renderer *ren,
+                             int32_t destSurfaceId, int32_t destX, int32_t destY,
+                             int32_t srcSurfaceId, int32_t srcX, int32_t srcY,
+                             int32_t srcW, int32_t srcH, bool part) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    if (destSurfaceId < 0) return;
+    CtrSurface *dst = get_surface(ctx, destSurfaceId);
+    if (!dst || !dst->target) return;
+
+    int32_t fullW = 0, fullH = 0;
+    if (!ctr_surface_get_size(ren, srcSurfaceId, &fullW, &fullH)) return;
+    if (!part) {
+        srcX = 0;
+        srcY = 0;
+        srcW = fullW;
+        srcH = fullH;
+    }
+    if (srcW <= 0 || srcH <= 0) return;
+    flush_batch(ctx);
+    if (ctx->inFrame) ctr_safe_frame_split(ctx);
+
+    if (ctx->targetStackDepth >= CTR_TARGET_STACK_DEPTH) return;
+    CtrTargetState *st = &ctx->targetStack[ctx->targetStackDepth++];
+    st->target = ctx->activeTarget ? ctx->activeTarget : ctx->appTarget;
+    st->viewport[0] = ctx->currentViewport[0];
+    st->viewport[1] = ctx->currentViewport[1];
+    st->viewport[2] = ctx->currentViewport[2];
+    st->viewport[3] = ctx->currentViewport[3];
+    st->projection = ctx->currentProjection;
+    int savedBlend = ctx->currentBlendMode;
+
+    bind_target(ctx, dst->target);
+    set_viewport_logical(ctx, dst->target, 0, 0, dst->width, dst->height);
+
+    C3D_Mtx proj;
+    make_ortho_topleft(&proj, (float) dst->width, (float) dst->height);
+    apply_projection(ctx, &proj);
+    apply_blend(ctx, 0);
+
+    ctr_draw_surface_part(ren, srcSurfaceId, destX, destY, srcX, srcY, srcW, srcH, 1.0f, 1.0f, 0xFFFFFFu, 1.0f);
+
+    flush_batch(ctx);
+    ctr_safe_frame_split(ctx);
+    CtrTargetState restored = ctx->targetStack[--ctx->targetStackDepth];
+    C3D_RenderTarget *tgt = restored.target ? restored.target : ctx->appTarget;
+    bind_target(ctx, tgt);
+    set_viewport_logical(ctx, tgt,
+                         restored.viewport[0], restored.viewport[1],
+                         restored.viewport[2], restored.viewport[3]);
+    apply_projection(ctx, &restored.projection);
+    apply_blend(ctx, savedBlend);
+}
 
 static uint32_t findOrAllocTpagSlot(CtrRenderer *ctx) {
     DataWin *dw = ctx->base.dataWin;
@@ -3838,7 +4050,13 @@ static RendererVtable vtable = {
     .createSurface = ctr_create_surface, .freeSurface = ctr_free_surface,
     .surfaceExists = ctr_surface_exists, .surfaceGetSize = ctr_surface_get_size,
     .surfaceSetTarget = ctr_surface_set_target, .surfaceResetTarget = ctr_surface_reset_target,
-    .drawSurface = ctr_draw_surface, .clearTarget = ctr_clear_target,
+    .drawSurface = ctr_draw_surface,
+    .drawSurfacePart = ctr_draw_surface_part,
+    .drawSurfaceStretched = ctr_draw_surface_stretched,
+    .surfaceResize = ctr_surface_resize,
+    .surfaceCopy = ctr_surface_copy,
+    .clearScreen = ctr_clear_screen,
+    .clearTarget = ctr_clear_target,
     .gpuSetBlendMode = ctr_gpu_blend_mode,
     .gpuSetBlendModeExt = ctr_gpu_blend_mode_ext,
     .gpuSetBlendEnable = ctr_gpu_blend_enable,
@@ -3859,5 +4077,35 @@ Renderer *CtrRenderer_create(void) {
     ctx->base.drawAlpha = 1.0f;
     ctx->base.drawFont = -1;
     ctx->base.circlePrecision = 36;
+    ctx->stereoEnabled = false;
+    ctx->pendingLoadCount = 0;
     return (Renderer *) ctx;
+}
+
+void CtrRenderer_setStereoEnabled(Renderer *ren, bool enabled) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    if (ctx == NULL) return;
+    if (ctx->stereoEnabled == enabled) return;
+    ctx->stereoEnabled = enabled;
+    if (!enabled) {
+        flush_batch(ctx);
+        destroy_right_app_surface(ctx);
+        if (ctx->topTargetRight) {
+            C3D_RenderTargetDelete(ctx->topTargetRight);
+            ctx->topTargetRight = NULL;
+        }
+    } else {
+        if (!ctx->topTargetRight && ctx->base.dataWin != NULL) {
+            ctx->topTargetRight = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH16);
+            if (ctx->topTargetRight) {
+                C3D_RenderTargetSetOutput(ctx->topTargetRight, GFX_TOP, GFX_RIGHT, DISPLAY_TRANSFER_FLAGS);
+            }
+        }
+        ctx->appReady = false;
+    }
+}
+
+bool CtrRenderer_getStereoEnabled(Renderer *ren) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    return ctx != NULL && ctx->stereoEnabled;
 }

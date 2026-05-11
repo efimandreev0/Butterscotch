@@ -6,6 +6,8 @@
 
 #define MAX_CTR_CHANNELS 24
 #define MAX_LRU_CACHE 64
+#define MAX_CTR_STREAMS 8
+#define CTR_STREAM_ID_BASE 200000
 
 typedef struct {
     uint32_t dataOffset;
@@ -17,6 +19,16 @@ typedef struct {
     u16      adpcmCoefs[16];
     bool     preferStream;
 } CtrSoundDef;
+typedef struct {
+    bool     used;
+    void*    data;
+    uint32_t dataSize;
+    uint32_t sampleRate;
+    uint32_t totalFrames;
+    uint8_t  channels;
+    uint8_t  format;
+    char     path[192];
+} CtrStream;
 
 typedef struct {
     int32_t id;
@@ -27,7 +39,7 @@ typedef struct {
 
 typedef struct {
     int32_t currentSoundId;
-    int32_t instanceId;    // <--- ДОБАВЛЕН УНИКАЛЬНЫЙ ID ИНСТАНСА
+    int32_t instanceId;
     int32_t priority;
     bool    loop;
     float   gain;
@@ -49,6 +61,7 @@ typedef struct {
 
     CtrCacheEntry cache[MAX_LRU_CACHE];
     CtrChannelState chans[MAX_CTR_CHANNELS];
+    CtrStream streams[MAX_CTR_STREAMS];
 
     float masterGain;
     uint32_t frame;

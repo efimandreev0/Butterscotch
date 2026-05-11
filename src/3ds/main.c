@@ -15,15 +15,12 @@
 #include "ctr_renderer.h"
 #include "ctr_texture_cache.h"
 #include "ctr_file_system.h"
-//#include "n3ds_audio_system.h"
 #include "ctr_audio_system.h"
 #include "render2d_shader_shbin.h"
 #include "launcher.h"
 #include "stb_ds.h"
-
-//u32 __ctru_heap_size        = 35 * 1024 * 1024;
 u32 __ctru_linear_heap_size = 48 * 1024 * 1024;
-u32 __stacksize__ = 64 * 1024;
+u32 __stacksize__ = 256 * 1024;
 
 #define BASE_DIR  "sdmc:/3ds/butterscotch"
 char g_current_data_path[256];
@@ -54,10 +51,6 @@ static void printMemoryStats(void) {
     float linearFreeMB = (float) linearFree / 1024.0f / 1024.0f;
     printf("[MEMORY] Heap Used: %.2f MB | LINEAR RAM FREE: %.2f MB\n", heapUsedMB, linearFreeMB);
 }
-
-// Per-second FPS + memory snapshot, written to sdmc:/3ds/butter_out.txt via the
-// stdout redirect set up in setup_logging(). We accumulate frame count between
-// stamps instead of computing instantaneous FPS so the number is stable.
 static void logPerfSample(int *frames, u64 *windowStart) {
     (*frames)++;
     u64 now = osGetTime();
@@ -513,7 +506,7 @@ int main(int argc, char **argv) {
                     ren->vtable->endGUI(ren);
                     ren->vtable->flush(ren);
                 }
-            } // END DUAL/MONO EYE RENDERING FOR CYCLE!
+            }
 
             run->viewCurrent = 0;
             ren->vtable->endFrame(ren);
