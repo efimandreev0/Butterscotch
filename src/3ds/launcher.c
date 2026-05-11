@@ -2216,6 +2216,131 @@ static bool launcher_run_settings(LauncherGfx *gfx) {
     return false;
 }
 
+static const char *g_about_lines[] = {
+    "BUTTERSCOTCH 3DS",
+    "COMMUNITY PORT FOR NINTENDO 3DS",
+    "ORIGINAL: MRPOWERGAMERBR/BUTTERSCOTCH",
+    "GPLV3",
+    "",
+    "CURRENT FORK MAINTAINERS",
+    "EFIM EFIMANDREEV0",
+    "VYACHESLAV IVANOV PUGEMON",
+    "",
+    "UPSTREAM CONTRIBUTORS",
+    "ABEL BRIGGS",
+    "CASRIEL.",
+    "CLASSIC",
+    "ELIANDRO",
+    "FANCY2209",
+    "JIMKOUTSO2008",
+    "KEVIN ANDRADE",
+    "KRISCROSSAPPLE",
+    "KRISP",
+    "LDA [48281TH GH ALT]",
+    "LUKE WARNER",
+    "MATTX",
+    "MRPOWERGAMERBR",
+    "SERG ONE ZERO",
+    "",
+    "README NOTES",
+    "CREATED USING GENERATIVE AI",
+    "3DS QUESTIONS STAY OUT OF ORIGINAL SERVER",
+};
+
+#define ABOUT_LINE_COUNT ((int)(sizeof(g_about_lines) / sizeof(g_about_lines[0])))
+#define ABOUT_VISIBLE_LINES 10
+
+static void about_draw_top(LauncherGfx *gfx, int first, float t) {
+    const LauncherTheme *th = launcher_current_theme();
+    const float W = (float) LAUNCHER_TOP_W;
+    const float H = (float) LAUNCHER_TOP_H;
+
+    launcher_bind_screen(gfx, &gfx->topScreen, true, 0x070914FF);
+    launcher_draw_themed_background(gfx, t, W, H, th);
+    launcher_draw_top_chrome(gfx, W, th, t, "ABOUT");
+
+    float y = 42.f;
+    for (int row = 0; row < ABOUT_VISIBLE_LINES; row++) {
+        int idx = first + row;
+        if (idx >= ABOUT_LINE_COUNT) break;
+        const char *line = g_about_lines[idx];
+        if (!line[0]) {
+            y += 8.f;
+            continue;
+        }
+        bool head = idx == 0 || strcmp(line, "CURRENT FORK MAINTAINERS") == 0 ||
+                    strcmp(line, "UPSTREAM CONTRIBUTORS") == 0 ||
+                    strcmp(line, "README NOTES") == 0;
+        float scale = head ? 1.18f : 1.02f;
+        float width = launcher_text_width(line, scale);
+        if (width > 354.f) scale *= 354.f / width;
+        launcher_draw_text_rgb(gfx, line, 23.f, y, scale,
+                               head ? th->text_title : th->text_main,
+                               head ? 1.f : 0.92f);
+        y += head ? 18.f : 15.f;
+    }
+
+    char page[32];
+    snprintf(page, sizeof(page), "%d/%d", first + 1, ABOUT_LINE_COUNT);
+    launcher_draw_centered_text_rgb(gfx, page, W * 0.5f, H - 16.f, 0.95f, th->text_subtle, 0.88f);
+}
+
+static void about_draw_bottom(LauncherGfx *gfx, int first, float t) {
+    if (!gfx->bottomScreen.ready) return;
+    const LauncherTheme *th = launcher_current_theme();
+    const float W = (float) LAUNCHER_BOT_W;
+    const float H = (float) LAUNCHER_BOT_H;
+
+    launcher_bind_screen(gfx, &gfx->bottomScreen, true, 0x050711FF);
+    launcher_draw_themed_background(gfx, t * 0.7f, W, H, th);
+
+    launcher_rect(gfx, 0, 0, W, 22, 0.04f, 0.035f, 0.085f, 0.92f);
+    launcher_rect(gfx, 0, 22, W, 1,
+                  th->accent[0], th->accent[1], th->accent[2], 0.85f);
+    launcher_draw_text_rgb(gfx, "AUTHORS", 10, 7, 1.20f, th->text_title, 1.f);
+
+    launcher_draw_centered_text_rgb(gfx, "CURRENT FORK", W * 0.5f, 52.f, 1.25f, th->text_title, 1.f);
+    launcher_draw_centered_text_rgb(gfx, "EFIM EFIMANDREEV0", W * 0.5f, 82.f, 1.08f, th->text_main, 0.96f);
+    launcher_draw_centered_text_rgb(gfx, "VYACHESLAV IVANOV PUGEMON", W * 0.5f, 104.f, 0.95f, th->text_main, 0.96f);
+    launcher_draw_centered_text_rgb(gfx, "UPSTREAM CREDIT IN AUTHORS", W * 0.5f, 140.f, 0.95f, th->text_subtle, 0.90f);
+    launcher_draw_centered_text_rgb(gfx, "README: COMMUNITY 3DS PORT", W * 0.5f, 158.f, 0.90f, th->text_subtle, 0.86f);
+
+    char pos[40];
+    snprintf(pos, sizeof(pos), "LINE %d OF %d", first + 1, ABOUT_LINE_COUNT);
+    launcher_draw_centered_text_rgb(gfx, pos, W * 0.5f, 184.f, 0.92f, th->text_subtle, 0.82f);
+
+    launcher_rect(gfx, 0, H - 30, W, 30, 0.030f, 0.028f, 0.065f, 0.93f);
+    launcher_draw_text_rgb(gfx, "UP/DOWN SCROLL", 8, H - 23, 0.95f, th->text_main, 0.95f);
+    launcher_draw_text_rgb(gfx, "A/B/START BACK", 8, H - 12, 0.95f, th->text_subtle, 0.85f);
+}
+
+static void launcher_run_about(LauncherGfx *gfx) {
+    if (!gfx || !gfx->ready) return;
+
+    int first = 0;
+    int maxFirst = ABOUT_LINE_COUNT - ABOUT_VISIBLE_LINES;
+    if (maxFirst < 0) maxFirst = 0;
+
+    while (aptMainLoop()) {
+        hidScanInput();
+        u32 kDown = hidKeysDown();
+
+        if (kDown & (KEY_A | KEY_B | KEY_START)) return;
+        if (kDown & (KEY_DOWN | KEY_DDOWN | KEY_CPAD_DOWN | KEY_R)) first++;
+        if (kDown & (KEY_UP | KEY_DUP | KEY_CPAD_UP | KEY_L)) first--;
+        if (first < 0) first = 0;
+        if (first > maxFirst) first = maxFirst;
+
+        if (launcher_begin_frame(gfx)) {
+            float t = launcher_anim_seconds();
+            about_draw_top(gfx, first, t);
+            about_draw_bottom(gfx, first, t);
+            launcher_end_frame(gfx);
+        }
+        gspWaitForVBlank();
+    }
+}
+
 int launcher_run_menu(LauncherGfx *gfx) {
     launcher_scan_games();
     bool gfx_ready = (gfx && gfx->ready);
@@ -2224,7 +2349,11 @@ int launcher_run_menu(LauncherGfx *gfx) {
         while (aptMainLoop()) {
             hidScanInput();
             u32 kDown = hidKeysDown();
-            if (kDown & KEY_START) return -1;
+            if (kDown & KEY_B) return -1;
+            if (kDown & KEY_START) {
+                launcher_run_about(gfx);
+                continue;
+            }
             if (kDown & KEY_SELECT) {
                 if (launcher_run_settings(gfx)) {
                 }
@@ -2239,8 +2368,8 @@ int launcher_run_menu(LauncherGfx *gfx) {
                 launcher_draw_centered_text_rgb(gfx, "SDMC:/3DS/BUTTERSCOTCH", 200.f, 132.f, 1.45f, th->text_subtle,
                                                 0.9f);
                 launcher_draw_bottom_panel(gfx, -1, t,
-                                           "SELECT = SETTINGS    START = QUIT",
-                                           "PLACE GAMES IN SDMC:/3DS/BUTTERSCOTCH");
+                                           "SELECT = SETTINGS   START = ABOUT",
+                                           "B = QUIT   PLACE GAMES IN SDMC:/3DS/BUTTERSCOTCH");
                 launcher_end_frame(gfx);
             }
             gspWaitForVBlank();
@@ -2261,7 +2390,11 @@ int launcher_run_menu(LauncherGfx *gfx) {
         hidScanInput();
         u32 kDown = hidKeysDown();
 
-        if (kDown & KEY_START) return -1;
+        if (kDown & KEY_B) return -1;
+        if (kDown & KEY_START) {
+            launcher_run_about(gfx);
+            continue;
+        }
         if (kDown & (KEY_RIGHT | KEY_DRIGHT | KEY_CPAD_RIGHT)) {
             selected++;
             select_anim = 0.f;
@@ -2307,8 +2440,8 @@ int launcher_run_menu(LauncherGfx *gfx) {
             float t = launcher_anim_seconds();
             launcher_render_grid(gfx, selected, t, cam_y, select_anim);
             launcher_draw_bottom_panel(gfx, selected, t,
-                                       "A = LAUNCH   SELECT = SETTINGS   START = QUIT",
-                                       "DPAD/CPAD = MOVE   L/R = PAGE");
+                                       "A = LAUNCH   SELECT = SETTINGS   START = ABOUT",
+                                       "DPAD/CPAD = MOVE   L/R = PAGE   B = QUIT");
             launcher_end_frame(gfx);
         }
         gspWaitForVBlank();
