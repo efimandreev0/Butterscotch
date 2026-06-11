@@ -1,19 +1,10 @@
-// Original Code by MrPowerGamerBR and the Butterscotch contributors.
-// Modifications Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
-//
-// This file is part of Butterscotch (Nintendo 3DS port).
-//
-// Butterscotch is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 3.
-
 #pragma once
 
 #include "common.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <math.h>
-#include "matrix_math.h"
+
 #include "data_win.h"
 #include "instance.h"
 
@@ -72,12 +63,11 @@ typedef struct {
     void (*drawText)(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, float angleDeg);
     void (*drawTextColor)(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, float angleDeg, int32_t c1, int32_t c2, int32_t c3, int32_t c4, float alpha);
     void (*flush)(Renderer* renderer);
-    void (*clearScreen)(Renderer* renderer, uint32_t color);
-    void (*clearTarget)(Renderer* renderer, uint32_t color, float alpha);
+    void (*prefetchTexturePage)(Renderer* renderer, int32_t texturePageIndex);
     void (*prefetchSprite)(Renderer* renderer, int32_t spriteIndex);
     void (*prefetchSprites)(Renderer* renderer, const int32_t* spriteIndices, uint32_t spriteCount);
-    int32_t (*createSpriteFromSurface)(Renderer* renderer, int32_t surfaceID, int32_t x, int32_t y, int32_t w, int32_t h, bool removeback, bool smooth, int32_t xorig, int32_t yorig);
-    int32_t (*createSpriteFromRgba)(Renderer* renderer, const uint8_t* rgba, int32_t w, int32_t h, bool removeback, bool smooth, int32_t xorig, int32_t yorig);
+    int32_t (*createSpriteFromSurface)(Renderer* renderer, int32_t x, int32_t y, int32_t w, int32_t h, bool removeback, bool smooth, int32_t xorig, int32_t yorig);
+    int32_t (*createSpriteFromSurfaceEx)(Renderer* renderer, int32_t surfaceId, int32_t x, int32_t y, int32_t w, int32_t h, bool removeback, bool smooth, int32_t xorig, int32_t yorig);
     void (*deleteSprite)(Renderer* renderer, int32_t spriteIndex);
     int32_t (*createSurface)(Renderer* renderer, int32_t width, int32_t height);
     void (*freeSurface)(Renderer* renderer, int32_t surfaceId);
@@ -85,6 +75,8 @@ typedef struct {
     bool (*surfaceGetSize)(Renderer* renderer, int32_t surfaceId, int32_t* width, int32_t* height);
     bool (*surfaceSetTarget)(Renderer* renderer, int32_t surfaceId);
     void (*surfaceResetTarget)(Renderer* renderer);
+    void (*drawSurface)(Renderer* renderer, int32_t surfaceId, float x, float y, float xscale, float yscale, float angleDeg, uint32_t color, float alpha);
+    void (*clearTarget)(Renderer* renderer, uint32_t color, float alpha);
     void (*gpuSetBlendMode)(Renderer* renderer, int32_t mode);
     void (*gpuSetBlendModeExt)(Renderer* renderer, int32_t sfactor, int32_t dfactor);
     void (*gpuSetBlendEnable)(Renderer* renderer, bool enable);
@@ -95,17 +87,6 @@ typedef struct {
     void (*drawTile)(Renderer* renderer, RoomTile* tile, float offsetX, float offsetY);
     // Optional: platform-specific tiled draw (nullptr = use default per-tile drawSprite loop).
     void (*drawTiled)(Renderer* renderer, int32_t tpagIndex, float originX, float originY, float x, float y, float xscale, float yscale, bool tileX, bool tileY, float roomW, float roomH, uint32_t color, float alpha);
-    // Surface Functions
-    bool (*setSurfaceTarget)(Renderer* renderer, int32_t surfaceID);
-    bool (*resetSurfaceTarget)(Renderer* renderer);
-    float (*getSurfaceWidth)(Renderer* renderer, int32_t surfaceID);
-    float (*getSurfaceHeight)(Renderer* renderer, int32_t surfaceID);
-    void (*drawSurface)(Renderer* renderer, int32_t surfaceID, float x, float y, float xscale, float yscale, float angleDeg, uint32_t color, float alpha);
-    void (*drawSurfacePart)(Renderer* renderer, int32_t surfaceID, int32_t x, int32_t y, int32_t left, int32_t top, int32_t width, int32_t height, float xscale, float yscale, uint32_t color, float alpha);
-    void (*drawSurfaceStretched)(Renderer* renderer, int32_t surfaceID, float x, float y, float width, float height);
-    void (*surfaceResize)(Renderer* renderer, int32_t surfaceID, int32_t width, int32_t height);
-    void (*surfaceFree)(Renderer* renderer, int32_t surfaceID);
-    void (*surfaceCopy)(Renderer* renderer, int32_t DestSurfaceID, int32_t DestX, int32_t DestY, int32_t SrcSurfaceID, int32_t SrcX, int32_t SrcY, int32_t SrcW, int32_t SrcH, bool part);
     // Optional: tile a source sub-rect (in tpag source-page space) across a dest rect, for nine-slice Repeat/BlankRepeat at angle 0.
     // srcX/srcY are post tpag->targetX/Y. nullptr = per-tile drawSpritePart fallback (also used for Mirror and non-zero angle).
     void (*drawTiledPart)(Renderer* renderer, int32_t tpagIndex, int32_t srcX, int32_t srcY, int32_t srcW, int32_t srcH, float dstX, float dstY, float dstW, float dstH, uint32_t color, float alpha);
@@ -127,12 +108,7 @@ struct Renderer {
     int32_t drawFont;    // default -1 (no font)
     int32_t drawHalign;  // 0=left, 1=center, 2=right
     int32_t drawValign;  // 0=top, 1=middle, 2=bottom
-    int32_t circlePrecision; // segments used by draw_circle/draw_ellipse, clamped to [4, 64] and rounded down to multiple of 4. Default 24.
-    Matrix4f PreviousViewMatrix;
-    int32_t CPortX;
-    int32_t CPortY;
-    int32_t CPortW;
-    int32_t CPortH;
+    int32_t circlePrecision;
 };
 
 // ===[ Shared Helpers (platform-agnostic) ]===
@@ -212,59 +188,6 @@ static void Renderer_drawSpritePos(Renderer* renderer, int32_t spriteIndex, int3
     renderer->vtable->drawSpritePos(renderer, tpagIndex, x1, y1, x2, y2, x3, y3, x4, y4, alpha);
 }
 
-static int32_t Renderer_createSurface(Renderer* renderer, int32_t width, int32_t height) {
-    if (renderer == nullptr || renderer->vtable == nullptr || renderer->vtable->createSurface == nullptr) return -1;
-    return renderer->vtable->createSurface(renderer, width, height);
-}
-
-static bool Renderer_surfaceExists(Renderer* renderer, int32_t surfaceIndex) {
-    if (surfaceIndex == -1) return true;
-    if (renderer == nullptr || renderer->vtable == nullptr || renderer->vtable->surfaceExists == nullptr) return false;
-    return renderer->vtable->surfaceExists(renderer, surfaceIndex);
-}
-
-static float Renderer_getSurfaceWidth(Renderer* renderer, int32_t surfaceIndex) {
-    if (renderer == nullptr || renderer->vtable == nullptr) return 0.0f;
-    if (renderer->vtable->getSurfaceWidth != nullptr) return renderer->vtable->getSurfaceWidth(renderer, surfaceIndex);
-    if (renderer->vtable->surfaceGetSize != nullptr) {
-        int32_t width = 0;
-        int32_t height = 0;
-        if (renderer->vtable->surfaceGetSize(renderer, surfaceIndex, &width, &height)) return (float) width;
-    }
-    return 0.0f;
-}
-
-static float Renderer_getSurfaceHeight(Renderer* renderer, int32_t surfaceIndex) {
-    if (renderer == nullptr || renderer->vtable == nullptr) return 0.0f;
-    if (renderer->vtable->getSurfaceHeight != nullptr) return renderer->vtable->getSurfaceHeight(renderer, surfaceIndex);
-    if (renderer->vtable->surfaceGetSize != nullptr) {
-        int32_t width = 0;
-        int32_t height = 0;
-        if (renderer->vtable->surfaceGetSize(renderer, surfaceIndex, &width, &height)) return (float) height;
-    }
-    return 0.0f;
-}
-
-
-static bool Renderer_surfaceSetTarget(Renderer* renderer, int32_t surfaceIndex) {
-    if (renderer == nullptr || renderer->vtable == nullptr) return false;
-    if (renderer->vtable->flush != nullptr) renderer->vtable->flush(renderer);
-    if (renderer->vtable->surfaceSetTarget != nullptr) return renderer->vtable->surfaceSetTarget(renderer, surfaceIndex);
-    if (renderer->vtable->setSurfaceTarget != nullptr) return renderer->vtable->setSurfaceTarget(renderer, surfaceIndex);
-    return false;
-}
-
-static bool Renderer_surfaceResetTarget(Renderer* renderer) {
-    if (renderer == nullptr || renderer->vtable == nullptr) return false;
-    if (renderer->vtable->flush != nullptr) renderer->vtable->flush(renderer);
-    if (renderer->vtable->surfaceResetTarget != nullptr) {
-        renderer->vtable->surfaceResetTarget(renderer);
-        return true;
-    }
-    if (renderer->vtable->resetSurfaceTarget != nullptr) return renderer->vtable->resetSurfaceTarget(renderer);
-    return false;
-}
-
 // Draws part of a sprite with extended parameters (scale, rotation, color, alpha)
 static void Renderer_drawSpritePartExt(Renderer* renderer, int32_t spriteIndex, int32_t subimg, int32_t left, int32_t top, int32_t width, int32_t height, float x, float y, float xscale, float yscale, float angleDeg, float pivotX, float pivotY, uint32_t color, float alpha) {
     DataWin* dw = renderer->dataWin;
@@ -304,40 +227,14 @@ static void Renderer_drawSpritePart(Renderer* renderer, int32_t spriteIndex, int
     Renderer_drawSpritePartExt(renderer, spriteIndex, subimg, left, top, width, height, x, y, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0xFFFFFF, renderer->drawAlpha);
 }
 
-static int32_t Renderer_normalizeCirclePrecision(int32_t precision) {
-    if (4 > precision) precision = 4;
-    if (precision > 64) precision = 64;
-    return precision & 0x7C;
-}
-
 static void Renderer_drawCircle(Renderer* renderer, float x, float y, float radius, bool outline) {
-    if (renderer == nullptr || renderer->vtable == nullptr) return;
     if (renderer->vtable->drawCircle != nullptr) {
         renderer->vtable->drawCircle(renderer, x, y, radius, renderer->drawColor, renderer->drawAlpha, outline, renderer->circlePrecision);
-        return;
-    }
-    int32_t segments = Renderer_normalizeCirclePrecision(renderer->circlePrecision);
-    float step = 6.2831853f / (float) segments;
-    float prevX = x + radius;
-    float prevY = y;
-    for (int32_t i = 1; i <= segments; i++) {
-        float angle = step * (float) i;
-        float curX = x + radius * cosf(angle);
-        float curY = y + radius * sinf(angle);
-        if (outline) {
-            if (renderer->vtable->drawLine != nullptr) {
-                renderer->vtable->drawLine(renderer, prevX, prevY, curX, curY, 1.0f, renderer->drawColor, renderer->drawAlpha);
-            }
-        } else if (renderer->vtable->drawTriangle != nullptr) {
-            renderer->vtable->drawTriangle(renderer, x, y, prevX, prevY, curX, curY, false);
-        }
-        prevX = curX;
-        prevY = curY;
     }
 }
 
 static void Renderer_drawEllipse(Renderer* renderer, float x1, float y1, float x2, float y2, bool outline) {
-    if (renderer == nullptr || renderer->vtable == nullptr) return;
+    if (renderer->vtable->drawEllipse == nullptr) return;
     if (x1 > x2) {
         float t = x1;
         x1 = x2;
@@ -353,26 +250,7 @@ static void Renderer_drawEllipse(Renderer* renderer, float x1, float y1, float x
     float cy = (y1 + y2) * 0.5f;
     float rx = (x2 - x1) * 0.5f;
     float ry = (y2 - y1) * 0.5f;
-    if (renderer->vtable->drawEllipse != nullptr) {
-        renderer->vtable->drawEllipse(renderer, cx, cy, rx, ry, renderer->drawColor, renderer->drawAlpha, outline, renderer->circlePrecision);
-        return;
-    }
-    int32_t segments = Renderer_normalizeCirclePrecision(renderer->circlePrecision);
-    float step = 6.2831853f / (float) segments;
-    float prevX = cx + rx;
-    float prevY = cy;
-    for (int32_t i = 1; i <= segments; i++) {
-        float angle = step * (float) i;
-        float curX = cx + rx * cosf(angle);
-        float curY = cy + ry * sinf(angle);
-        if (outline) {
-            if (renderer->vtable->drawLine != nullptr) renderer->vtable->drawLine(renderer, prevX, prevY, curX, curY, 1.0f, renderer->drawColor, renderer->drawAlpha);
-        } else if (renderer->vtable->drawTriangle != nullptr) {
-            renderer->vtable->drawTriangle(renderer, cx, cy, prevX, prevY, curX, curY, false);
-        }
-        prevX = curX;
-        prevY = curY;
-    }
+    renderer->vtable->drawEllipse(renderer, cx, cy, rx, ry, renderer->drawColor, renderer->drawAlpha, outline, renderer->circlePrecision);
 }
 
 static void Renderer_drawRoundrect(Renderer* renderer, float x1, float y1, float x2, float y2, bool outline) {
@@ -740,9 +618,12 @@ static void Renderer_drawTile(Renderer* renderer, RoomTile* tile, float offsetX,
     int32_t atlasOffX = srcX - tpag->targetX;
     int32_t atlasOffY = srcY - tpag->targetY;
 
+    // Extract alpha from high byte, default to 1.0 if alpha byte is 0
+    uint8_t alphaByte = (tile->color >> 24) & 0xFF;
+    float alpha = (alphaByte == 0) ? 1.0f : (float) alphaByte / 255.0f;
     uint32_t bgr = tile->color & 0x00FFFFFF;
 
-    renderer->vtable->drawSpritePart(renderer, tpagIndex, atlasOffX, atlasOffY, srcW, srcH, drawX, drawY, tile->scaleX, tile->scaleY, 0.0f, 0.0f, 0.0f, bgr, tile->alpha);
+    renderer->vtable->drawSpritePart(renderer, tpagIndex, atlasOffX, atlasOffY, srcW, srcH, drawX, drawY, tile->scaleX, tile->scaleY, 0.0f, 0.0f, 0.0f, bgr, alpha);
 }
 
 // Mixes 2 colors with a blend factor

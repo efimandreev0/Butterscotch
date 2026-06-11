@@ -1,12 +1,3 @@
-// Original Code by MrPowerGamerBR and the Butterscotch contributors.
-// Modifications Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
-//
-// This file is part of Butterscotch (Nintendo 3DS port).
-//
-// Butterscotch is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 3.
-
 #include "runner_gamepad.h"
 #include "utils.h"
 
@@ -91,6 +82,19 @@ void RunnerGamepad_beginFrame(RunnerGamepadState* gp) {
         gp->slots[i].connectedPrev = gp->slots[i].connected;
         memset(gp->slots[i].buttonPressed,  0, sizeof(gp->slots[i].buttonPressed));
         memset(gp->slots[i].buttonReleased, 0, sizeof(gp->slots[i].buttonReleased));
+    }
+    gp->connectedCount = 0;
+}
+
+void RunnerGamepad_clear(RunnerGamepadState* gp) {
+    if (!gp) return;
+    for (int i = 0; MAX_GAMEPADS > i; i++) {
+        memset(gp->slots[i].buttonDownPrev, 0, sizeof(gp->slots[i].buttonDownPrev));
+        memset(gp->slots[i].buttonDown,     0, sizeof(gp->slots[i].buttonDown));
+        memset(gp->slots[i].buttonPressed,  0, sizeof(gp->slots[i].buttonPressed));
+        memset(gp->slots[i].buttonReleased, 0, sizeof(gp->slots[i].buttonReleased));
+        memset(gp->slots[i].buttonValue,    0, sizeof(gp->slots[i].buttonValue));
+        memset(gp->slots[i].axisValue,      0, sizeof(gp->slots[i].axisValue));
     }
     gp->connectedCount = 0;
 }

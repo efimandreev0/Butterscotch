@@ -1,17 +1,12 @@
 cmake_minimum_required(VERSION 3.21)
 
-if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
-    if(PLATFORM STREQUAL "3ds")
+if(PLATFORM STREQUAL "3ds")
+    if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
         if(NOT DEFINED ENV{DEVKITPRO})
             message(FATAL_ERROR "Please define DEVKITPRO environment variable to point to your SDK path!")
         endif()
-        set(CMAKE_TOOLCHAIN_FILE "$ENV{DEVKITPRO}/cmake/3DS.cmake" CACHE PATH "toolchain file")
 
-    elseif(PLATFORM STREQUAL "vita")
-        if(NOT DEFINED ENV{VITASDK})
-            message(FATAL_ERROR "Please define VITASDK environment variable to point to your SDK path!")
-        endif()
-        set(CMAKE_TOOLCHAIN_FILE "$ENV{VITASDK}/share/vita.toolchain.cmake" CACHE PATH "toolchain file")
+        set(CMAKE_TOOLCHAIN_FILE "$ENV{DEVKITPRO}/cmake/3DS.cmake" CACHE PATH "toolchain file")
     endif()
 endif()
 
@@ -37,11 +32,6 @@ if(PLATFORM STREQUAL "")
     message(FATAL_ERROR "PLATFORM is not set! Use -DPLATFORM=glfw (or another supported platform).")
 endif()
 
-option(LOG_ALL "Enable very verbose diagnostic logs in selected subsystems" OFF)
-if(LOG_ALL)
-    add_compile_definitions(LOG_ALL)
-endif()
-
 # To avoid unused code in production builds that are only used for a single game (example: PlayStation 2 target), we can enable/disable specific bytecode versions
 #
 # If only a single bytecode version is enabled, the checks will be collapsed and removed by the compiler during build time, reducing code size and improving
@@ -60,7 +50,6 @@ endif()
 
 if(PLATFORM STREQUAL "ctr-cache-tool")
     add_definitions(-DHAVE_BZLIB_H=1)
-    option(CTR_TEXTURE_CACHE_ENABLE_ETC1 "Allow ETC1/ETC1A4 compression in 3DS texture cache output" OFF)
 
     # Build the bzip2 library sources directly into the executable so the
     # resulting binary does not depend on a system libbz2.dll. Only the
@@ -77,10 +66,6 @@ if(PLATFORM STREQUAL "ctr-cache-tool")
 
     add_executable(ctr-cache-preprocess
         tools/ctr_cache_preprocess.c
-            src/3ds/etc1_encoder.c
-            src/3ds/etc1_encoder.h
-        tools/ctr_audio_preprocess.c     # audio bundle is part of the same tool
-        tools/ctr_adpcm_encode.c         # DSP-ADPCM encoder for SFX
         src/binary_reader.c
         src/data_win.c
         src/3ds/ctr_texture_cache.c
@@ -91,7 +76,6 @@ if(PLATFORM STREQUAL "ctr-cache-tool")
     target_compile_definitions(ctr-cache-preprocess PRIVATE
         CTR_TEXTURE_CACHE_HOST
         IMAGE_DECODER_ENABLE_BZ2
-        CTR_TEXTURE_CACHE_ENABLE_ETC1=$<BOOL:${CTR_TEXTURE_CACHE_ENABLE_ETC1}>
     )
     target_include_directories(ctr-cache-preprocess PRIVATE
         ${CMAKE_SOURCE_DIR}/src
@@ -100,15 +84,8 @@ if(PLATFORM STREQUAL "ctr-cache-tool")
         ${CMAKE_SOURCE_DIR}/vendor/bzip2
         ${CMAKE_SOURCE_DIR}/vendor/stb/ds
         ${CMAKE_SOURCE_DIR}/vendor/stb/image
-        ${CMAKE_SOURCE_DIR}/vendor/stb/vorbis
     )
     target_link_libraries(ctr-cache-preprocess m)
-    if(NOT MSVC)
-        # stb_vorbis emits a wall of unused-but-set / sign-conversion warnings
-        # we can't fix without forking the upstream single-header.
-        set_source_files_properties(tools/ctr_audio_preprocess.c PROPERTIES
-            COMPILE_FLAGS "-Wno-unused-but-set-variable -Wno-unused-function -Wno-sign-compare -Wno-unused-variable")
-    endif()
 
     # Silence the slew of warnings the upstream bzip2 sources emit (unused
     # parameters, sign conversions etc.) - they are not our code to clean up.
@@ -127,15 +104,7 @@ if(PLATFORM STREQUAL "ctr-cache-tool")
     return()
 endif()
 
-if(PLATFORM STREQUAL "web-meta")
-    # Metadata-only build: just the data.win parser and its direct deps. No VM, no runner, no I/O subsystems.
-    set(SOURCES
-        src/data_win.c
-        src/binary_reader.c
-    )
-else()
-    file(GLOB SOURCES src/*.c)
-endif()
+file(GLOB SOURCES src/*.c)
 # Platform specific files builds
 file(GLOB PLATFORM_SOURCES src/${PLATFORM}/*.c)
 
@@ -245,61 +214,6 @@ if(PLATFORM STREQUAL "glfw")
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${CMAKE_SOURCE_DIR}/vendor/gamecontrollerdb.txt
             $<TARGET_FILE_DIR:butterscotch>/gamecontrollerdb.txt
-    )
-elseif(PLATFORM STREQUAL "web")
-    file(GLOB GL_SOURCES src/gl/*.c)
-    target_sources(butterscotch PRIVATE ${GL_SOURCES})
-    add_compile_definitions(ENABLE_GLES)
-
-    # stb_image
-    target_include_directories(butterscotch PUBLIC vendor/stb/image)
-
-    # stb_vorbis (for miniaudio's OGG decoding)
-    target_include_directories(butterscotch PUBLIC vendor/stb/vorbis)
-
-    # miniaudio (used in noDevice mode; see src/web/web_audio_system.c)
-    target_include_directories(butterscotch PUBLIC vendor/miniaudio)
-
-    set_target_properties(butterscotch PROPERTIES SUFFIX ".mjs")
-
-    target_link_options(
-            butterscotch
-            PRIVATE
-            "-sMODULARIZE=1"
-            "-sEXPORT_ES6=1"
-            "-sENVIRONMENT=worker"
-            "-sWASMFS=1"
-            "-sEXPORTED_RUNTIME_METHODS=['HEAP8', 'HEAPU8', 'HEAPF32', 'ccall', 'cwrap', 'specialHTMLTargets', 'UTF8ToString']"
-            "-sEXPORTED_FUNCTIONS=['_main', '_mountOpfs', '_startRunner', '_stopRunner', '_malloc', '_free', '_getKeyDownPtr', '_getKeyUpPtr', '_getKeyCount', '_setAudioSampleRate', '_pullAudioFrames']"
-            "-sOFFSCREENCANVAS_SUPPORT=1"
-            "-sOFFSCREEN_FRAMEBUFFER=1"
-            "-sMIN_WEBGL_VERSION=2"
-            "-sMAX_WEBGL_VERSION=2"
-            "-sFULL_ES3=1"
-            "-sALLOW_MEMORY_GROWTH"
-            "-sSHARED_MEMORY=1"
-            "-sPTHREAD_POOL_SIZE=4"
-            "--use-port=bzip2"
-            "-pthread"
-    )
-
-    target_compile_options(butterscotch PRIVATE "--use-port=bzip2" "-pthread")
-elseif(PLATFORM STREQUAL "web-meta")
-    set_target_properties(butterscotch PROPERTIES
-        SUFFIX ".mjs"
-        OUTPUT_NAME "butterscotch-meta"
-    )
-
-    target_link_options(
-            butterscotch
-            PRIVATE
-            "-sMODULARIZE=1"
-            "-sEXPORT_ES6=1"
-            "-sENVIRONMENT=web"
-            "-sEXPORTED_RUNTIME_METHODS=['HEAPU8', 'ccall', 'cwrap', 'UTF8ToString', 'FS']"
-            "-sEXPORTED_FUNCTIONS=['_main', '_parseDataWin', '_freeDataWin', '_getGameName', '_getGameDisplayName', '_getMajorVersion', '_getMinorVersion', '_getRelease', '_getBuild', '_getDefaultWindowWidth', '_getDefaultWindowHeight', '_malloc', '_free']"
-            "-sALLOW_MEMORY_GROWTH=1"
-            "-sFORCE_FILESYSTEM=1"
     )
 elseif(PLATFORM STREQUAL "ps2")
     # The PS2 EE has a single-precision FPU only, so double is software-emulated
@@ -487,12 +401,12 @@ elseif(PLATFORM STREQUAL "ps2")
                 ${CMAKE_SOURCE_DIR}/ps2dev-headers/gcc-include
         )
     endif()
-elseif(PLATFORM STREQUAL "vita")
+elseif(PLATFORM STREQUAL "3ds")
     add_compile_definitions(USE_FLOAT_REALS)
     add_compile_definitions(NO_RVALUE_INT64)
-    add_compile_definitions(PLATFORM_PSVITA)
+    add_compile_definitions(PLATFORM_3DS)
 
-    option(ENABLE_VM_GML_PROFILER "Enable Butterscotch VM/interpreter profiler" ON)
+    option(ENABLE_VM_GML_PROFILER "Enable Butterscotch VM/interpreter profiler" OFF)
     if(ENABLE_VM_GML_PROFILER)
         add_compile_definitions(ENABLE_VM_GML_PROFILER)
     endif()
@@ -517,85 +431,14 @@ elseif(PLATFORM STREQUAL "vita")
         add_compile_definitions(ENABLE_SPATIAL_GRID_LOGS)
     endif()
 
-    option(ENABLE_VM_STUB_LOGS "Enable VM unknown/stubbed function logs" ON)
+    option(ENABLE_VM_STUB_LOGS "Enable VM unknown/stubbed function logs" OFF)
     if(ENABLE_VM_STUB_LOGS)
         add_compile_definitions(ENABLE_VM_STUB_LOGS)
     endif()
 
-    target_sources(butterscotch PRIVATE src/gl/image_decoder.c)
-    target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/gl)
-    target_include_directories(butterscotch PUBLIC vendor/stb/image)
-    target_include_directories(butterscotch PUBLIC vendor/stb/vorbis)
-
-    target_link_libraries(butterscotch
-            -Wl,--whole-archive pthread -Wl,--no-whole-archive
-            m
-            z
-            stdc++
-            vorbis
-            vorbisfile
-            ogg
-            vitaGL
-            vitashark
-            soloud
-            mathneon
-            SceShaccCgExt
-            taihen_stub
-            kubridge_stub
-            SceAppMgr_stub
-            SceAppUtil_stub
-            SceAudio_stub
-            SceAudioIn_stub
-            SceCtrl_stub
-            SceCommonDialog_stub
-            SceDisplay_stub
-            SceKernelDmacMgr_stub
-            SceRazorHud_stub
-            SceRazorCapture_stub
-            SceFios2_stub
-            SceGxm_stub
-            SceLibcBridge_stub
-            SceShaccCg_stub
-            SceSysmodule_stub
-            ScePower_stub
-            SceTouch_stub
-            SceVshBridge_stub
-            SceMotion_stub
-            SceNpTrophy_stub
-    )
-elseif(PLATFORM STREQUAL "3ds")
-    add_compile_definitions(USE_FLOAT_REALS)
-    add_compile_definitions(NO_RVALUE_INT64)
-    add_compile_definitions(PLATFORM_3DS)
-
-    option(ENABLE_VM_GML_PROFILER "Enable Butterscotch VM/interpreter profiler" ON)
-    if(ENABLE_VM_GML_PROFILER)
-        add_compile_definitions(ENABLE_VM_GML_PROFILER)
-    endif()
-
-    option(ENABLE_VM_TRACING "Enable Butterscotch VM/interpreter tracing checks" ON)
-    if(ENABLE_VM_TRACING)
-        add_compile_definitions(ENABLE_VM_TRACING)
-    endif()
-
-    option(ENABLE_VM_OPCODE_PROFILER "Enable Butterscotch VM opcode count profiler" OFF)
-    if(ENABLE_VM_OPCODE_PROFILER)
-        add_compile_definitions(ENABLE_VM_OPCODE_PROFILER)
-    endif()
-
-    option(ENABLE_VM_RESOLVE_LOGS "Log every var read/write that fails to resolve to an instance (very noisy on 3DS)" ON)
-    if(ENABLE_VM_RESOLVE_LOGS)
-        add_compile_definitions(ENABLE_VM_RESOLVE_LOGS)
-    endif()
-
-    option(ENABLE_SPATIAL_GRID_LOGS "Enable Spatial Grid logs" ON)
-    if(ENABLE_SPATIAL_GRID_LOGS)
-        add_compile_definitions(ENABLE_SPATIAL_GRID_LOGS)
-    endif()
-
-    option(ENABLE_VM_STUB_LOGS "Enable VM unknown/stubbed function logs" ON)
-    if(ENABLE_VM_STUB_LOGS)
-        add_compile_definitions(ENABLE_VM_STUB_LOGS)
+    option(ENABLE_3DS_OPT_DIAGNOSTICS "Enable 3DS optimization diagnostics and lazy atlas logs" OFF)
+    if(ENABLE_3DS_OPT_DIAGNOSTICS)
+        target_compile_definitions(butterscotch PRIVATE CTR_OPT_DIAGNOSTICS=1)
     endif()
 
     target_include_directories(butterscotch PUBLIC vendor/stb/image)
@@ -605,6 +448,12 @@ elseif(PLATFORM STREQUAL "3ds")
     ctr_add_shader_library(render2d_shader "${SHADER_SRC}")
     dkp_add_embedded_binary_library(3ds_shaders render2d_shader)
     target_include_directories(butterscotch PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/.dkp-generated/3ds_shaders")
+
+    set(LOCAL_3DS_PORTLIBS "${CMAKE_SOURCE_DIR}/tools-local/devkitpro-portlibs/opt/devkitpro/portlibs/3ds")
+    if(EXISTS "${LOCAL_3DS_PORTLIBS}/include")
+        target_include_directories(butterscotch BEFORE PRIVATE "${LOCAL_3DS_PORTLIBS}/include")
+        target_link_directories(butterscotch BEFORE PRIVATE "${LOCAL_3DS_PORTLIBS}/lib")
+    endif()
 
     if(DEFINED ENV{DEVKITPRO})
         target_include_directories(butterscotch PRIVATE
@@ -619,7 +468,6 @@ elseif(PLATFORM STREQUAL "3ds")
 
     target_link_libraries(butterscotch
         SDL_mixer
-        openal
         stdc++
         mad
         vorbisidec
@@ -664,7 +512,7 @@ elseif(PLATFORM STREQUAL "3ds")
 
     ctr_create_3dsx(butterscotch)
 
-    set(APP_TITLE "Butterscotch")
+    set(APP_TITLE "Butterscotch V4.2")
     set(APP_DESCRIPTION "GMS1.4-2.0 runner for 3DS")
     set(APP_AUTHOR "efimandreev0, Pugemon")
     set(APP_PRODUCT_CODE "CTR-P-BTRS")
@@ -676,10 +524,14 @@ elseif(PLATFORM STREQUAL "3ds")
     set(APP_RSF "${CMAKE_SOURCE_DIR}/3ds/template.rsf")
     set(APP_ICON "${CMAKE_SOURCE_DIR}/3ds/icon.png")
     set(BANNER_IMAGE "${CMAKE_SOURCE_DIR}/3ds/banner.png")
-    set(BANNER_AUDIO "${CMAKE_SOURCE_DIR}/3ds/efimandreev0.wav")
+    if(EXISTS "${CMAKE_SOURCE_DIR}/splash.ogg")
+        set(BANNER_AUDIO "${CMAKE_SOURCE_DIR}/splash.ogg")
+    else()
+        set(BANNER_AUDIO "${CMAKE_SOURCE_DIR}/3ds/efimandreev0.wav")
+    endif()
 
-    find_program(BANNERTOOL NAMES bannertool HINTS "$ENV{DEVKITPRO}/tools/bin")
-    find_program(MAKEROM NAMES makerom HINTS "$ENV{DEVKITPRO}/tools/bin")
+    find_program(BANNERTOOL NAMES bannertool HINTS "${CMAKE_SOURCE_DIR}/tools-local/bin" "$ENV{DEVKITPRO}/tools/bin")
+    find_program(MAKEROM NAMES makerom HINTS "${CMAKE_SOURCE_DIR}/tools-local/bin" "$ENV{DEVKITPRO}/tools/bin")
 
     if(BANNERTOOL AND MAKEROM)
         add_custom_command(

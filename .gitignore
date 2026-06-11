@@ -1,6 +1,25 @@
+.DS_Store
+.cache/
+
+# Local game data and extracted commercial assets must not be committed.
+GAMES/
+*.win
+data.win
+game.unx
+
+# Build output.
 build/
 build_ps2/
-.gitignore
-.cache
-CMakeUserPresets.json
-.devcontainer/
+build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# Packaged installers and upload artifacts.
+*.cia
+butterscotch_*_catbox_qr.png
+butterscotch_*_catbox_url.txt
+
+# Local reverse-engineering scratch space.
+tools-local/analysis/
+tools-local/utmt-cli/

@@ -1,12 +1,3 @@
-// Original Code by MrPowerGamerBR and the Butterscotch contributors.
-// Modifications Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
-//
-// This file is part of Butterscotch (Nintendo 3DS port).
-//
-// Butterscotch is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 3.
-
 #pragma once
 
 #include "common.h"
@@ -22,11 +13,77 @@
 // Platform-agnostic text measurement and processing helpers.
 // Used by both the renderer (for drawing text) and the VM (for string_width/string_height).
 
-static inline FontGlyph* TextUtils_findGlyph(Font* font, uint16_t ch) {
+static inline uint16_t TextUtils_latinFallbackCodepoint(uint16_t ch) {
+    switch (ch) {
+        case 0x00C0: case 0x00C1: case 0x00C2: case 0x00C3:
+        case 0x00C4: case 0x00C5: return 'A';
+        case 0x00E0: case 0x00E1: case 0x00E2: case 0x00E3:
+        case 0x00E4: case 0x00E5: return 'a';
+        case 0x00C8: case 0x00C9: case 0x00CA: case 0x00CB: return 'E';
+        case 0x00E8: case 0x00E9: case 0x00EA: case 0x00EB: return 'e';
+        case 0x00CC: case 0x00CD: case 0x00CE: case 0x00CF: return 'I';
+        case 0x00EC: case 0x00ED: case 0x00EE: case 0x00EF: return 'i';
+        case 0x00D2: case 0x00D3: case 0x00D4: case 0x00D5:
+        case 0x00D6: case 0x00D8: return 'O';
+        case 0x00F2: case 0x00F3: case 0x00F4: case 0x00F5:
+        case 0x00F6: case 0x00F8: return 'o';
+        case 0x00D9: case 0x00DA: case 0x00DB: case 0x00DC: return 'U';
+        case 0x00F9: case 0x00FA: case 0x00FB: case 0x00FC: return 'u';
+        case 0x00D1: return 'N';
+        case 0x00F1: return 'n';
+        case 0x00C7: return 'C';
+        case 0x00E7: return 'c';
+        case 0x00DD: case 0x0178: return 'Y';
+        case 0x00FD: case 0x00FF: return 'y';
+        case 0x00BF: return '?';
+        case 0x00A1: return '!';
+        case 0x00AB: case 0x00BB: case 0x201C: case 0x201D: return '"';
+        case 0x2018: case 0x2019: case 0x00B4: return '\'';
+        case 0x2013: case 0x2014: return '-';
+        case 0x2026: return '.';
+        case 0x00AA: return 'a';
+        case 0x00BA: return 'o';
+        default: return ch;
+    }
+}
+
+static inline uint16_t TextUtils_latinAccentCodepoint(uint16_t ch) {
+    switch (ch) {
+        case 0x00C1: case 0x00E1: case 0x00C9: case 0x00E9:
+        case 0x00CD: case 0x00ED: case 0x00D3: case 0x00F3:
+        case 0x00DA: case 0x00FA: case 0x00DD: case 0x00FD: return '\'';
+        case 0x00C0: case 0x00E0: case 0x00C8: case 0x00E8:
+        case 0x00CC: case 0x00EC: case 0x00D2: case 0x00F2:
+        case 0x00D9: case 0x00F9: return '`';
+        case 0x00C2: case 0x00E2: case 0x00CA: case 0x00EA:
+        case 0x00CE: case 0x00EE: case 0x00D4: case 0x00F4:
+        case 0x00DB: case 0x00FB: return '^';
+        case 0x00C3: case 0x00E3: case 0x00D5: case 0x00F5:
+        case 0x00D1: case 0x00F1: return '~';
+        case 0x00C4: case 0x00E4: case 0x00CB: case 0x00EB:
+        case 0x00CF: case 0x00EF: case 0x00D6: case 0x00F6:
+        case 0x00DC: case 0x00FC: case 0x0178: case 0x00FF: return '"';
+        case 0x00C7: case 0x00E7: return ',';
+        default: return 0;
+    }
+}
+
+static inline FontGlyph* TextUtils_findExactGlyph(Font* font, uint16_t ch) {
     // Fast path: ASCII codepoints go through a direct LUT, skipping the linear scan.
     if (128 > ch) return font->glyphLUT[ch];
     repeat(font->glyphCount, i) {
         if (font->glyphs[i].character == ch) return &font->glyphs[i];
+    }
+    return nullptr;
+}
+
+static inline FontGlyph* TextUtils_findGlyph(Font* font, uint16_t ch) {
+    FontGlyph* glyph = TextUtils_findExactGlyph(font, ch);
+    if (glyph != nullptr) return glyph;
+
+    uint16_t fallback = TextUtils_latinFallbackCodepoint(ch);
+    if (fallback != ch) {
+        return TextUtils_findExactGlyph(font, fallback);
     }
     return nullptr;
 }

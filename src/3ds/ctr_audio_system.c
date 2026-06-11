@@ -1173,8 +1173,8 @@ static AudioSystemVtable vtable = {
     .groupLoad        = ctr_grp_load,
     .groupIsLoaded    = ctr_grp_loaded,
     .createStream     = ctr_create_stream,
-    .destroyStream    = ctr_destroy_stream,
-    .onRoomChanged    = ctr_on_room_changed
+    .destroyStream    = ctr_destroy_stream
+    //.onRoomChanged    = ctr_on_room_changed
 };
 
 CtrAudioSystem *CtrAudioSystem_create(void) {

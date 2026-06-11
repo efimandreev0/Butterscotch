@@ -1,12 +1,3 @@
-// Original Code by MrPowerGamerBR and the Butterscotch contributors.
-// Modifications Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
-//
-// This file is part of Butterscotch (Nintendo 3DS port).
-//
-// Butterscotch is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 3.
-
 #include <kernel.h>
 #include <sifrpc.h>
 #include <loadfile.h>
@@ -15,6 +6,7 @@
 #include <dmaKit.h>
 #include <gsKit.h>
 #include <gsToolkit.h>
+#include <gsFontM.h>
 #include <libpad.h>
 #include <libmc.h>
 #include <libkbd.h>
@@ -37,7 +29,6 @@
 #include "stb_ds.h"
 #include "utils.h"
 #include "../profiler.h"
-#include "ps2/ps2_overlay.h"
 
 #ifdef GPROF_PROFILING
 #include <ps2prof.h>
@@ -240,6 +231,180 @@ static unsigned int hidUsageToAsciiChar(uint8_t hid, bool shift) {
     }
 }
 
+// ===[ Loading Screen ]===
+
+// Maximum number of chunk stats we track (24 chunks in data.win, but only some have interesting counts)
+#define MAX_CHUNK_STATS 24
+
+typedef struct {
+    char label[16];
+    uint32_t count;
+} ChunkStat;
+
+typedef struct {
+    GSGLOBAL* gsGlobal;
+    GSFONTM* gsFontM;
+    ChunkStat stats[MAX_CHUNK_STATS];
+    int statCount;
+} LoadingScreenState;
+
+// Draws the bottom-left credits text (shared between status screen and loading screen)
+static void drawCreditsText(GSGLOBAL* gs, GSFONTM* fontm) {
+    u64 darkGray = GS_SETREG_RGBAQ(0x70, 0x70, 0x70, 0x80, 0x00);
+    float creditsScale = 0.4f;
+    float lineHeight = 26.0f * creditsScale;
+    float creditsY = 448.0f - 10.0f - lineHeight * 2.0f;
+
+    char versionText[128];
+    snprintf(versionText, sizeof(versionText), "Butterscotch (%s) [%s]", BUTTERSCOTCH_COMMIT_HASH, BUTTERSCOTCH_COMMIT_DATE);
+    gsKit_fontm_print_scaled(gs, fontm, 10.0f, creditsY, 1, creditsScale, darkGray, versionText);
+    gsKit_fontm_print_scaled(gs, fontm, 10.0f, creditsY + lineHeight, 1, creditsScale, darkGray, "Created by MrPowerGamerBR (https://mrpowergamerbr.com/)");
+}
+
+// Draws a simple status screen with "Butterscotch" title, optional game name, and a status message (no progress bar)
+// gameName can be nullptr if the game name is not yet known
+// Begins a status screen: clears, draws title + optional game name, leaves center align active
+static void beginStatusScreen(GSGLOBAL* gs, GSFONTM* fontm, const char* gameName) {
+    gsKit_clear(gs, GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x80, 0x00));
+
+    u64 title = GS_SETREG_RGBAQ(0x5E, 0x54, 0x92, 0x80, 0x00);
+    u64 gray = GS_SETREG_RGBAQ(0xAA, 0xAA, 0xAA, 0x80, 0x00);
+
+    fontm->Align = GSKIT_FALIGN_CENTER;
+    gsKit_fontm_print_scaled(gs, fontm, 320.0f, 180.0f, 1, 0.8f, title, "Butterscotch");
+    if (gameName) {
+        gsKit_fontm_print_scaled(gs, fontm, 320.0f, 210.0f, 1, 0.5f, gray, gameName);
+    }
+}
+
+// Ends a status screen: draws credits, resets align, flips
+static void endStatusScreen(GSGLOBAL* gs, GSFONTM* fontm) {
+    fontm->Align = GSKIT_FALIGN_LEFT;
+    drawCreditsText(gs, fontm);
+    gsKit_queue_exec(gs);
+    gsKit_sync_flip(gs);
+}
+
+// Draws chunk item counts in the top-left corner (if any stats have been recorded)
+static void drawChunkStats(GSGLOBAL* gs, GSFONTM* fontm, LoadingScreenState* loadingState) {
+    if (!loadingState || loadingState->statCount == 0)
+        return;
+
+    u64 gray = GS_SETREG_RGBAQ(0xAA, 0xAA, 0xAA, 0x80, 0x00);
+    fontm->Align = GSKIT_FALIGN_LEFT;
+    float statsY = 10.0f;
+    float statsScale = 0.35f;
+    float statsLineHeight = 14.0f;
+    char statLine[32];
+
+    repeat(loadingState->statCount, i) {
+        snprintf(statLine, sizeof(statLine), "%d %s", loadingState->stats[i].count, loadingState->stats[i].label);
+        gsKit_fontm_print_scaled(gs, fontm, 10.0f, statsY, 1, statsScale, gray, statLine);
+        statsY += statsLineHeight;
+    }
+}
+
+static void drawStatusScreen(GSGLOBAL* gs, GSFONTM* fontm, const char* gameName, const char* statusText, LoadingScreenState* loadingState) {
+    beginStatusScreen(gs, fontm, gameName);
+    u64 gray = GS_SETREG_RGBAQ(0xAA, 0xAA, 0xAA, 0x80, 0x00);
+    gsKit_fontm_print_scaled(gs, fontm, 320.0f, 300.0f, 1, 0.5f, gray, statusText);
+    drawChunkStats(gs, fontm, loadingState);
+    endStatusScreen(gs, fontm);
+}
+
+static void loadingScreenCallback(const char* chunkName, int chunkIndex, int totalChunks, DataWin* dataWin, void* userData) {
+    LoadingScreenState* state = (LoadingScreenState*) userData;
+    GSGLOBAL* gs = state->gsGlobal;
+    GSFONTM* fontm = state->gsFontM;
+
+    const char* gameName = dataWin->gen8.displayName ? dataWin->gen8.displayName : "Unknown Game";
+    beginStatusScreen(gs, fontm, gameName);
+
+    // Loading bar
+    u64 white = GS_SETREG_RGBAQ(0xFF, 0xFF, 0xFF, 0x80, 0x00);
+    u64 barBg = GS_SETREG_RGBAQ(0x40, 0x40, 0x40, 0x80, 0x00);
+    u64 barFg = GS_SETREG_RGBAQ(0xFF, 0xCC, 0x00, 0x80, 0x00); // Butterscotch yellow
+
+    float barX = 120.0f;
+    float barY = 300.0f;
+    float barW = 400.0f;
+    float barH = 20.0f;
+    float progress = (float) (chunkIndex + 1) / (float) totalChunks;
+
+    // Bar background (dark gray)
+    gsKit_prim_sprite(gs, barX, barY, barX + barW, barY + barH, 1, barBg);
+
+    // Bar fill (butterscotch yellow)
+    float fillW = barW * progress;
+    if (fillW > 1.0f) {
+        gsKit_prim_sprite(gs, barX, barY, barX + fillW, barY + barH, 1, barFg);
+    }
+
+    // Enable alpha blending so the font text doesn't have a black box behind it
+    gs->PrimAlphaEnable = GS_SETTING_ON;
+    gsKit_set_primalpha(gs, GS_SETREG_ALPHA(0, 1, 0, 1, 0), 0);
+
+    // Percentage text centered on the bar
+    char percentText[8];
+    snprintf(percentText, sizeof(percentText), "%d%%", (int) (progress * 100));
+    gsKit_fontm_print_scaled(gs, fontm, 320.0f, barY + 4.5f, 1, 0.4f, white, percentText);
+
+    // Chunk name text below the bar
+    char statusText[32];
+    snprintf(statusText, sizeof(statusText), "Loading %.4s... (%d/%d)", chunkName, chunkIndex + 1, totalChunks);
+    gsKit_fontm_print_scaled(gs, fontm, 320.0f, barY + barH + 10.0f, 1, 0.5f, white, statusText);
+
+    // Memory usage below the status text
+    u64 gray = GS_SETREG_RGBAQ(0xAA, 0xAA, 0xAA, 0x80, 0x00);
+    void* heapTop = sbrk(0);
+    int32_t usedBytes = (int32_t) (uintptr_t) heapTop;
+    char memText[48];
+    snprintf(memText, sizeof(memText), "Memory: %.1f/%.1f MB", (double) (usedBytes / (1024.0f * 1024.0f)), (double) (MAX_MEMORY_BYTES / (1024.0f * 1024.0f)));
+    gsKit_fontm_print_scaled(gs, fontm, 320.0f, barY + barH + 30.0f, 1, 0.4f, gray, memText);
+
+    // Record item counts for already-parsed chunks (callback fires before parsing, so we scan all counts each time and add any newly non-zero ones in the order they appear)
+    typedef struct { uint32_t* countPtr; const char* label; } CountSource;
+    CountSource sources[] = {
+        { &dataWin->sond.count, "sounds" },
+        { &dataWin->sprt.count, "sprites" },
+        { &dataWin->bgnd.count, "backgrounds" },
+        { &dataWin->font.count, "fonts" },
+        { &dataWin->objt.count, "objects" },
+        { &dataWin->room.count, "rooms" },
+        { &dataWin->code.count, "code entries" },
+        { &dataWin->txtr.count, "textures" },
+    };
+
+    // sizeof(sources) = size of the ENTIRE array
+    // So, if we divide the size of the ENTIRE array by the size of a SINGLE entry, we get the number of entries
+    int arrayLength = sizeof(sources) / sizeof(CountSource);
+
+    repeat(arrayLength, i) {
+        if (*sources[i].countPtr == 0)
+            continue;
+
+        // Check if we already recorded this label
+        bool found = false;
+        forEach(CountSource, stat, sources, state->statCount) {
+            if (strcmp(stat->label, sources[i].label) == 0) {
+                found = true;
+                break;
+            }
+        }
+
+        if (!found && MAX_CHUNK_STATS > state->statCount) {
+            ChunkStat* stat = &state->stats[state->statCount++];
+            snprintf(stat->label, sizeof(stat->label), "%s", sources[i].label);
+            stat->count = *sources[i].countPtr;
+        }
+    }
+
+    drawChunkStats(gs, fontm, state);
+
+    gs->PrimAlphaEnable = GS_SETTING_OFF;
+
+    endStatusScreen(gs, fontm);
+}
 
 int main(int argc, char* argv[]) {
     SifInitRpc(0);
@@ -288,11 +453,13 @@ int main(int argc, char* argv[]) {
     // Use ONE SHOT mode
     gsKit_mode_switch(gsGlobal, GS_ONESHOT);
 
-    // ===[ Initialize debug overlay ]===
-    PS2Overlay_init(gsGlobal, MAX_MEMORY_BYTES, heapCeilingBytes);
+    // ===[ Initialize FONTM (ROM font) for debug overlay ]===
+    GSFONTM* gsFontM = gsKit_init_fontm();
+    gsKit_fontm_upload(gsGlobal, gsFontM);
+    gsFontM->Spacing = 0.95f;
 
     // ===[ Initialize Controller ]===
-    PS2Overlay_drawStatusScreen(nullptr, "Initializing controller...", false);
+    drawStatusScreen(gsGlobal, gsFontM, nullptr, "Initializing controller...", nullptr);
 
     int ret;
     ret = SifExecModuleBuffer(freesio2_irx, size_freesio2_irx, 0, nullptr, nullptr);
@@ -358,7 +525,8 @@ int main(int argc, char* argv[]) {
 #endif
 
     // Wait for pad to be ready
-    PS2Overlay_drawStatusScreen(nullptr, "Waiting for controller...", false);
+    drawStatusScreen(gsGlobal, gsFontM, nullptr, "Waiting for controller...", nullptr);
+
     int padState;
     do {
         padState = padGetState(0, 0);
@@ -366,8 +534,14 @@ int main(int argc, char* argv[]) {
 
     printf("Controller initialized\n");
 
+    // ===[ Loading Screen State ]===
+    LoadingScreenState loadingState = {
+        .gsGlobal = gsGlobal,
+        .gsFontM = gsFontM,
+    };
+
     // ===[ Load CONFIG.JSN ]===
-    PS2Overlay_drawStatusScreen(nullptr, "Loading CONFIG.JSN...", false);
+    drawStatusScreen(gsGlobal, gsFontM, nullptr, "Loading CONFIG.JSN...", nullptr);
 
     char* configJsonPath = PS2Utils_createDevicePath("CONFIG.JSN");
     FILE* configFile = fopen(configJsonPath, "rb");
@@ -389,7 +563,7 @@ int main(int argc, char* argv[]) {
     free(configJsonPath);
 
     if (configRoot == nullptr) {
-        PS2Overlay_drawStatusScreen(nullptr, "CONFIG.JSN invalid or not found!", false);
+        drawStatusScreen(gsGlobal, gsFontM, nullptr, "CONFIG.JSN invalid or not found!", nullptr);
         while (true) {}
     }
 
@@ -403,7 +577,7 @@ int main(int argc, char* argv[]) {
     }
 
     // ===[ Parse data.win ]===
-    PS2Overlay_drawStatusScreen(nullptr, "Loading data.win...", false);
+    drawStatusScreen(gsGlobal, gsFontM, nullptr, "Loading data.win...", nullptr);
 
     DataWin* dataWin = DataWin_parse(
         dataWinPath,
@@ -434,8 +608,8 @@ int main(int argc, char* argv[]) {
             .skipLoadingPreciseMasksForNonPreciseSprites = true,
             .lazyLoadRooms = lazyLoadRooms,
             .eagerlyLoadedRooms = eagerRooms,
-            .progressCallback = PS2Overlay_statusScreenCallback,
-            .progressCallbackUserData = PS2Overlay_getCallbackData(),
+            .progressCallback = loadingScreenCallback,
+            .progressCallbackUserData = &loadingState,
         }
     );
     free(dataWinPath);
@@ -452,7 +626,7 @@ int main(int argc, char* argv[]) {
     if (!bytecodeVersionSupported) {
         char errorText[128];
         snprintf(errorText, sizeof(errorText), "Unsupported bytecode version %u!", dataWin->gen8.bytecodeVersion);
-        PS2Overlay_drawStatusScreen(dataWin->gen8.displayName, errorText, true);
+        drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, errorText, &loadingState);
         while (true) {}
     }
 
@@ -465,29 +639,30 @@ int main(int argc, char* argv[]) {
 
     FileSystem* fileSystem = Ps2FileSystem_create(configRoot, dataWin->gen8.displayName);
     if (fileSystem == nullptr) {
-        PS2Overlay_drawStatusScreen(dataWin->gen8.displayName, "CONFIG.JSN is missing the fileSystem configuration!", true);
+        drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "CONFIG.JSN is missing the fileSystem configuration!", &loadingState);
         while (true) {}
     }
 
-    PS2Overlay_drawStatusScreen(dataWin->gen8.displayName, "Creating VM...", true);
+    drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Creating VM...", &loadingState);
 
     VMContext* vm = VM_create(dataWin);
 
     // ===[ Initialize Renderer ]===
-    PS2Overlay_drawStatusScreen(dataWin->gen8.displayName, "Initializing renderer...", true);
+    drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Initializing renderer...", &loadingState);
 
     Renderer* renderer = GsRenderer_create(gsGlobal);
 
     // ===[ Initialize Audio System ]===
 #ifdef ENABLE_PS2_AUDIO
-    PS2Overlay_drawStatusScreen(dataWin->gen8.displayName, "Initializing audio...", true);
+    drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Initializing audio...", &loadingState);
     Ps2AudioSystem* ps2Audio = Ps2AudioSystem_create();
     AudioSystem* audioSystem = (AudioSystem*) ps2Audio;
 #else
     AudioSystem* audioSystem = (AudioSystem*) NoopAudioSystem_create();
 #endif
 
-    PS2Overlay_drawStatusScreen(dataWin->gen8.displayName, "Creating runner...", true);
+    drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Creating runner...", &loadingState);
+
     Runner* runner = Runner_create(dataWin, vm, renderer, fileSystem, audioSystem);
 
     // Parse disabledObjects from CONFIG.JSN
@@ -516,10 +691,10 @@ int main(int argc, char* argv[]) {
         printf("Memory after VM and runner creation: used=%d bytes (%.1f KB), total=%d bytes (%.1f KB), free=%d bytes (%.1f KB)\n", usedBytes, (double) (usedBytes / 1024.0f), MAX_MEMORY_BYTES, (double) (MAX_MEMORY_BYTES / 1024.0f), freeBytes, (double) (freeBytes / 1024.0f));
     }
 
-    PS2Overlay_drawStatusScreen(dataWin->gen8.displayName, "Initializing first room...", true);
+    drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Initializing first room...", &loadingState);
     Runner_initFirstRoom(runner);
 
-    PS2Overlay_drawStatusScreen(dataWin->gen8.displayName, "Reticulating splines...", true);
+    drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Reticulating splines...", &loadingState);
 
     // ===[ gprof Profiler Setup ]===
 #ifdef GPROF_PROFILING
@@ -544,9 +719,13 @@ int main(int argc, char* argv[]) {
 
     // ===[ Main Loop ]===
     bool debugOverlayStartEnabled = JsonReader_getBool(JsonReader_getObject(configRoot, "debugOverlayEnabled"));
-    PS2Overlay_setDebugOverlayState(debugOverlayStartEnabled ? STATS_ENABLED : STATS_DISABLED, runner);
+    int debugOverlayState = debugOverlayStartEnabled ? 0 : 2;
     uint16_t prevOverlayPadButtons = 0xFFFF;
-
+    int profilerFramesInWindow = 0;
+    static const int PROFILER_WINDOW_FRAMES = 60;
+#ifdef ENABLE_VM_GML_PROFILER
+    char profilerOverlayText[4096];
+#endif
     while (!runner->shouldExit) {
         u64 frameStartTime = GetTimerSystemTime();
         // ===[ Poll Controller (always poll every vsync) ]===
@@ -607,7 +786,12 @@ int main(int argc, char* argv[]) {
         }
 
         if (RunnerKeyboard_checkPressed(runner->keyboard, VK_F12)) {
-            PS2Overlay_toggleDebugOverlay(runner);
+            debugOverlayState = (debugOverlayState + 1) % 3;
+#ifdef ENABLE_VM_GML_PROFILER
+            Profiler_setEnabled(&vm->profiler, debugOverlayState == 1);
+            profilerFramesInWindow = 0;
+            profilerOverlayText[0] = '\0';
+#endif
         }
 
         // Reset global interact state because I HATE when I get stuck while moving through rooms
@@ -670,7 +854,55 @@ int main(int argc, char* argv[]) {
         float audioTime = (float) audioDuration / (float) (kBUSCLK / 1000);
 
         // ===[ Debug Overlay ]===
-        PS2Overlay_drawDebugOverlay(renderer, runner, tickTime, stepTime, drawTime, audioTime, speedCapRemoved);
+        if (debugOverlayState == 0 || debugOverlayState == 1) {
+            u64 debugColor = GS_SETREG_RGBAQ(0xFF, 0xFF, 0xFF, 0x80, 0x00);
+            char debugText[512];
+            uint32_t vramFreeBytes = GS_VRAM_SIZE - gsGlobal->CurrentPointer;
+
+            // Count atlases loaded in VRAM and EE RAM cache
+            GsRenderer* gsRenderer = (GsRenderer*) renderer;
+            uint32_t vramAtlasCount = 0;
+            uint32_t eeramAtlasCount = 0;
+            repeat(gsRenderer->atlasCount, ai) {
+                if (gsRenderer->atlasToChunk[ai] >= 0) vramAtlasCount++;
+                if (gsRenderer->eeCacheEntries[ai].atlasId >= 0) eeramAtlasCount++;
+            }
+
+            int freeBytes = heapCeilingBytes - mallinfo().uordblks;
+
+            const char* roomName = runner->currentRoom != nullptr && runner->currentRoom->name != nullptr ? runner->currentRoom->name : "?";
+
+            const char* thrashIndicator = "";
+            if (gsRenderer->chunksNeededThisFrame > gsRenderer->chunkCount) {
+                thrashIndicator = gsRenderer->diskLoadsThisFrame > 0 ? " [RAM+DISK THRASHING]" : " [RAM THRASHING]";
+            } else if (gsRenderer->diskLoadsThisFrame > 0) {
+                thrashIndicator = " [DISK LOAD]";
+            }
+
+            snprintf(debugText, sizeof(debugText), "Room: %s\nTick: %.2fms\nStep: %.2fms\nDraw: %.2fms\nAudio: %.2fms\nFree: %d bytes\nVRAM Free: %lu bytes\nRoom Speed: %u%s\nAtlas: (%u, %u, %u) [%u/%u]%s\nInstances: %d\nStructs: %d", roomName, (double) tickTime, (double) stepTime, (double) drawTime, (double) audioTime, freeBytes, (unsigned long) vramFreeBytes, roomSpeed, speedCapRemoved ? " [UNCAPPED]" : "", vramAtlasCount, eeramAtlasCount, gsRenderer->atlasCount, gsRenderer->chunksNeededThisFrame, gsRenderer->chunkCount, thrashIndicator, (int) arrlen(runner->instances), (int) arrlen(runner->structInstances));
+            gsKit_fontm_print_scaled(gsGlobal, gsFontM, 10.0f, 10.0f, 10, 0.6f, debugColor, debugText);
+
+            if (debugOverlayState == 1) {
+                float profilerY = 10.0f + (15.6f * 10.0f) + 6.0f;
+
+#ifdef ENABLE_VM_GML_PROFILER
+                profilerFramesInWindow++;
+                if (profilerFramesInWindow >= PROFILER_WINDOW_FRAMES) {
+                    char* profilerReport = Profiler_createReport(vm->profiler, 25, profilerFramesInWindow);
+                    if (profilerReport != nullptr) {
+                        snprintf(profilerOverlayText, sizeof(profilerOverlayText), "%s", profilerReport);
+                        free(profilerReport);
+                    }
+                    Profiler_reset(vm->profiler);
+                    profilerFramesInWindow = 0;
+                }
+                const char* profilerDisplay = profilerOverlayText[0] != '\0' ? profilerOverlayText : "GML Profiler (collecting...)";
+                gsKit_fontm_print_scaled(gsGlobal, gsFontM, 10.0f, profilerY, 10, 0.35f, debugColor, profilerDisplay);
+#else
+                gsKit_fontm_print_scaled(gsGlobal, gsFontM, 10.0f, profilerY, 10, 0.35f, debugColor, "Butterscotch GML Profiler is disabled on this build :(");
+#endif
+            }
+        }
 
         // Execute draw queue and flip buffers
         gsKit_queue_exec(gsGlobal);
@@ -705,7 +937,6 @@ int main(int argc, char* argv[]) {
     runner->audioSystem = nullptr;
     renderer->vtable->destroy(renderer);
     DataWin_free(dataWin);
-    PS2Overlay_deinit();
 
     return 0;
 }

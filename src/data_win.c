@@ -1,12 +1,3 @@
-// Original Code by MrPowerGamerBR and the Butterscotch contributors.
-// Modifications Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
-//
-// This file is part of Butterscotch (Nintendo 3DS port).
-//
-// Butterscotch is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 3.
-
 #include "data_win.h"
 #include "binary_reader.h"
 
@@ -530,7 +521,7 @@ static void parseSOND(BinaryReader* reader, DataWin* dw) {
 
     if (count == 0) { free(ptrs); s->sounds = nullptr; return; }
 
-    s->sounds = bigMalloc(count * sizeof(Sound));
+    s->sounds = safeMalloc(count * sizeof(Sound));
     repeat(count, i) {
         BinaryReader_seek(reader, ptrs[i]);
         Sound* snd = &s->sounds[i];
@@ -583,7 +574,7 @@ static void parseSPRT(BinaryReader* reader, DataWin* dw, bool skipLoadingPrecise
 
     if (count == 0) { free(ptrs); s->sprites = nullptr; return; }
 
-    s->sprites = bigCalloc(count, sizeof(Sprite));
+    s->sprites = safeCalloc(count, sizeof(Sprite));
     repeat(count, i) {
         BinaryReader_seek(reader, ptrs[i]);
         Sprite* spr = &s->sprites[i];
@@ -1108,7 +1099,7 @@ static void parseOBJT(BinaryReader* reader, DataWin* dw) {
         }
     }
 
-    o->objects = bigMalloc(count * sizeof(GameObject));
+    o->objects = safeMalloc(count * sizeof(GameObject));
     repeat(count, i) {
         BinaryReader_seek(reader, ptrs[i]);
         GameObject* obj = &o->objects[i];
@@ -1284,12 +1275,6 @@ static void readRoomGameObjects(BinaryReader* reader, DataWin* dw, Room* room) {
     free(objPtrs);
 }
 
-static float tileAlphaFromColor(uint32_t color) {
-    // Extract alpha from high byte, default to 1.0 if alpha byte is 0
-    uint8_t alphaByte = (uint8_t) ((color >> 24) & 0xFF);
-    return alphaByte == 0 ? 1.0f : (float) alphaByte / 255.0f;
-}
-
 static void readRoomTiles(BinaryReader* reader, DataWin* dw, Room* room) {
     uint32_t tileCount;
     uint32_t* tilePtrs = readPointerTableLimited(reader, &tileCount, 262144, "ROOM legacy tiles");
@@ -1312,7 +1297,6 @@ static void readRoomTiles(BinaryReader* reader, DataWin* dw, Room* room) {
             tile->scaleX = BinaryReader_readFloat32(reader);
             tile->scaleY = BinaryReader_readFloat32(reader);
             tile->color = BinaryReader_readUint32(reader);
-            tile->alpha = tileAlphaFromColor(tile->color);
         }
     } else {
         room->tiles = nullptr;
@@ -1413,7 +1397,6 @@ static void readRoomLayers(BinaryReader* reader, DataWin* dw, Room* room) {
                         tile->scaleX = BinaryReader_readFloat32(reader);
                         tile->scaleY = BinaryReader_readFloat32(reader);
                         tile->color = BinaryReader_readUint32(reader);
-                        tile->alpha = tileAlphaFromColor(tile->color);
                     }
                 } else {
                     assets->legacyTiles = nullptr;
@@ -1819,7 +1802,7 @@ static void parseTPAG(BinaryReader* reader, DataWin* dw) {
     // Выделяем на 1 элемент больше. Этот последний слот будет "фейковым" для всех -1 индексов.
     // Это лечит краш движка (unmapped Read16 @ 0x00000012) из-за попытки прочитать boundingHeight по NULL указателю.
     t->count = count + 1;
-    t->items = bigMalloc(t->count * sizeof(TexturePageItem));
+    t->items = safeMalloc(t->count * sizeof(TexturePageItem));
 
     repeat(count, i) {
         BinaryReader_seek(reader, ptrs[i]);
@@ -2024,7 +2007,7 @@ static void parseCODE(BinaryReader* reader, DataWin* dw, uint32_t chunkLength, s
         return;
     }
 
-    c->entries = bigMalloc(codeCount * sizeof(CodeEntry));
+    c->entries = safeMalloc(codeCount * sizeof(CodeEntry));
     repeat(codeCount, i) {
         BinaryReader_seek(reader, codePtrs[i]);
         CodeEntry* entry = &c->entries[i];
@@ -2081,7 +2064,7 @@ static void parseVARI(BinaryReader* reader, DataWin* dw, uint32_t chunkLength) {
     v->variableCount = (chunkLength - 12) / 20;
 
     if (v->variableCount > 0) {
-        v->variables = bigMalloc(v->variableCount * sizeof(Variable));
+        v->variables = safeMalloc(v->variableCount * sizeof(Variable));
         repeat(v->variableCount, i) {
             Variable* var = &v->variables[i];
             var->name = readStringPtr(reader, dw);
@@ -2101,7 +2084,7 @@ static void parseFUNC(BinaryReader* reader, DataWin* dw) {
     // Part 1: Functions SimpleList
     f->functionCount = BinaryReader_readUint32(reader);
     if (f->functionCount > 0) {
-        f->functions = bigMalloc(f->functionCount * sizeof(Function));
+        f->functions = safeMalloc(f->functionCount * sizeof(Function));
         repeat(f->functionCount, i) {
             f->functions[i].name = readStringPtr(reader, dw);
             f->functions[i].occurrences = BinaryReader_readUint32(reader);
@@ -2257,12 +2240,10 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd, DataWi
 
     uint32_t outOfChunk = 0;
     uint32_t bigBlobs = 0;
-    uint32_t blockSized = 0;
     uint64_t fsz = (uint64_t)reader->fileSize;
     for (uint32_t s = 0; s < realCount; s++) {
         uint32_t curOff = sorted[s].off;
         bool inChunk   = ((size_t)curOff < chunkEnd);
-        Texture *tex = &t->textures[sorted[s].idx];
 
         // The "boundary" for this blob's region: TXTR end if the blob lives
         // inside the chunk, otherwise fileSize (mod-appended blobs that sit
@@ -2275,25 +2256,13 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd, DataWi
         // include the entire AUDO chunk in the first blob's size — that was
         // the 191 MB clamp warning the user kept hitting, producing garbage
         // PNG decode for the affected page and a black/empty atlas slot.
-        uint64_t nextOff = 0;
-        uint64_t sz = 0;
-        if (tex->textureBlockSize > 0 &&
-            curOff < fsz &&
-            (uint64_t)tex->textureBlockSize <= fsz - (uint64_t)curOff) {
-            // GMS 2022.3+ stores the exact byte size for each TXTR blob.
-            // Prefer it over offset-diff sizing; modern texture-group layouts
-            // can put unrelated chunks or appended blobs between texture data.
-            sz = tex->textureBlockSize;
-            nextOff = (uint64_t)curOff + sz;
-            blockSized++;
-        } else {
-            uint64_t boundary = inChunk ? (uint64_t)chunkEnd : fsz;
-            nextOff = (s + 1 < realCount) ? (uint64_t)sorted[s + 1].off : boundary;
-            if (nextOff <= curOff) nextOff = boundary; // duplicate / corrupted entry
-            if (nextOff > boundary) nextOff = boundary; // don't cross region boundary
-            if (nextOff > fsz)      nextOff = fsz;     // and never past EOF
-            sz = nextOff - curOff;
-        }
+        uint64_t boundary = inChunk ? (uint64_t)chunkEnd : fsz;
+        uint64_t nextOff  = (s + 1 < realCount) ? (uint64_t)sorted[s + 1].off : boundary;
+        if (nextOff <= curOff) nextOff = boundary; // duplicate / corrupted entry
+        if (nextOff > boundary) nextOff = boundary; // don't cross region boundary
+        if (nextOff > fsz)      nextOff = fsz;     // and never past EOF
+
+        uint64_t sz = nextOff - curOff;
         // Hard sanity cap: a single texture page > 64 MB is almost certainly
         // a parser desync (or a broken/truncated mod). Clamp + warn instead
         // of trusting the number into safeMalloc.
@@ -2306,14 +2275,14 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd, DataWi
             bigBlobs++;
         }
 
-        tex->blobSize = (uint32_t)sz;
+        t->textures[sorted[s].idx].blobSize = (uint32_t)sz;
         if (!inChunk) outOfChunk++;
     }
 
-    if (outOfChunk > 0 || bigBlobs > 0 || blockSized > 0) {
+    if (outOfChunk > 0 || bigBlobs > 0) {
         fprintf(stderr,
-                "TXTR: %u/%u blobs sized from textureBlockSize; %u outside TXTR; %u oversized clamped\n",
-                blockSized, count, outOfChunk, bigBlobs);
+                "TXTR: %u/%u texture blobs live OUTSIDE the TXTR chunk (mod-style append); %u oversized clamped\n",
+                outOfChunk, count, bigBlobs);
     }
     free(sorted);
 
@@ -2650,8 +2619,8 @@ void DataWin_free(DataWin* dw) {
         free(dw->extn.extensions);
     }
 
-    // SOND (allocated via bigMalloc — see parseSOND)
-    bigFree(dw->sond.sounds);
+    // SOND
+    free(dw->sond.sounds);
 
     // AGRP
     free(dw->agrp.audioGroups);
@@ -2669,8 +2638,7 @@ void DataWin_free(DataWin* dw) {
             // Runtime-allocated sprites (indices >= parsedCount) own their synthesized name
             if (i >= dw->sprt.parsedCount) free((char*) dw->sprt.sprites[i].name);
         }
-        // The spine itself was bigCalloc'd in parseSPRT.
-        bigFree(dw->sprt.sprites);
+        free(dw->sprt.sprites);
     }
 
 
@@ -2748,8 +2716,7 @@ void DataWin_free(DataWin* dw) {
                 }
             }
         }
-        // The objects array spine was bigMalloc'd in parseOBJT.
-        bigFree(dw->objt.objects);
+        free(dw->objt.objects);
     }
 
     // ROOM
@@ -2760,17 +2727,17 @@ void DataWin_free(DataWin* dw) {
         free(dw->room.rooms);
     }
 
-    // TPAG (bigMalloc in parseTPAG)
-    bigFree(dw->tpag.items);
+    // TPAG
+    free(dw->tpag.items);
 
-    // CODE (bigMalloc in parseCODE)
-    bigFree(dw->code.entries);
+    // CODE
+    free(dw->code.entries);
 
-    // VARI (bigMalloc in parseVARI)
-    bigFree(dw->vari.variables);
+    // VARI
+    free(dw->vari.variables);
 
-    // FUNC (bigMalloc in parseFUNC)
-    bigFree(dw->func.functions);
+    // FUNC
+    free(dw->func.functions);
     if (dw->func.codeLocals) {
         repeat(dw->func.codeLocalsCount, i) {
             free(dw->func.codeLocals[i].locals);
@@ -2891,15 +2858,8 @@ uint32_t DataWin_allocSpriteSlot(DataWin* dw, uint32_t startIndex) {
         }
     }
     newIndex = dw->sprt.count;
-    uint32_t oldSpritesCount = dw->sprt.count;
     dw->sprt.count++;
-    // sprt.sprites came out of bigCalloc in parseSPRT (linear arena on 3DS),
-    // so we must grow with bigRealloc — feeding the linear pointer into a
-    // regular realloc smashes the heap allocator and crashes in malloc
-    // internals (`_malloc_update_mallinfo`).
-    dw->sprt.sprites = bigRealloc(dw->sprt.sprites,
-                                  (size_t)oldSpritesCount * sizeof(Sprite),
-                                  (size_t)dw->sprt.count * sizeof(Sprite));
+    dw->sprt.sprites = safeRealloc(dw->sprt.sprites, dw->sprt.count * sizeof(Sprite));
     memset(&dw->sprt.sprites[newIndex], 0, sizeof(Sprite));
 assignName:
     // Match the native runner: set a "__newsprite<N>" name so asset_get_index can find it.

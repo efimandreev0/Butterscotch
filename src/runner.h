@@ -1,12 +1,3 @@
-// Original Code by MrPowerGamerBR and the Butterscotch contributors.
-// Modifications Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
-//
-// This file is part of Butterscotch (Nintendo 3DS port).
-//
-// Butterscotch is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 3.
-
 #pragma once
 
 #include "common.h"
@@ -62,6 +53,15 @@
 #define OTHER_ASYNC_SYSTEM  75
 
 #define MAX_VIEWS 8
+#define MAX_DEFAULT_ROOM_CAMERAS MAX_VIEWS
+#define MAX_USER_CAMERAS 56
+#define MAX_CAMERAS (MAX_DEFAULT_ROOM_CAMERAS + MAX_USER_CAMERAS)
+
+typedef enum {
+    GAME_PROFILE_GENERIC = 0,
+    GAME_PROFILE_UNDERTALE,
+    GAME_PROFILE_DELTARUNE,
+} GameProfile;
 
 // ===[ Operating System Types ]===
 // See GameMaker-HTML5's Globals.js
@@ -115,7 +115,23 @@ typedef struct {
     int32_t speedY;
     int32_t objectId;
     float viewAngle;
+    int32_t cameraId;
+    int32_t surfaceId;
 } RuntimeView;
+
+typedef struct {
+    bool allocated;
+    int32_t viewX;
+    int32_t viewY;
+    int32_t viewWidth;
+    int32_t viewHeight;
+    uint32_t borderX;
+    uint32_t borderY;
+    int32_t speedX;
+    int32_t speedY;
+    int32_t objectId;
+    float viewAngle;
+} GMLCamera;
 
 typedef struct {
     bool visible;
@@ -148,6 +164,9 @@ typedef struct {
     float alpha;
     float xOffset; // element-local offset (in addition to layer offset)
     float yOffset;
+    float frameIndex;
+    float animationSpeed;
+    uint32_t animationSpeedType;
 } RuntimeBackgroundElement;
 
 // Mutable sprite element on an Assets layer. Populated from RoomLayerAssetsData.sprites at room init, can be removed at runtime via layer_sprite_destroy (used by language variant selection).
@@ -178,7 +197,7 @@ typedef struct {
     float alpha;
     RuntimeBackgroundElement* backgroundElement; // owned; nullptr if type != Background
     RuntimeSpriteElement* spriteElement; // owned; nullptr if type != Sprite
-    RoomTile* tileElement; // borrowed, points into RoomLayerAssetsData->legacyTiles; nullptr if type != Tile
+    RoomTile* tileElement; // borrowed; nullptr if type != Tile
 } RuntimeLayerElement;
 
 // Runtime-mutable state for a GMS2 room layer. Parsed layers are populated at room load from RoomLayer and share IDs with the parsed data.
@@ -227,6 +246,16 @@ typedef struct {
     RValue* items; // stb_ds dynamic array of RValues
     bool freed;    // true when the slot is destroyed and available for reuse by ds_list_create (matches native GMS)
 } DsList;
+
+typedef struct {
+    RValue value;
+    GMLReal priority;
+} DsPriorityItem;
+
+typedef struct {
+    DsPriorityItem* items; // stb_ds dynamic array sorted on delete_min
+    bool freed;
+} DsPriority;
 
 // ===[ GML Buffer System ]===
 
@@ -302,19 +331,9 @@ typedef struct {
     TileLayerMapEntry* tileLayerMap; // stb_ds hashmap: depth -> tile layer state
     RuntimeLayer* runtimeLayers; // stb_ds array, index-parallel to currentRoom->layers
     RuntimeView views[MAX_VIEWS];
+    bool viewsEnabled;
+    GMLCamera defaultCameras[MAX_DEFAULT_ROOM_CAMERAS];
 } SavedRoomState;
-
-// One flattened collision event entry. Mirrors ObjectEvent but adds the resolved codeId and ownerObjectIndex (the ancestor that actually defines the event) so dispatch needs no event-table lookup.
-typedef struct {
-    uint32_t targetObjectIndex; // partner-side object index this handler matches against (eventSubtype in the GML object file)
-    int32_t codeId; // resolved bytecode id for this handler
-    int32_t ownerObjectIndex; // object that actually defines the handler (i for own events, ancestor index for inherited)
-} FlattenedCollisionEvent;
-
-typedef struct {
-    uint32_t eventCount;
-    FlattenedCollisionEvent* events;
-} FlattenedCollisionEventList;
 
 typedef struct Runner {
     DataWin* dataWin;
@@ -342,13 +361,6 @@ typedef struct Runner {
     // For each event type, the deduplicated list of object indices that respond to ANY subtype of that event (including via inheritance). Derived from the event table; used by collision dispatch to skip non-collision objects in the outer loop.
     // Length = OBJT_EVENT_TYPE_COUNT.
     int32_t** objectsWithAnyEventOfType;
-    // Per-object flattened collision event list (one FlattenedCollisionEventList per objectIndex, length = dataWin->objt.count).
-    // Flattens parent-chain collision inheritance: each child's list contains its own collision events plus
-    // every ancestor target the child does not override, deduplicated. Each entry stores the resolved codeId
-    // and the ownerObjectIndex (the ancestor that actually defines the event), so collision dispatch needs
-    // no parent-chain walk and no resolved-event-table lookup. Owned by the Runner; dataWin->objt is left
-    // untouched so the parsed file remains the source of truth.
-    FlattenedCollisionEventList* flattenedCollisionEvents;
     // Reusable scratch array for Runner_executeEventForAll. Pre-grown to avoid stb_ds arrput overhead and repeated allocations on the per-frame dispatch path. Owned via stb_ds; truncated at the start of each call.
     Instance** eventDispatchInstances;
     // LIFO arena used to snapshot per-object instance lists before iteration.
@@ -364,6 +376,8 @@ typedef struct Runner {
     RunnerKeyboardState* keyboard;
     RunnerMouseState* mouse;
     RuntimeView views[MAX_VIEWS];
+    GMLCamera defaultCameras[MAX_DEFAULT_ROOM_CAMERAS];
+    GMLCamera userCameras[MAX_USER_CAMERAS];
     RunnerGamepadState* gamepads;
     RuntimeBackground backgrounds[8];
     uint32_t backgroundColor;      // runtime-mutable (BGR format)
@@ -378,6 +392,8 @@ typedef struct Runner {
     uint32_t nextLayerId;        // counter for IDs of layers/elements created at runtime
     SavedRoomState* savedRoomStates; // array of size dataWin->room.count, for persistent room support
     int32_t viewCurrent; // index of the view currently being drawn (for view_current)
+    bool viewsEnabled;   // runtime-mutable view system toggle (view_enabled)
+    GameProfile gameProfile;
     struct { char* key; int value; }* disabledObjects; // stb_ds string hashmap, nullptr = no filtering
     struct { int key; Instance* value; }* instancesById;
     bool forceDrawDepth;
@@ -403,6 +419,7 @@ typedef struct Runner {
     // ===[ Builtin function state ]===
     DsMapEntry** dsMapPool; // stb_ds array of stb_ds hashmaps
     DsList* dsListPool; // stb_ds array of DsList
+    DsPriority* dsPriorityPool; // stb_ds array of priority queues
     GmlBuffer* gmlBufferPool; // stb_ds array of GmlBuffer
     MpGrid* mpGridPool; // stb_ds array of motion-planning grids
 
@@ -487,5 +504,7 @@ void Runner_free(Runner* runner);
 RuntimeLayer* Runner_findRuntimeLayerById(Runner* runner, int32_t id);
 RoomLayer* Runner_findRoomLayerById(Runner* runner, int32_t id);
 RuntimeLayerElement* Runner_findLayerElementById(Runner* runner, int32_t elementId, RuntimeLayer** outLayer);
+GMLCamera* Runner_getCameraById(Runner* runner, int32_t id);
+GMLCamera* Runner_getCameraForView(Runner* runner, int32_t viewIndex);
 uint32_t Runner_getNextLayerId(Runner* runner);
 void Runner_freeRuntimeLayer(RuntimeLayer* runtimeLayer);

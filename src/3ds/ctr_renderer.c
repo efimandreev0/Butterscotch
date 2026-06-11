@@ -1,11 +1,3 @@
-// Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
-//
-// This file is part of Butterscotch (Nintendo 3DS port).
-//
-// Butterscotch is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 3.
-
 #include "ctr_renderer.h"
 #include "matrix_math.h"
 #include "text_utils.h"
@@ -31,17 +23,11 @@ extern char g_current_cache_dir[256];
 extern DVLB_s *g_vshaderDvlb;
 extern shaderProgram_s g_shaderProg;
 
-#ifdef LOG_ALL
-#define CTR_RENDER_LOG(...) do { fprintf(stderr, "[CTR_RENDER] " __VA_ARGS__); fprintf(stderr, "\n"); fflush(stderr); } while (0)
-#else
-#define CTR_RENDER_LOG(...) ((void)0)
-#endif
-
 #define BATCH_QUAD_CAP        2048
 #define BATCH_VERT_CAP        (BATCH_QUAD_CAP * 6)
-#define ATLAS_MAGIC           0x534C5441u
-#define ATLAS_TILED_MAGIC     0x544C5441u
-#define REPACK_MAGIC          0x4B415052u
+#define ATLAS_MAGIC           0x534C5441u  // 'ATLS'
+#define ATLAS_TILED_MAGIC     0x544C5441u  // 'ATLT'
+#define REPACK_MAGIC          0x4B415052u  // 'RPAK'
 #define REPACK_VERSION        2u
 #define CACHE_READY_FLAG      "cache_ready_v5.flag"
 #define REPACK_INDEX_FILE     "atlas.bin"
@@ -49,18 +35,33 @@ extern shaderProgram_s g_shaderProg;
 #define MAX_RR_POINTS         (MAX_RR_SEGMENTS * 4 + 1)
 #define LINEAR_LOW            (6u * 1024u * 1024u)
 #define LINEAR_SAFE           (8u * 1024u * 1024u)
+#define CTR_PREFETCH_MIN_FREE (10u * 1024u * 1024u)
+#define CTR_PREFETCH_ROOM_BUDGET 4u
 #define DISPLAY_TRANSFER_FLAGS \
     (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) | \
      GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
      GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
+#ifndef CTR_OPT_DIAGNOSTICS
+#define CTR_OPT_DIAGNOSTICS 0
+#endif
+
+#if CTR_OPT_DIAGNOSTICS
+#define CTR_DIAG(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define CTR_DIAG(...) ((void)0)
+#endif
+
 #define MAX_GC_TARGETS 64
-static C3D_RenderTarget *g_gc_targets[MAX_GC_TARGETS];
+static C3D_RenderTarget* g_gc_targets[MAX_GC_TARGETS];
 static int g_gc_target_count = 0;
+
+// ---- Live theme + screen layout (driven by launcher) -----------------------
 
 static CtrGameScreen g_ctr_game_screen = CTR_GAME_SCREEN_TOP;
 static CtrBackdropMode g_ctr_backdrop_mode = CTR_BACKDROP_GRADIENT;
-static CtrLetterboxMode g_ctr_letterbox_mode = CTR_LETTERBOX_CONTAIN;
+static CtrDisplayMode g_ctr_display_mode = CTR_DISPLAY_ORIGINAL;
+static CtrAppFilterMode g_ctr_app_filter_mode = CTR_APP_FILTER_LINEAR;
 
 static struct {
     float bgTop[3];
@@ -84,48 +85,58 @@ void CtrRenderer_setGameScreen(CtrGameScreen which) {
 CtrGameScreen CtrRenderer_getGameScreen(void) { return g_ctr_game_screen; }
 
 void CtrRenderer_setBackdropMode(CtrBackdropMode mode) {
-    int value = (int) mode;
-    if (value < (int) CTR_BACKDROP_GRADIENT || value > (int) CTR_BACKDROP_STRETCH)
+    int value = (int)mode;
+    if (value < (int)CTR_BACKDROP_GRADIENT || value > (int)CTR_BACKDROP_STRETCH)
         mode = CTR_BACKDROP_GRADIENT;
     g_ctr_backdrop_mode = mode;
 }
 
 CtrBackdropMode CtrRenderer_getBackdropMode(void) { return g_ctr_backdrop_mode; }
 
-void CtrRenderer_setLetterboxMode(CtrLetterboxMode mode) {
-    int value = (int) mode;
-    if (value != CTR_LETTERBOX_COVER && value != CTR_LETTERBOX_CONTAIN) mode = CTR_LETTERBOX_CONTAIN;
-    if (g_ctr_letterbox_mode == mode) return;
-    g_ctr_letterbox_mode = mode;
+void CtrRenderer_setDisplayMode(CtrDisplayMode mode) {
+    int value = (int)mode;
+    if (value < 0 || value >= (int)CTR_DISPLAY_MODE_COUNT)
+        mode = CTR_DISPLAY_ORIGINAL;
+    g_ctr_display_mode = mode;
 }
 
-CtrLetterboxMode CtrRenderer_getLetterboxMode(void) { return g_ctr_letterbox_mode; }
+CtrDisplayMode CtrRenderer_getDisplayMode(void) { return g_ctr_display_mode; }
+
+void CtrRenderer_setAppFilterMode(CtrAppFilterMode mode) {
+    int value = (int)mode;
+    if (value < (int)CTR_APP_FILTER_LINEAR || value >= (int)CTR_APP_FILTER_COUNT)
+        mode = CTR_APP_FILTER_LINEAR;
+    g_ctr_app_filter_mode = mode;
+}
+
+CtrAppFilterMode CtrRenderer_getAppFilterMode(void) { return g_ctr_app_filter_mode; }
+
+static void apply_app_filter(CtrRenderer *ctx) {
+    if (!ctx || !ctx->appTex.data) return;
+    GPU_TEXTURE_FILTER_PARAM filter =
+        (g_ctr_app_filter_mode == CTR_APP_FILTER_NEAREST) ? GPU_NEAREST : GPU_LINEAR;
+    C3D_TexSetFilter(&ctx->appTex, filter, filter);
+}
 
 void CtrRenderer_setLetterboxTheme(float topR, float topG, float topB,
                                    float botR, float botG, float botB,
                                    float accentR, float accentG, float accentB,
                                    float blurAlpha, float particleAlpha) {
-    g_letterbox.bgTop[0] = topR;
-    g_letterbox.bgTop[1] = topG;
-    g_letterbox.bgTop[2] = topB;
-    g_letterbox.bgBot[0] = botR;
-    g_letterbox.bgBot[1] = botG;
-    g_letterbox.bgBot[2] = botB;
-    g_letterbox.accent[0] = accentR;
-    g_letterbox.accent[1] = accentG;
-    g_letterbox.accent[2] = accentB;
-    if (blurAlpha < 0.f) blurAlpha = 0.f;
+    g_letterbox.bgTop[0] = topR; g_letterbox.bgTop[1] = topG; g_letterbox.bgTop[2] = topB;
+    g_letterbox.bgBot[0] = botR; g_letterbox.bgBot[1] = botG; g_letterbox.bgBot[2] = botB;
+    g_letterbox.accent[0] = accentR; g_letterbox.accent[1] = accentG; g_letterbox.accent[2] = accentB;
+    if (blurAlpha     < 0.f) blurAlpha     = 0.f;
     if (particleAlpha < 0.f) particleAlpha = 0.f;
     g_letterbox.blurAlpha = blurAlpha;
     g_letterbox.particleAlpha = particleAlpha;
 }
 
 C3D_RenderTarget *CtrRenderer_getTopTarget(Renderer *ren) {
-    return ren ? ((CtrRenderer *) ren)->topTarget : NULL;
+    return ren ? ((CtrRenderer *)ren)->topTarget : NULL;
 }
 
 C3D_RenderTarget *CtrRenderer_getBottomTarget(Renderer *ren) {
-    return ren ? ((CtrRenderer *) ren)->bottomTarget : NULL;
+    return ren ? ((CtrRenderer *)ren)->bottomTarget : NULL;
 }
 
 static void safe_delete_target(CtrRenderer *ctx, C3D_RenderTarget *target) {
@@ -146,7 +157,7 @@ static void gc_clear_targets() {
     g_gc_target_count = 0;
 }
 
-static void gc_add_target(C3D_RenderTarget *tgt) {
+static void gc_add_target(C3D_RenderTarget* tgt) {
     if (!tgt) return;
     if (g_gc_target_count < MAX_GC_TARGETS) {
         g_gc_targets[g_gc_target_count++] = tgt;
@@ -154,6 +165,8 @@ static void gc_add_target(C3D_RenderTarget *tgt) {
         C3D_RenderTargetDelete(tgt);
     }
 }
+
+// Utilities
 
 typedef struct {
     uint32_t magic;
@@ -182,9 +195,9 @@ typedef struct {
 #define REPACK_ENTRY_VALID 1u
 
 typedef struct {
-    float x, y, z;
-    float u, v;
-    float r, g, b, a;
+    float    x, y, z;
+    float    u, v;
+    float    r, g, b, a;
 } CtrVertex;
 
 static uint32_t g_frame = 0;
@@ -194,7 +207,7 @@ static void *g_cacheProgressUser = NULL;
 void CtrRenderer_setCacheProgressCallback(CtrRendererCacheProgressFn callback, void *user) {
     g_cacheProgressCallback = callback;
     g_cacheProgressUser = user;
-    CtrTextureCache_setProgressCallback((CtrTextureCacheProgressFn) callback, user);
+    CtrTextureCache_setProgressCallback((CtrTextureCacheProgressFn)callback, user);
 }
 
 static inline uint16_t pack_rgba4444(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
@@ -204,84 +217,14 @@ static inline uint16_t pack_rgba4444(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
 static int next_pow2(int x) {
     if (x < 8) return 8;
     x--;
-    x |= x >> 1;
-    x |= x >> 2;
-    x |= x >> 4;
-    x |= x >> 8;
-    x |= x >> 16;
+    x |= x >> 1;  x |= x >> 2;  x |= x >> 4;  x |= x >> 8;  x |= x >> 16;
     return x + 1;
-}
-
-static int clamp_int(int v, int lo, int hi) {
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
-}
-
-static void cover_aspect(int srcW, int srcH, int dstW, int dstH, int *outW, int *outH) {
-    if (srcW < 1) srcW = 1;
-    if (srcH < 1) srcH = 1;
-    if (dstW < 1) dstW = 1;
-    if (dstH < 1) dstH = 1;
-    float srcAspect = (float) srcW / (float) srcH;
-    float dstAspect = (float) dstW / (float) dstH;
-    int w, h;
-    if (srcAspect > dstAspect) {
-        h = dstH;
-        w = (int) floorf((float) dstH * srcAspect + 0.5f);
-    } else {
-        w = dstW;
-        h = (int) floorf((float) dstW / srcAspect + 0.5f);
-    }
-    *outW = clamp_int(w, 1, 1024);
-    *outH = clamp_int(h, 1, 1024);
-}
-static void contain_aspect(int srcW, int srcH, int dstW, int dstH, int *outW, int *outH) {
-    if (srcW < 1) srcW = 1;
-    if (srcH < 1) srcH = 1;
-    if (dstW < 1) dstW = 1;
-    if (dstH < 1) dstH = 1;
-    float srcAspect = (float) srcW / (float) srcH;
-    float dstAspect = (float) dstW / (float) dstH;
-    int w, h;
-    if (srcAspect > dstAspect) {
-        w = dstW;
-        h = (int) floorf((float) dstW / srcAspect + 0.5f);
-    } else {
-        h = dstH;
-        w = (int) floorf((float) dstH * srcAspect + 0.5f);
-    }
-    if (w > dstW) w = dstW;
-    if (h > dstH) h = dstH;
-    *outW = clamp_int(w, 1, 1024);
-    *outH = clamp_int(h, 1, 1024);
 }
 
 static inline uint8_t clamp_u8(float a) {
     if (a <= 0.f) return 0;
     if (a >= 1.f) return 255;
-    return (uint8_t) (a * 255.f);
-}
-
-static bool valid_vs_fvec_uniform(int loc, int vecCount) {
-    return loc >= 0 && vecCount > 0 && loc <= (96 - vecCount);
-}
-
-static int lookup_vs_projection_uniform(const char *owner) {
-    static const char *names[] = {"projection", "projection[0]", "uProjection"};
-    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        int loc = shaderInstanceGetUniformLocation(g_shaderProg.vertexShader, names[i]);
-        if (valid_vs_fvec_uniform(loc, 4)) {
-            CTR_RENDER_LOG("%s projection uniform '%s' -> c%d", owner, names[i], loc);
-            return loc;
-        }
-    }
-
-    fprintf(stderr,
-            "%s: projection uniform lookup failed; falling back to vertex shader c0\n",
-            owner ? owner : "CtrRenderer");
-    fflush(stderr);
-    return 0;
+    return (uint8_t)(a * 255.f);
 }
 
 static void col2fv(uint32_t col, float a, float out[4]) {
@@ -295,12 +238,11 @@ static uint8_t *read_blob(FILE *fp, uint32_t off, uint32_t size) {
     if (!fp || !size) return NULL;
     fseek(fp, off, SEEK_SET);
     uint8_t *buf = malloc(size);
-    if (buf && fread(buf, 1, size, fp) != size) {
-        free(buf);
-        return NULL;
-    }
+    if (buf && fread(buf, 1, size, fp) != size) { free(buf); return NULL; }
     return buf;
 }
+
+// Texture tiling
 
 static inline uint32_t morton_pos(uint32_t x, uint32_t y) {
     uint32_t r = 0;
@@ -335,6 +277,15 @@ static void tile_rgba4(const uint16_t *linear, uint16_t *tiled,
     }
 }
 
+// Texture cache / local repack.
+//
+// data.win is never modified. First launch creates:
+//   atlas.bin           - TPAG remap table (old TPAG index -> new page/x/y)
+//   page_<id>.atlas     - linear RGBA4444 atlas pages, ATLS header + pixels
+//
+// Repacked pages start at dw->txtr.count, so old source page ids remain usable
+// as a fallback for oversized TPAGs that cannot fit into a 512x512 atlas.
+
 static void page_meta_path(char *out, size_t outSize, int pageId) {
     snprintf(out, outSize, "%s/page_%d.atlas", g_current_cache_dir, pageId);
 }
@@ -362,7 +313,7 @@ static bool repack_index_is_valid(DataWin *dw) {
 
     if (ok && hdr.atlasCount > 0) {
         char pagePath[256];
-        page_meta_path(pagePath, sizeof(pagePath), (int) hdr.basePageId);
+        page_meta_path(pagePath, sizeof(pagePath), (int)hdr.basePageId);
         FILE *p = fopen(pagePath, "rb");
         ok = (p != NULL);
         if (p) fclose(p);
@@ -374,10 +325,7 @@ static void ensure_cache_ready_flag(void) {
     char flagFile[256];
     snprintf(flagFile, sizeof(flagFile), "%s/%s", g_current_cache_dir, CACHE_READY_FLAG);
     FILE *f = fopen(flagFile, "w");
-    if (f) {
-        fputs("READY", f);
-        fclose(f);
-    }
+    if (f) { fputs("READY", f); fclose(f); }
 }
 
 static void remove_if_exists(const char *path) {
@@ -412,21 +360,22 @@ static bool write_one_page_legacy(int pageId, const uint8_t *pixels, int w, int 
     setvbuf(outF, NULL, _IOFBF, 256 * 1024);
 
     bool ok = true;
-    AtlasHeader hdr = {ATLAS_MAGIC, (uint32_t) w, (uint32_t) h};
+    AtlasHeader hdr = { ATLAS_MAGIC, (uint32_t)w, (uint32_t)h };
     if (fwrite(&hdr, sizeof(hdr), 1, outF) != 1) ok = false;
 
-    uint16_t *row = malloc((size_t) w * sizeof(uint16_t));
+    uint16_t *row = malloc((size_t)w * sizeof(uint16_t));
     if (!row) ok = false;
     for (int y = 0; ok && y < h; y++) {
-        const uint8_t *src = pixels + (size_t) y * (size_t) w * 4u;
+        const uint8_t *src = pixels + (size_t)y * (size_t)w * 4u;
         for (int x = 0; x < w; x++) {
             uint8_t r = src[x * 4 + 0];
             uint8_t g = src[x * 4 + 1];
             uint8_t b = src[x * 4 + 2];
             uint8_t a = src[x * 4 + 3];
+            //if (a == 0) { r = 0; g = 0; b = 0; }
             row[x] = pack_rgba4444(r, g, b, a);
         }
-        if (fwrite(row, sizeof(uint16_t), (size_t) w, outF) != (size_t) w) ok = false;
+        if (fwrite(row, sizeof(uint16_t), (size_t)w, outF) != (size_t)w) ok = false;
     }
     free(row);
     fclose(outF);
@@ -474,24 +423,24 @@ typedef struct {
 static RepackImage *g_sort_images = NULL;
 
 static int cmp_image_group(const void *a, const void *b) {
-    const RepackImage *ia = &g_sort_images[*(const uint32_t *) a];
-    const RepackImage *ib = &g_sort_images[*(const uint32_t *) b];
+    const RepackImage *ia = &g_sort_images[*(const uint32_t *)a];
+    const RepackImage *ib = &g_sort_images[*(const uint32_t *)b];
     if (ia->groupId < ib->groupId) return -1;
     if (ia->groupId > ib->groupId) return 1;
     return 0;
 }
 
 static int cmp_group_area_desc(const void *a, const void *b) {
-    const RepackGroup *ga = (const RepackGroup *) a;
-    const RepackGroup *gb = (const RepackGroup *) b;
+    const RepackGroup *ga = (const RepackGroup *)a;
+    const RepackGroup *gb = (const RepackGroup *)b;
     if (ga->area < gb->area) return 1;
     if (ga->area > gb->area) return -1;
     return 0;
 }
 
 static int cmp_image_size_desc(const void *a, const void *b) {
-    const RepackImage *ia = &g_sort_images[*(const uint32_t *) a];
-    const RepackImage *ib = &g_sort_images[*(const uint32_t *) b];
+    const RepackImage *ia = &g_sort_images[*(const uint32_t *)a];
+    const RepackImage *ib = &g_sort_images[*(const uint32_t *)b];
     int ma = ia->w > ia->h ? ia->w : ia->h;
     int mb = ib->w > ib->h ? ib->w : ib->h;
     if (ma != mb) return mb - ma;
@@ -532,19 +481,15 @@ static void packer_split(MaxRectsPacker *p, PackRect used) {
             packer_add_free(p, (PackRect){freeR.x, freeR.y, used.x - freeR.x, freeR.h});
         }
         if (freeR.x + freeR.w > used.x + used.w) {
-            packer_add_free(p, (PackRect){
-                                used.x + used.w, freeR.y,
-                                freeR.x + freeR.w - used.x - used.w, freeR.h
-                            });
+            packer_add_free(p, (PackRect){used.x + used.w, freeR.y,
+                                          freeR.x + freeR.w - used.x - used.w, freeR.h});
         }
         if (freeR.y < used.y) {
             packer_add_free(p, (PackRect){freeR.x, freeR.y, freeR.w, used.y - freeR.y});
         }
         if (freeR.y + freeR.h > used.y + used.h) {
-            packer_add_free(p, (PackRect){
-                                freeR.x, used.y + used.h, freeR.w,
-                                freeR.y + freeR.h - used.y - used.h
-                            });
+            packer_add_free(p, (PackRect){freeR.x, used.y + used.h, freeR.w,
+                                          freeR.y + freeR.h - used.y - used.h});
         }
     }
 }
@@ -572,7 +517,7 @@ static bool packer_insert(MaxRectsPacker *p, int w, int h, int *outX, int *outY)
         int leftoverH = r.w - w;
         int leftoverV = r.h - h;
         int shortSide = leftoverH < leftoverV ? leftoverH : leftoverV;
-        int longSide = leftoverH > leftoverV ? leftoverH : leftoverV;
+        int longSide  = leftoverH > leftoverV ? leftoverH : leftoverV;
         if (shortSide < bestShort || (shortSide == bestShort && longSide < bestLong)) {
             best = i;
             bestShort = shortSide;
@@ -581,7 +526,7 @@ static bool packer_insert(MaxRectsPacker *p, int w, int h, int *outX, int *outY)
     }
     if (best < 0) return false;
 
-    PackRect placed = {p->rects[best].x, p->rects[best].y, w, h};
+    PackRect placed = { p->rects[best].x, p->rects[best].y, w, h };
     *outX = placed.x;
     *outY = placed.y;
     packer_split(p, placed);
@@ -593,7 +538,7 @@ static bool add_repack_image(RepackImage **images, uint32_t *count, uint32_t *ca
                              RepackImage img) {
     if (*count >= *cap) {
         uint32_t next = *cap ? (*cap * 2u) : 256u;
-        RepackImage *grown = realloc(*images, (size_t) next * sizeof(RepackImage));
+        RepackImage *grown = realloc(*images, (size_t)next * sizeof(RepackImage));
         if (!grown) return false;
         *images = grown;
         *cap = next;
@@ -605,7 +550,7 @@ static bool add_repack_image(RepackImage **images, uint32_t *count, uint32_t *ca
 static uint32_t pack_repack_images(RepackImage *images, uint32_t imageCount) {
     if (!images || imageCount == 0) return 0;
 
-    uint32_t *order = malloc((size_t) imageCount * sizeof(uint32_t));
+    uint32_t *order = malloc((size_t)imageCount * sizeof(uint32_t));
     if (!order) return 0;
     for (uint32_t i = 0; i < imageCount; i++) order[i] = i;
 
@@ -621,21 +566,17 @@ static uint32_t pack_repack_images(RepackImage *images, uint32_t imageCount) {
         uint64_t area = 0;
         while (at < imageCount && images[order[at]].groupId == groupId) {
             RepackImage *img = &images[order[at]];
-            area += (uint64_t) img->w * (uint64_t) img->h;
+            area += (uint64_t)img->w * (uint64_t)img->h;
             at++;
         }
         if (groupCount >= groupCap) {
             uint32_t next = groupCap ? groupCap * 2u : 128u;
-            RepackGroup *grown = realloc(groups, (size_t) next * sizeof(RepackGroup));
-            if (!grown) {
-                free(groups);
-                free(order);
-                return 0;
-            }
+            RepackGroup *grown = realloc(groups, (size_t)next * sizeof(RepackGroup));
+            if (!grown) { free(groups); free(order); return 0; }
             groups = grown;
             groupCap = next;
         }
-        groups[groupCount++] = (RepackGroup){groupId, start, at - start, area};
+        groups[groupCount++] = (RepackGroup){ groupId, start, at - start, area };
     }
     qsort(groups, groupCount, sizeof(RepackGroup), cmp_group_area_desc);
 
@@ -645,13 +586,11 @@ static uint32_t pack_repack_images(RepackImage *images, uint32_t imageCount) {
 
     for (uint32_t g = 0; g < groupCount; g++) {
         RepackGroup *grp = &groups[g];
-        uint32_t *idx = malloc((size_t) grp->count * sizeof(uint32_t));
-        int *tryX = malloc((size_t) grp->count * sizeof(int));
-        int *tryY = malloc((size_t) grp->count * sizeof(int));
+        uint32_t *idx = malloc((size_t)grp->count * sizeof(uint32_t));
+        int *tryX = malloc((size_t)grp->count * sizeof(int));
+        int *tryY = malloc((size_t)grp->count * sizeof(int));
         if (!idx || !tryX || !tryY) {
-            free(idx);
-            free(tryX);
-            free(tryY);
+            free(idx); free(tryX); free(tryY);
             continue;
         }
         for (uint32_t i = 0; i < grp->count; i++) idx[i] = order[grp->start + i];
@@ -672,7 +611,7 @@ static uint32_t pack_repack_images(RepackImage *images, uint32_t imageCount) {
                 atlases[a].packer = clone;
                 for (uint32_t i = 0; i < grp->count; i++) {
                     RepackImage *img = &images[idx[i]];
-                    img->atlasId = (int) a;
+                    img->atlasId = (int)a;
                     img->dstX = tryX[i];
                     img->dstY = tryY[i];
                 }
@@ -688,7 +627,7 @@ static uint32_t pack_repack_images(RepackImage *images, uint32_t imageCount) {
                 while (left > 0) {
                     if (atlasCount >= atlasCap) {
                         uint32_t next = atlasCap ? atlasCap * 2u : 32u;
-                        RepackAtlas *grown = realloc(atlases, (size_t) next * sizeof(RepackAtlas));
+                        RepackAtlas *grown = realloc(atlases, (size_t)next * sizeof(RepackAtlas));
                         if (!grown) break;
                         atlases = grown;
                         atlasCap = next;
@@ -701,7 +640,7 @@ static uint32_t pack_repack_images(RepackImage *images, uint32_t imageCount) {
                         RepackImage *img = &images[idx[i]];
                         int px, py;
                         if (packer_insert(&atlases[atlasId].packer, img->w, img->h, &px, &py)) {
-                            img->atlasId = (int) atlasId;
+                            img->atlasId = (int)atlasId;
                             img->dstX = px;
                             img->dstY = py;
                             remaining[i] = false;
@@ -729,9 +668,9 @@ static uint32_t pack_repack_images(RepackImage *images, uint32_t imageCount) {
 
 static bool init_empty_repack_page(uint32_t pageId) {
     char path[256], tmpPath[256];
-    page_meta_path(path, sizeof(path), (int) pageId);
+    page_meta_path(path, sizeof(path), (int)pageId);
     snprintf(tmpPath, sizeof(tmpPath), "%s/page_%lu.tmp",
-             g_current_cache_dir, (unsigned long) pageId);
+             g_current_cache_dir, (unsigned long)pageId);
     remove_if_exists(tmpPath);
 
     FILE *f = fopen(tmpPath, "wb");
@@ -739,7 +678,7 @@ static bool init_empty_repack_page(uint32_t pageId) {
     setvbuf(f, NULL, _IOFBF, 64 * 1024);
 
     bool ok = true;
-    AtlasHeader hdr = {ATLAS_MAGIC, CTR_REPACK_ATLAS_SIZE, CTR_REPACK_ATLAS_SIZE};
+    AtlasHeader hdr = { ATLAS_MAGIC, CTR_REPACK_ATLAS_SIZE, CTR_REPACK_ATLAS_SIZE };
     if (fwrite(&hdr, sizeof(hdr), 1, f) != 1) ok = false;
 
     uint16_t *zero = calloc(CTR_REPACK_ATLAS_SIZE, sizeof(uint16_t));
@@ -762,9 +701,9 @@ static bool init_empty_repack_page(uint32_t pageId) {
 
 static bool finalize_repack_page_tiled(uint32_t pageId) {
     char path[256], tmpPath[256];
-    page_meta_path(path, sizeof(path), (int) pageId);
+    page_meta_path(path, sizeof(path), (int)pageId);
     snprintf(tmpPath, sizeof(tmpPath), "%s/page_%lu.tiled.tmp",
-             g_current_cache_dir, (unsigned long) pageId);
+             g_current_cache_dir, (unsigned long)pageId);
 
     FILE *in = fopen(path, "rb");
     if (!in) return false;
@@ -775,18 +714,18 @@ static bool finalize_repack_page_tiled(uint32_t pageId) {
               hdr.w > 0 && hdr.h > 0 &&
               hdr.w <= CTR_REPACK_ATLAS_SIZE &&
               hdr.h <= CTR_REPACK_ATLAS_SIZE;
-    int w = ok ? (int) hdr.w : 0;
-    int h = ok ? (int) hdr.h : 0;
+    int w = ok ? (int)hdr.w : 0;
+    int h = ok ? (int)hdr.h : 0;
     uint16_t *linear = NULL;
     uint16_t *tiled = NULL;
     if (ok) {
-        linear = calloc((size_t) w * (size_t) h, sizeof(uint16_t));
-        tiled = malloc((size_t) w * (size_t) h * sizeof(uint16_t));
+        linear = calloc((size_t)w * (size_t)h, sizeof(uint16_t));
+        tiled = malloc((size_t)w * (size_t)h * sizeof(uint16_t));
         ok = (linear != NULL && tiled != NULL);
     }
     if (ok) {
-        ok = fread(linear, sizeof(uint16_t), (size_t) w * (size_t) h, in) ==
-             (size_t) w * (size_t) h;
+        ok = fread(linear, sizeof(uint16_t), (size_t)w * (size_t)h, in) ==
+             (size_t)w * (size_t)h;
     }
     fclose(in);
 
@@ -796,10 +735,10 @@ static bool finalize_repack_page_tiled(uint32_t pageId) {
         FILE *out = fopen(tmpPath, "wb");
         ok = (out != NULL);
         if (ok) {
-            AtlasHeader outHdr = {ATLAS_TILED_MAGIC, (uint32_t) w, (uint32_t) h};
+            AtlasHeader outHdr = { ATLAS_TILED_MAGIC, (uint32_t)w, (uint32_t)h };
             ok = fwrite(&outHdr, sizeof(outHdr), 1, out) == 1 &&
-                 fwrite(tiled, sizeof(uint16_t), (size_t) w * (size_t) h, out) ==
-                 (size_t) w * (size_t) h;
+                 fwrite(tiled, sizeof(uint16_t), (size_t)w * (size_t)h, out) ==
+                 (size_t)w * (size_t)h;
             fclose(out);
         }
         if (ok && rename(tmpPath, path) != 0) {
@@ -822,26 +761,27 @@ static bool blit_repack_image(const RepackImage *img, const uint8_t *srcPixels,
     if (img->dstX + img->w > CTR_REPACK_ATLAS_SIZE || img->dstY + img->h > CTR_REPACK_ATLAS_SIZE) return false;
 
     char path[256];
-    page_meta_path(path, sizeof(path), (int) (basePageId + (uint32_t) img->atlasId));
+    page_meta_path(path, sizeof(path), (int)(basePageId + (uint32_t)img->atlasId));
     FILE *f = fopen(path, "r+b");
     if (!f) return false;
     setvbuf(f, NULL, _IOFBF, 32 * 1024);
 
-    uint16_t *row = malloc((size_t) img->w * sizeof(uint16_t));
+    uint16_t *row = malloc((size_t)img->w * sizeof(uint16_t));
     bool ok = (row != NULL);
     for (int y = 0; ok && y < img->h; y++) {
-        const uint8_t *src = srcPixels + (((size_t) (img->srcY + y) * (size_t) srcW + (size_t) img->srcX) * 4u);
+        const uint8_t *src = srcPixels + (((size_t)(img->srcY + y) * (size_t)srcW + (size_t)img->srcX) * 4u);
         for (int x = 0; x < img->w; x++) {
             uint8_t r = src[x * 4 + 0];
             uint8_t g = src[x * 4 + 1];
             uint8_t b = src[x * 4 + 2];
             uint8_t a = src[x * 4 + 3];
+            //if (a == 0) { r = 0; g = 0; b = 0; }
             row[x] = pack_rgba4444(r, g, b, a);
         }
-        long off = (long) sizeof(AtlasHeader) +
-                   (((long) (img->dstY + y) * CTR_REPACK_ATLAS_SIZE + img->dstX) * 2L);
+        long off = (long)sizeof(AtlasHeader) +
+                   (((long)(img->dstY + y) * CTR_REPACK_ATLAS_SIZE + img->dstX) * 2L);
         if (fseek(f, off, SEEK_SET) != 0 ||
-            fwrite(row, sizeof(uint16_t), (size_t) img->w, f) != (size_t) img->w) {
+            fwrite(row, sizeof(uint16_t), (size_t)img->w, f) != (size_t)img->w) {
             ok = false;
         }
     }
@@ -866,9 +806,8 @@ static bool write_repack_index(const RepackMapEntry *entries, uint32_t tpagCount
     if (f) {
         ok = true;
         if (fwrite(&hdr, sizeof(hdr), 1, f) != 1) ok = false;
-        if (ok && fwrite(entries, 1, (size_t) tpagCount * sizeof(RepackMapEntry), f) !=
-            (size_t) tpagCount * sizeof(RepackMapEntry))
-            ok = false;
+        if (ok && fwrite(entries, 1, (size_t)tpagCount * sizeof(RepackMapEntry), f) !=
+                  (size_t)tpagCount * sizeof(RepackMapEntry)) ok = false;
         fclose(f);
     }
 
@@ -884,7 +823,7 @@ static bool write_repack_index(const RepackMapEntry *entries, uint32_t tpagCount
             REPACK_MAGIC, REPACK_VERSION, tpagCount, basePageId,
             atlasCount, CTR_REPACK_ATLAS_SIZE
         };
-        size_t bytes = (size_t) tpagCount * sizeof(RepackMapEntry);
+        size_t bytes = (size_t)tpagCount * sizeof(RepackMapEntry);
         ok = fwrite(&hdr, sizeof(hdr), 1, direct) == 1 &&
              fwrite(entries, 1, bytes, direct) == bytes;
         fclose(direct);
@@ -899,20 +838,20 @@ static void assign_asset_groups(DataWin *dw, uint32_t *groupIds, uint32_t *nextG
         uint32_t group = (*nextGroup)++;
         for (uint32_t f = 0; f < spr->textureCount; f++) {
             int32_t tpag = spr->tpagIndices ? spr->tpagIndices[f] : -1;
-            if (tpag >= 0 && (uint32_t) tpag < dw->tpag.count && groupIds[tpag] == 0) {
+            if (tpag >= 0 && (uint32_t)tpag < dw->tpag.count && groupIds[tpag] == 0) {
                 groupIds[tpag] = group;
             }
         }
     }
     for (uint32_t b = 0; b < dw->bgnd.count; b++) {
         int32_t tpag = dw->bgnd.backgrounds[b].tpagIndex;
-        if (tpag >= 0 && (uint32_t) tpag < dw->tpag.count && groupIds[tpag] == 0) {
+        if (tpag >= 0 && (uint32_t)tpag < dw->tpag.count && groupIds[tpag] == 0) {
             groupIds[tpag] = (*nextGroup)++;
         }
     }
     for (uint32_t f = 0; f < dw->font.count; f++) {
         int32_t tpag = dw->font.fonts[f].tpagIndex;
-        if (tpag >= 0 && (uint32_t) tpag < dw->tpag.count && groupIds[tpag] == 0) {
+        if (tpag >= 0 && (uint32_t)tpag < dw->tpag.count && groupIds[tpag] == 0) {
             groupIds[tpag] = (*nextGroup)++;
         }
     }
@@ -955,7 +894,7 @@ static void build_texture_cache(DataWin *dw) {
     if (ok) {
         for (uint32_t i = 0; i < dw->tpag.count; i++) {
             TexturePageItem *item = &dw->tpag.items[i];
-            if (item->texturePageId < 0 || (uint32_t) item->texturePageId >= dw->txtr.count) continue;
+            if (item->texturePageId < 0 || (uint32_t)item->texturePageId >= dw->txtr.count) continue;
             int w = item->sourceWidth;
             int h = item->sourceHeight;
             if (w <= 0 || h <= 0) continue;
@@ -989,7 +928,7 @@ static void build_texture_cache(DataWin *dw) {
     if (ok) {
         for (uint32_t i = 0; i < imageCount; i++) {
             if (images[i].atlasId < 0 && images[i].srcPage >= 0 &&
-                (uint32_t) images[i].srcPage < dw->txtr.count) {
+                (uint32_t)images[i].srcPage < dw->txtr.count) {
                 fallbackPages[images[i].srcPage] = true;
             }
         }
@@ -1008,9 +947,9 @@ static void build_texture_cache(DataWin *dw) {
             TexturePageItem *old = &dw->tpag.items[img->tpagIndex];
             entries[img->tpagIndex] = (RepackMapEntry){
                 .flags = REPACK_ENTRY_VALID,
-                .pageId = basePageId + (uint32_t) img->atlasId,
-                .sourceX = (uint16_t) img->dstX,
-                .sourceY = (uint16_t) img->dstY,
+                .pageId = basePageId + (uint32_t)img->atlasId,
+                .sourceX = (uint16_t)img->dstX,
+                .sourceY = (uint16_t)img->dstY,
                 .sourceWidth = old->sourceWidth,
                 .sourceHeight = old->sourceHeight,
                 .targetX = old->targetX,
@@ -1025,32 +964,32 @@ static void build_texture_cache(DataWin *dw) {
 
     for (uint32_t p = 0; ok && p < dw->txtr.count; p++) {
         char progressPath[256];
-        page_meta_path(progressPath, sizeof(progressPath), (int) p);
+        page_meta_path(progressPath, sizeof(progressPath), (int)p);
         if (g_cacheProgressCallback) {
             g_cacheProgressCallback(p, dw->txtr.count, progressPath, g_cacheProgressUser);
         }
 
         bool needed = fallbackPages[p];
         for (uint32_t i = 0; !needed && i < imageCount; i++) {
-            if (images[i].srcPage == (int) p) needed = true;
+            if (images[i].srcPage == (int)p) needed = true;
         }
         if (!needed) {
             char oldPath[256];
-            page_meta_path(oldPath, sizeof(oldPath), (int) p);
+            page_meta_path(oldPath, sizeof(oldPath), (int)p);
             remove_if_exists(oldPath);
-            remove_legacy_tile_files((int) p);
+            remove_legacy_tile_files((int)p);
             continue;
         }
 
         Texture *t = &dw->txtr.textures[p];
         if (!t->blobSize) {
-            fprintf(stderr, "CTR cache: TXTR page %lu has no embedded blob\n", (unsigned long) p);
+            fprintf(stderr, "CTR cache: TXTR page %lu has no embedded blob\n", (unsigned long)p);
             ok = false;
             continue;
         }
         uint8_t *blob = read_blob(dwFile, t->blobOffset, t->blobSize);
         if (!blob) {
-            fprintf(stderr, "CTR cache: failed to read TXTR page %lu blob\n", (unsigned long) p);
+            fprintf(stderr, "CTR cache: failed to read TXTR page %lu blob\n", (unsigned long)p);
             ok = false;
             continue;
         }
@@ -1060,30 +999,30 @@ static void build_texture_cache(DataWin *dw) {
             blob, t->blobSize, DataWin_isVersionAtLeast(dw, 2022, 5, 0, 0), &w, &h);
         free(blob);
         if (!pixels) {
-            fprintf(stderr, "CTR cache: failed to decode TXTR page %lu\n", (unsigned long) p);
+            fprintf(stderr, "CTR cache: failed to decode TXTR page %lu\n", (unsigned long)p);
             ok = false;
             continue;
         }
 
-        if (fallbackPages[p] && !write_one_page_legacy((int) p, pixels, w, h)) {
-            fprintf(stderr, "CTR cache: failed to write legacy page %lu\n", (unsigned long) p);
+        if (fallbackPages[p] && !write_one_page_legacy((int)p, pixels, w, h)) {
+            fprintf(stderr, "CTR cache: failed to write legacy page %lu\n", (unsigned long)p);
             ok = false;
         }
         for (uint32_t i = 0; ok && i < imageCount; i++) {
-            if (images[i].srcPage != (int) p) continue;
+            if (images[i].srcPage != (int)p) continue;
             if (images[i].atlasId < 0) continue;
             if (!blit_repack_image(&images[i], pixels, w, h, basePageId)) {
                 fprintf(stderr, "CTR cache: failed to blit TPAG %lu from source page %lu\n",
-                        (unsigned long) images[i].tpagIndex, (unsigned long) p);
+                        (unsigned long)images[i].tpagIndex, (unsigned long)p);
                 ok = false;
             }
         }
         ImageDecoder_freeRgba(pixels);
         if (ok && !fallbackPages[p]) {
             char oldPath[256];
-            page_meta_path(oldPath, sizeof(oldPath), (int) p);
+            page_meta_path(oldPath, sizeof(oldPath), (int)p);
             remove_if_exists(oldPath);
-            remove_legacy_tile_files((int) p);
+            remove_legacy_tile_files((int)p);
         }
     }
 
@@ -1091,7 +1030,7 @@ static void build_texture_cache(DataWin *dw) {
         for (uint32_t a = 0; a < atlasCount; a++) {
             if (!finalize_repack_page_tiled(basePageId + a)) {
                 fprintf(stderr, "CTR cache: failed to finalize repack atlas %lu\n",
-                        (unsigned long) (basePageId + a));
+                        (unsigned long)(basePageId + a));
                 ok = false;
                 break;
             }
@@ -1152,7 +1091,7 @@ static bool apply_repack_index(CtrRenderer *ctx, DataWin *dw) {
         hdr.tpagCount <= dw->tpag.count &&
         hdr.atlasCount < 32768u &&
         hdr.basePageId + hdr.atlasCount <= 32767u) {
-        RepackMapEntry *entries = malloc((size_t) hdr.tpagCount * sizeof(RepackMapEntry));
+        RepackMapEntry *entries = malloc((size_t)hdr.tpagCount * sizeof(RepackMapEntry));
         if (entries && fread(entries, sizeof(RepackMapEntry), hdr.tpagCount, f) == hdr.tpagCount) {
             ctx->repackBasePageId = hdr.basePageId;
             ctx->repackPageCount = hdr.atlasCount;
@@ -1171,7 +1110,7 @@ static bool apply_repack_index(CtrRenderer *ctx, DataWin *dw) {
                         continue;
                     }
                     TexturePageItem *item = &dw->tpag.items[i];
-                    item->texturePageId = (int16_t) e->pageId;
+                    item->texturePageId = (int16_t)e->pageId;
                     item->sourceX = e->sourceX;
                     item->sourceY = e->sourceY;
                     item->sourceWidth = e->sourceWidth;
@@ -1192,44 +1131,46 @@ static bool apply_repack_index(CtrRenderer *ctx, DataWin *dw) {
     return ok;
 }
 
+// Vertex batching
+
+// Forward decls — these live further down the file.
 static void rebind_state(CtrRenderer *ctx);
-
 static void apply_projection(CtrRenderer *ctx, const C3D_Mtx *m);
-
 static void apply_blend(CtrRenderer *ctx, int mode);
 
+// C3D_FrameSplit invalidates BufInfo / AttrInfo / TexEnv / AlphaBlend / projection
+// uniforms — bind_target already knows this (calls rebind_state+apply_projection
+// after every split). Anywhere else that splits mid-frame must do the same, or
+// the next DrawArrays reads vertices from a stale buffer binding and renders
+// garbage (UNDERTALE undynebridge / DELTARUNE cooking minigame). Use this
+// helper instead of calling C3D_FrameSplit(0) directly.
 static void ctr_safe_frame_split(CtrRenderer *ctx) {
     C3D_FrameSplit(0);
-    ctx->drawsSinceSplit = 0;
     if (ctx->inFrame && ctx->activeTarget) {
         rebind_state(ctx);
         apply_projection(ctx, &ctx->currentProjection);
+        // Re-emit C3D_AlphaBlend — citro3d state cache doesn't always restore it
+        // after a split, and stale blend state mangles font edges + UI overlays
+        // for the rest of the frame. Safe to call: batchVerts is 0 at this point
+        // (caller flushed before splitting), so the inner flush_batch is a no-op.
         apply_blend(ctx, ctx->currentBlendMode);
     }
 }
 
-#define CTR_AUTO_SPLIT_DRAWS 256u
-
 static void flush_batch(CtrRenderer *ctx) {
     if (!ctx->batchVerts || !ctx->batchTex || !ctx->inFrame) {
         ctx->batchVerts = 0;
-        ctx->batchTex = NULL;
+        ctx->batchTex   = NULL;
         return;
     }
 
-    GSPGPU_FlushDataCache((uint8_t *) ctx->vbuf + (ctx->batchStart * sizeof(CtrVertex)),
-                          ctx->batchVerts * sizeof(CtrVertex));
+    GSPGPU_FlushDataCache(ctx->vbuf + ctx->batchStart, ctx->batchVerts * sizeof(CtrVertex));
 
     C3D_TexBind(0, ctx->batchTex);
     C3D_DrawArrays(GPU_TRIANGLES, ctx->batchStart, ctx->batchVerts);
     ctx->batchStart += ctx->batchVerts;
-    ctx->batchVerts = 0;
-    ctx->batchTex = NULL;
-    ctx->drawsSinceSplit++;
-    if (ctx->drawsSinceSplit >= CTR_AUTO_SPLIT_DRAWS) {
-        ctr_safe_frame_split(ctx);
-        ctx->drawsSinceSplit = 0;
-    }
+    ctx->batchVerts  = 0;
+    ctx->batchTex    = NULL;
 }
 
 static inline CtrVertex *vbuf_reserve(CtrRenderer *ctx, uint32_t count, C3D_Tex *tex) {
@@ -1237,12 +1178,12 @@ static inline CtrVertex *vbuf_reserve(CtrRenderer *ctx, uint32_t count, C3D_Tex 
     if (ctx->vbufHead + count > ctx->vbufCap) {
         flush_batch(ctx);
         ctr_safe_frame_split(ctx);
-        ctx->vbufHead = 0;
+        ctx->vbufHead   = 0;
         ctx->batchStart = 0;
     }
     ctx->batchTex = tex;
-    CtrVertex *v = (CtrVertex *) ctx->vbuf + ctx->vbufHead;
-    ctx->vbufHead += count;
+    CtrVertex *v = (CtrVertex *)ctx->vbuf + ctx->vbufHead;
+    ctx->vbufHead   += count;
     ctx->batchVerts += count;
     return v;
 }
@@ -1252,9 +1193,9 @@ static void push_quad_uvgrad(CtrRenderer *ctx, C3D_Tex *tex,
                              float u0, float v0, float u1, float v1,
                              const float c[4][4]) {
     CtrVertex *v = vbuf_reserve(ctx, 6, tex);
-#define EMIT(idx, ix, uu, vv, cc) \
+    #define EMIT(idx, ix, uu, vv, cc) \
         do { \
-            v[idx].x = x[ix] + ctx->currentShiftX; v[idx].y = y[ix]; v[idx].z = 0.f; \
+            v[idx].x = x[ix]; v[idx].y = y[ix]; v[idx].z = 0.f; \
             v[idx].u = uu;    v[idx].v = vv; \
             v[idx].r = c[cc][0]; v[idx].g = c[cc][1]; v[idx].b = c[cc][2]; v[idx].a = c[cc][3]; \
         } while (0)
@@ -1264,7 +1205,7 @@ static void push_quad_uvgrad(CtrRenderer *ctx, C3D_Tex *tex,
     EMIT(3, 0, u0, v0, 0);
     EMIT(4, 2, u1, v1, 2);
     EMIT(5, 3, u0, v1, 3);
-#undef EMIT
+    #undef EMIT
 }
 
 static void push_quad(CtrRenderer *ctx, C3D_Tex *tex,
@@ -1281,30 +1222,29 @@ static void push_quad(CtrRenderer *ctx, C3D_Tex *tex,
         {col[0], col[1], col[2], col[3]},
     };
     CtrVertex *v = vbuf_reserve(ctx, 6, tex);
-#define VV(idx, ix, iy, uu, vv, cc) \
-v[idx] = (CtrVertex){xs[ix] + ctx->currentShiftX, ys[iy], 0.f, uu, vv, cs[cc][0], cs[cc][1], cs[cc][2], cs[cc][3]}
+    #define VV(idx, ix, iy, uu, vv, cc) \
+        v[idx] = (CtrVertex){xs[ix], ys[iy], 0.f, uu, vv, cs[cc][0], cs[cc][1], cs[cc][2], cs[cc][3]}
     VV(0, 0, 0, u0, v0, 0);
     VV(1, 1, 1, u1, v0, 1);
     VV(2, 2, 2, u1, v1, 2);
     VV(3, 0, 0, u0, v0, 0);
     VV(4, 2, 2, u1, v1, 2);
     VV(5, 3, 3, u0, v1, 3);
-#undef VV
+    #undef VV
 }
 
 static void push_solid_tri(CtrRenderer *ctx, float x1, float y1, float x2, float y2,
                            float x3, float y3, const float c1[4], const float c2[4], const float c3[4]) {
     CtrVertex *v = vbuf_reserve(ctx, 3, &ctx->whiteTex);
-    float shft = ctx->currentShiftX;
-    v[0] = (CtrVertex){x1 + shft, y1, 0, .5f, .5f, c1[0], c1[1], c1[2], c1[3]};
-    v[1] = (CtrVertex){x2 + shft, y2, 0, .5f, .5f, c2[0], c2[1], c2[2], c2[3]};
-    v[2] = (CtrVertex){x3 + shft, y3, 0, .5f, .5f, c3[0], c3[1], c3[2], c3[3]};
+    v[0] = (CtrVertex){x1, y1, 0, .5f, .5f, c1[0], c1[1], c1[2], c1[3]};
+    v[1] = (CtrVertex){x2, y2, 0, .5f, .5f, c2[0], c2[1], c2[2], c2[3]};
+    v[2] = (CtrVertex){x3, y3, 0, .5f, .5f, c3[0], c3[1], c3[2], c3[3]};
 }
 
 static void draw_letterbox_backdrop(CtrRenderer *ctx) {
     if (g_ctr_backdrop_mode == CTR_BACKDROP_BLACK) {
-        float x[4] = {0.f, (float) ctx->winW, (float) ctx->winW, 0.f};
-        float y[4] = {0.f, 0.f, (float) ctx->winH, (float) ctx->winH};
+        float x[4] = {0.f, (float)ctx->winW, (float)ctx->winW, 0.f};
+        float y[4] = {0.f, 0.f, (float)ctx->winH, (float)ctx->winH};
         float bg[4][4] = {
             {0.f, 0.f, 0.f, 1.f}, {0.f, 0.f, 0.f, 1.f},
             {0.f, 0.f, 0.f, 1.f}, {0.f, 0.f, 0.f, 1.f}
@@ -1314,8 +1254,8 @@ static void draw_letterbox_backdrop(CtrRenderer *ctx) {
     }
 
     float u0 = 0.f;
-    float u1 = (float) ctx->appRenderW / (float) ctx->appPotW;
-    float v0 = (float) (ctx->appPotH - ctx->appRenderH) / (float) ctx->appPotH;
+    float u1 = (float)ctx->appLogicW / (float)ctx->appPotW;
+    float v0 = (float)(ctx->appPotH - ctx->appLogicH) / (float)ctx->appPotH;
     float v1 = 1.f;
 
     float zoomU = (u1 - u0) * 0.15f;
@@ -1325,8 +1265,8 @@ static void draw_letterbox_backdrop(CtrRenderer *ctx) {
     float texVTop = v1 - zoomV;
     float texVBot = v0 + zoomV;
 
-    float x[4] = {0.f, (float) ctx->winW, (float) ctx->winW, 0.f};
-    float y[4] = {0.f, 0.f, (float) ctx->winH, (float) ctx->winH};
+    float x[4] = {0.f, (float)ctx->winW, (float)ctx->winW, 0.f};
+    float y[4] = {0.f, 0.f, (float)ctx->winH, (float)ctx->winH};
     float bgTopR = g_letterbox.bgTop[0];
     float bgTopG = g_letterbox.bgTop[1];
     float bgTopB = g_letterbox.bgTop[2];
@@ -1350,8 +1290,8 @@ static void draw_letterbox_backdrop(CtrRenderer *ctx) {
             float ox = offsets_x[j];
             float oy = offsets_y[j];
 
-            float px[4] = {ox, (float) ctx->winW + ox, (float) ctx->winW + ox, ox};
-            float py[4] = {oy, oy, (float) ctx->winH + oy, (float) ctx->winH + oy};
+            float px[4] = {ox, (float)ctx->winW + ox, (float)ctx->winW + ox, ox};
+            float py[4] = {oy, oy, (float)ctx->winH + oy, (float)ctx->winH + oy};
 
             float c[4][4] = {
                 {0.45f, 0.45f, 0.45f, blurAlpha}, {0.45f, 0.45f, 0.45f, blurAlpha},
@@ -1363,15 +1303,15 @@ static void draw_letterbox_backdrop(CtrRenderer *ctx) {
     }
 
     if (g_letterbox.particleAlpha > 0.001f) {
-        float t = (float) g_frame * 0.025f;
+        float t = (float)g_frame * 0.025f;
         float aR = g_letterbox.accent[0];
         float aG = g_letterbox.accent[1];
         float aB = g_letterbox.accent[2];
         for (int i = 0; i < 18; i++) {
-            float seed = (float) i * 15.37f;
-            float px = fmodf(seed * 19.1f + t * (18.f + (float) (i % 4) * 7.f), (float) ctx->winW + 48.f) - 24.f;
-            float py = fmodf(seed * 11.3f + sinf(t + seed) * 16.f, (float) ctx->winH + 32.f) - 16.f;
-            float s = 1.2f + (float) (i % 3) * 0.8f;
+            float seed = (float)i * 15.37f;
+            float px = fmodf(seed * 19.1f + t * (18.f + (float)(i % 4) * 7.f), (float)ctx->winW + 48.f) - 24.f;
+            float py = fmodf(seed * 11.3f + sinf(t + seed) * 16.f, (float)ctx->winH + 32.f) - 16.f;
+            float s = 1.2f + (float)(i % 3) * 0.8f;
 
             float alpha = g_letterbox.particleAlpha *
                           (0.12f + 0.10f * (sinf(t * 1.7f + seed) * 0.5f + 0.5f));
@@ -1382,6 +1322,8 @@ static void draw_letterbox_backdrop(CtrRenderer *ctx) {
     }
 }
 
+// Atlases
+
 static void free_old_pages(CtrRenderer *ctx) {
     if (linearSpaceFree() >= LINEAR_LOW) return;
     bool flushed = false;
@@ -1389,29 +1331,25 @@ static void free_old_pages(CtrRenderer *ctx) {
 
     while (evicted < 32 && linearSpaceFree() < LINEAR_SAFE) {
         uint32_t oldest = UINT32_MAX;
-        int victim = -1;
+        int      victim = -1;
         for (uint32_t i = 0; i < ctx->pageCount; i++) {
             if (!ctx->pages[i].loaded || ctx->pages[i].keepResident ||
-                ctx->pages[i].lastFrame >= g_frame)
-                continue;
+                ctx->pages[i].lastFrame >= g_frame) continue;
             if (ctx->pages[i].lastFrame < oldest) {
                 oldest = ctx->pages[i].lastFrame;
-                victim = (int) i;
+                victim = (int)i;
             }
         }
         if (victim < 0) {
             for (uint32_t i = 0; i < ctx->pageCount; i++) {
                 if (!ctx->pages[i].loaded || ctx->pages[i].keepResident) continue;
-                victim = (int) i;
+                victim = (int)i;
                 break;
             }
         }
         if (victim < 0) break;
 
-        if (!flushed) {
-            flush_batch(ctx);
-            flushed = true;
-        }
+        if (!flushed) { flush_batch(ctx); flushed = true; }
 
         for (int cx = 0; cx < ctx->pages[victim].chunksX; cx++) {
             for (int cy = 0; cy < ctx->pages[victim].chunksY; cy++) {
@@ -1431,34 +1369,31 @@ static void extract_legacy_page_file(CtrRenderer *ctx, DataWin *dw, uint32_t id,
                                      FILE *f, int aw, int ah) {
     enum { LEGACY_CHUNK_SIZE = 1024 };
     TexturePageItem *item = &dw->tpag.items[id];
-    int w = item->sourceWidth > 0 ? item->sourceWidth : 1;
+    int w = item->sourceWidth  > 0 ? item->sourceWidth  : 1;
     int h = item->sourceHeight > 0 ? item->sourceHeight : 1;
 
     CtrPage *page = &ctx->pages[id];
     page->origW = w;
     page->origH = h;
-    page->chunksX = (int) fminf((float) ((w + LEGACY_CHUNK_SIZE - 1) / LEGACY_CHUNK_SIZE),
-                                (float) CTR_MAX_CHUNKS_X);
-    page->chunksY = (int) fminf((float) ((h + LEGACY_CHUNK_SIZE - 1) / LEGACY_CHUNK_SIZE),
-                                (float) CTR_MAX_CHUNKS_Y);
+    page->chunksX = (int)fminf((float)((w + LEGACY_CHUNK_SIZE - 1) / LEGACY_CHUNK_SIZE),
+                               (float)CTR_MAX_CHUNKS_X);
+    page->chunksY = (int)fminf((float)((h + LEGACY_CHUNK_SIZE - 1) / LEGACY_CHUNK_SIZE),
+                               (float)CTR_MAX_CHUNKS_Y);
     bool complete = true;
 
     for (int cy = 0; cy < page->chunksY; cy++) {
         for (int cx = 0; cx < page->chunksX; cx++) {
             CtrAtlasChunk *chunk = &page->chunks[cx][cy];
             memset(chunk, 0, sizeof(*chunk));
-            chunk->srcX = cx * LEGACY_CHUNK_SIZE;
-            chunk->srcY = cy * LEGACY_CHUNK_SIZE;
-            chunk->width = (int) fminf((float) (w - chunk->srcX), (float) LEGACY_CHUNK_SIZE);
-            chunk->height = (int) fminf((float) (h - chunk->srcY), (float) LEGACY_CHUNK_SIZE);
-            chunk->potW = next_pow2(chunk->width);
-            chunk->potH = next_pow2(chunk->height);
+            chunk->srcX   = cx * LEGACY_CHUNK_SIZE;
+            chunk->srcY   = cy * LEGACY_CHUNK_SIZE;
+            chunk->width  = (int)fminf((float)(w - chunk->srcX), (float)LEGACY_CHUNK_SIZE);
+            chunk->height = (int)fminf((float)(h - chunk->srcY), (float)LEGACY_CHUNK_SIZE);
+            chunk->potW   = next_pow2(chunk->width);
+            chunk->potH   = next_pow2(chunk->height);
 
-            uint16_t *linear = calloc((size_t) chunk->potW * chunk->potH, sizeof(uint16_t));
-            if (!linear) {
-                complete = false;
-                continue;
-            }
+            uint16_t *linear = calloc((size_t)chunk->potW * chunk->potH, sizeof(uint16_t));
+            if (!linear) { complete = false; continue; }
 
             for (int y = 0; y < chunk->height; y++) {
                 int sy = item->sourceY + chunk->srcY + y;
@@ -1467,11 +1402,11 @@ static void extract_legacy_page_file(CtrRenderer *ctx, DataWin *dw, uint32_t id,
                 int readable = chunk->width;
                 if (sx + readable > aw) readable = aw - sx;
                 if (readable <= 0) continue;
-                fseek(f, sizeof(AtlasHeader) + ((long) sy * aw + sx) * 2, SEEK_SET);
-                fread(&linear[y * chunk->potW], sizeof(uint16_t), (size_t) readable, f);
+                fseek(f, sizeof(AtlasHeader) + ((long)sy * aw + sx) * 2, SEEK_SET);
+                fread(&linear[y * chunk->potW], sizeof(uint16_t), (size_t)readable, f);
             }
 
-            if (!C3D_TexInit(&chunk->tex, (u16) chunk->potW, (u16) chunk->potH, GPU_RGBA4)) {
+            if (!C3D_TexInit(&chunk->tex, (u16)chunk->potW, (u16)chunk->potH, GPU_RGBA4)) {
                 free(linear);
                 complete = false;
                 continue;
@@ -1479,7 +1414,7 @@ static void extract_legacy_page_file(CtrRenderer *ctx, DataWin *dw, uint32_t id,
             C3D_TexSetFilter(&chunk->tex, GPU_NEAREST, GPU_NEAREST);
             C3D_TexSetWrap(&chunk->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
-            uint32_t tiledSize = (uint32_t) chunk->potW * (uint32_t) chunk->potH * 2u;
+            uint32_t tiledSize = (uint32_t)chunk->potW * (uint32_t)chunk->potH * 2u;
             uint16_t *tiled = linearAlloc(tiledSize);
             if (!tiled) {
                 free(linear);
@@ -1517,13 +1452,13 @@ static __attribute__((aligned(8))) char dyn_buf[64 * 1024];
 
 static bool is_repacked_page(const CtrRenderer *ctx, int pageId) {
     return ctx->repackPageCount > 0 &&
-           pageId >= (int) ctx->repackBasePageId &&
-           pageId < (int) (ctx->repackBasePageId + ctx->repackPageCount);
+           pageId >= (int)ctx->repackBasePageId &&
+           pageId < (int)(ctx->repackBasePageId + ctx->repackPageCount);
 }
 
 static CtrSourcePage *get_source_page(CtrRenderer *ctx, int pageId) {
     if (!is_repacked_page(ctx, pageId)) return NULL;
-    uint32_t idx = (uint32_t) pageId - ctx->repackBasePageId;
+    uint32_t idx = (uint32_t)pageId - ctx->repackBasePageId;
     if (idx >= ctx->sourcePageCount) return NULL;
     return &ctx->sourcePages[idx];
 }
@@ -1541,14 +1476,11 @@ static void free_old_source_pages(CtrRenderer *ctx) {
             if (!p->loaded || p->keepResident || p->lastFrame >= g_frame) continue;
             if (p->lastFrame < oldest) {
                 oldest = p->lastFrame;
-                victim = (int) i;
+                victim = (int)i;
             }
         }
         if (victim < 0) break;
-        if (!flushed) {
-            flush_batch(ctx);
-            flushed = true;
-        }
+        if (!flushed) { flush_batch(ctx); flushed = true; }
         C3D_TexDelete(&ctx->sourcePages[victim].tex);
         memset(&ctx->sourcePages[victim].tex, 0, sizeof(ctx->sourcePages[victim].tex));
         ctx->sourcePages[victim].loaded = false;
@@ -1564,10 +1496,7 @@ static void unload_nonresident_source_pages(CtrRenderer *ctx) {
     for (uint32_t i = 0; i < ctx->sourcePageCount; i++) {
         CtrSourcePage *p = &ctx->sourcePages[i];
         if (!p->loaded || p->keepResident) continue;
-        if (!flushed) {
-            flush_batch(ctx);
-            flushed = true;
-        }
+        if (!flushed) { flush_batch(ctx); flushed = true; }
         C3D_TexDelete(&p->tex);
         memset(&p->tex, 0, sizeof(p->tex));
         p->loaded = false;
@@ -1575,43 +1504,9 @@ static void unload_nonresident_source_pages(CtrRenderer *ctx) {
         evicted++;
     }
     if (evicted > 0) {
-        fprintf(stderr, "CTR cache: evicted %lu stale atlas textures before room preload\n",
-                (unsigned long) evicted);
+        CTR_DIAG("CTR cache: evicted %lu stale atlas textures before room preload\n",
+                 (unsigned long)evicted);
     }
-}
-
-static void queue_pending_load(CtrRenderer *ctx, int32_t id, bool isSource) {
-    int32_t enc = (id & 0x7FFFFFFF) | (isSource ? (int32_t) 0x80000000 : 0);
-    for (uint32_t i = 0; i < ctx->pendingLoadCount; i++) {
-        if (ctx->pendingLoads[i] == enc) return;
-    }
-    if (ctx->pendingLoadCount >= CTR_PENDING_LOADS_MAX) return;
-    ctx->pendingLoads[ctx->pendingLoadCount++] = enc;
-}
-
-static void load_page_dyn(CtrRenderer *ctx, DataWin *dw, int32_t idx);
-static bool load_source_page_dyn(CtrRenderer *ctx, int pageId);
-
-static void flush_pending_loads(CtrRenderer *ctx) {
-    if (ctx->pendingLoadCount == 0) return;
-    uint32_t count = ctx->pendingLoadCount;
-    int32_t snapshot[CTR_PENDING_LOADS_MAX];
-    for (uint32_t i = 0; i < count; i++) snapshot[i] = ctx->pendingLoads[i];
-    ctx->pendingLoadCount = 0;
-
-    bool savedPreloading = ctx->preloadingAtlases;
-    ctx->preloadingAtlases = true;
-    for (uint32_t i = 0; i < count; i++) {
-        int32_t enc = snapshot[i];
-        bool isSource = (enc & 0x80000000) != 0;
-        int32_t id = enc & 0x7FFFFFFF;
-        if (isSource) {
-            load_source_page_dyn(ctx, id);
-        } else {
-            load_page_dyn(ctx, ctx->base.dataWin, id);
-        }
-    }
-    ctx->preloadingAtlases = savedPreloading;
 }
 
 static bool load_source_page_dyn(CtrRenderer *ctx, int pageId) {
@@ -1621,42 +1516,42 @@ static bool load_source_page_dyn(CtrRenderer *ctx, int pageId) {
         page->lastFrame = g_frame;
         return true;
     }
+    // loadFailed used to stick until the next room change, which made one transient
+    // OOM during a peak (mid-frame eviction churn) permanently kill that atlas for
+    // the rest of the room. The Undyne bridge has many big tilesets and thrashes
+    // the eviction policy hardest, so a bridge atlas would lose its load forever
+    // and tiles from it would never render. Retry once per frame instead — if
+    // memory has freed up since (eviction, frame end), the second pass succeeds.
     if (page->loadFailed) {
         if (page->lastFrame == g_frame) return false;
         page->loadFailed = false;
     }
     if (page->fileOffset == 0 || !ctx->atlasFile) return false;
-    if (ctx->inFrame && !ctx->preloadingAtlases) {
-        queue_pending_load(ctx, pageId, true);
-        return false;
-    }
 
     free_old_source_pages(ctx);
 
     uint32_t tiledSize = page->dataSize;
-    uint32_t texW = page->potW > 0 ? (uint32_t) page->potW : CTR_TEXTURE_CACHE_ATLAS_SIZE;
-    uint32_t texH = page->potH > 0 ? (uint32_t) page->potH : CTR_TEXTURE_CACHE_ATLAS_SIZE;
-    if (tiledSize == 0) tiledSize = texW * texH * 2u;
+    if (tiledSize == 0) {
+        tiledSize = CTR_TEXTURE_CACHE_ATLAS_SIZE * CTR_TEXTURE_CACHE_ATLAS_SIZE * 2u;
+    }
     GPU_TEXCOLOR texFormat = GPU_RGBA4;
     if (page->format == CTR_TEXTURE_CACHE_FORMAT_LA4) texFormat = GPU_LA4;
     else if (page->format == CTR_TEXTURE_CACHE_FORMAT_A4) texFormat = GPU_A4;
-    else if (page->format == CTR_TEXTURE_CACHE_FORMAT_ETC1) texFormat = GPU_ETC1;
-    else if (page->format == CTR_TEXTURE_CACHE_FORMAT_ETC1A4) texFormat = GPU_ETC1A4;
 
     bool texOk = C3D_TexInit(&page->tex,
-                             (u16) texW,
-                             (u16) texH,
+                             (u16)CTR_TEXTURE_CACHE_ATLAS_SIZE,
+                             (u16)CTR_TEXTURE_CACHE_ATLAS_SIZE,
                              texFormat);
 
     if (!texOk) {
         fprintf(stderr, "CTR: Failed to alloc C3D_Tex for atlas %d\n", pageId);
         page->loadFailed = true;
-        page->lastFrame = g_frame;
+        page->lastFrame = g_frame; // stamp so retry waits until next frame
         return false;
     }
-    if (tiledSize > page->tex.size) tiledSize = (uint32_t) page->tex.size;
+    if (tiledSize > page->tex.size) tiledSize = (uint32_t)page->tex.size;
 
-    fseek(ctx->atlasFile, (long) page->fileOffset, SEEK_SET);
+    fseek(ctx->atlasFile, (long)page->fileOffset, SEEK_SET);
     if (fread(page->tex.data, 1, tiledSize, ctx->atlasFile) != tiledSize) {
         C3D_TexDelete(&page->tex);
         page->loadFailed = true;
@@ -1668,25 +1563,72 @@ static bool load_source_page_dyn(CtrRenderer *ctx, int pageId) {
     C3D_TexSetFilter(&page->tex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&page->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
-    page->width = (int) texW;
-    page->height = (int) texH;
-    page->potW = (int) texW;
-    page->potH = (int) texH;
+    page->width = (int)CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    page->height = (int)CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    page->potW = (int)CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    page->potH = (int)CTR_TEXTURE_CACHE_ATLAS_SIZE;
     page->loaded = true;
     page->loadFailed = false;
     page->lastFrame = g_frame;
 
     if (!ctx->preloadingAtlases) {
-        fprintf(stderr,
-                "CTR cache: lazy atlas load during draw: page %d; linear free %.2f MB\n",
-                pageId, (double) linearSpaceFree() / (1024.0 * 1024.0));
+        ctx->lazyLoadsThisRoom++;
+        if (ctx->lazyLoadsThisRoom == 1) {
+            CTR_DIAG("CTR cache: first lazy atlas in room %d '%s': page %d; linear free %.2f MB\n",
+                     ctx->currentRoomIndex,
+                     ctx->currentRoomName[0] ? ctx->currentRoomName : "?",
+                     pageId,
+                     (double)linearSpaceFree() / (1024.0 * 1024.0));
+        }
+        CTR_DIAG("CTR cache: lazy atlas load during draw: page %d; linear free %.2f MB\n",
+                 pageId, (double)linearSpaceFree() / (1024.0 * 1024.0));
     }
 
     return true;
 }
 
+static bool queue_source_page_prefetch(CtrRenderer *ctx, int32_t pageId) {
+    if (!ctx || ctx->prefetchQueueCount >= CTR_PREFETCH_QUEUE_CAP) return false;
+    CtrSourcePage *page = get_source_page(ctx, pageId);
+    if (!page || page->loaded) {
+        if (page) page->lastFrame = g_frame;
+        return false;
+    }
+    for (uint32_t i = 0; i < ctx->prefetchQueueCount; i++) {
+        if (ctx->prefetchQueue[i] == pageId) return false;
+    }
+    ctx->prefetchQueue[ctx->prefetchQueueCount++] = pageId;
+    return true;
+}
+
+static uint32_t process_prefetch_queue(CtrRenderer *ctx, uint32_t budget) {
+    if (!ctx || !ctx->atlasFile || budget == 0) return 0;
+    if (linearSpaceFree() < CTR_PREFETCH_MIN_FREE) return 0;
+
+    uint32_t loaded = 0;
+    uint32_t attempts = 0;
+    while (ctx->prefetchQueueCount > 0 && loaded < budget && attempts < CTR_PREFETCH_QUEUE_CAP) {
+        int32_t pageId = ctx->prefetchQueue[0];
+        memmove(&ctx->prefetchQueue[0], &ctx->prefetchQueue[1],
+                (ctx->prefetchQueueCount - 1) * sizeof(ctx->prefetchQueue[0]));
+        ctx->prefetchQueueCount--;
+        attempts++;
+
+        CtrSourcePage *page = get_source_page(ctx, pageId);
+        if (!page || page->loaded) continue;
+        if (linearSpaceFree() < CTR_PREFETCH_MIN_FREE) break;
+
+        bool oldPreload = ctx->preloadingAtlases;
+        ctx->preloadingAtlases = true;
+        bool ok = load_source_page_dyn(ctx, pageId);
+        ctx->preloadingAtlases = oldPreload;
+        if (ok && page->loaded) loaded++;
+    }
+    return loaded;
+}
+
 static void load_page_dyn(CtrRenderer *ctx, DataWin *dw, int32_t idx) {
-    if (idx < 0 || (uint32_t) idx >= ctx->pageCount) return;
+    if (idx < 0 || (uint32_t)idx >= ctx->pageCount) return;
 
     int pageIdSigned = dw->tpag.items[idx].texturePageId;
     if (is_repacked_page(ctx, pageIdSigned)) {
@@ -1697,17 +1639,12 @@ static void load_page_dyn(CtrRenderer *ctx, DataWin *dw, int32_t idx) {
     CtrPage *page = &ctx->pages[idx];
     if (page->loaded) return;
 
-    if (ctx->inFrame && !ctx->preloadingAtlases) {
-        queue_pending_load(ctx, idx, false);
-        return;
-    }
-
     free_old_pages(ctx);
 
     if (pageIdSigned < 0) return;
-    uint32_t pageId = (uint32_t) pageIdSigned;
+    uint32_t pageId = (uint32_t)pageIdSigned;
     char path[256];
-    page_meta_path(path, sizeof(path), (int) pageId);
+    page_meta_path(path, sizeof(path), (int)pageId);
 
     FILE *f = fopen(path, "rb");
     if (!f) return;
@@ -1719,18 +1656,20 @@ static void load_page_dyn(CtrRenderer *ctx, DataWin *dw, int32_t idx) {
         if (magic == ATLAS_MAGIC) {
             AtlasHeader hdr;
             if (fread(&hdr, sizeof(hdr), 1, f) == 1 && hdr.magic == ATLAS_MAGIC) {
-                extract_legacy_page_file(ctx, dw, (uint32_t) idx, f, (int) hdr.w, (int) hdr.h);
+                extract_legacy_page_file(ctx, dw, (uint32_t)idx, f, (int)hdr.w, (int)hdr.h);
             }
         }
     }
     fclose(f);
 }
 
+// Citro3D pipeline
+
 static void setup_pipeline(CtrRenderer *ctx) {
     if (ctx->pipelineReady) return;
 
     C3D_BindProgram(&g_shaderProg);
-    ctx->uLoc_projection = lookup_vs_projection_uniform("CtrRenderer");
+    ctx->uLoc_projection = shaderInstanceGetUniformLocation(g_shaderProg.vertexShader, "projection");
 
     AttrInfo_Init(&ctx->attrInfo);
     AttrInfo_AddLoader(&ctx->attrInfo, 0, GPU_FLOAT, 3);
@@ -1740,17 +1679,17 @@ static void setup_pipeline(CtrRenderer *ctx) {
 
     C3D_TexEnv *env = C3D_GetTexEnv(0);
     C3D_TexEnvInit(env);
-    C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
-    C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+    C3D_TexEnvSrc (env, C3D_Both,  GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
+    C3D_TexEnvFunc(env, C3D_Both,  GPU_MODULATE);
 
     C3D_DepthTest(false, GPU_GEQUAL, GPU_WRITE_ALL);
-    C3D_CullFace(GPU_CULL_NONE);
+    C3D_CullFace (GPU_CULL_NONE);
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
                    GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA,
                    GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
 
     ctx->currentBlendMode = 0;
-    ctx->pipelineReady = true;
+    ctx->pipelineReady    = true;
 }
 
 static void rebind_state(CtrRenderer *ctx) {
@@ -1763,22 +1702,15 @@ static void rebind_state(CtrRenderer *ctx) {
 
     C3D_TexEnv *env = C3D_GetTexEnv(0);
     C3D_TexEnvInit(env);
-    C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
-    C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+    C3D_TexEnvSrc (env, C3D_Both,  GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
+    C3D_TexEnvFunc(env, C3D_Both,  GPU_MODULATE);
 
     C3D_DepthTest(false, GPU_GEQUAL, GPU_WRITE_ALL);
-    C3D_CullFace(GPU_CULL_NONE);
+    C3D_CullFace (GPU_CULL_NONE);
 }
 
 static void apply_projection(CtrRenderer *ctx, const C3D_Mtx *m) {
     ctx->currentProjection = *m;
-    if (!valid_vs_fvec_uniform(ctx->uLoc_projection, 4)) {
-        fprintf(stderr,
-                "CtrRenderer: refusing projection upload to invalid vertex uniform c%d\n",
-                ctx->uLoc_projection);
-        fflush(stderr);
-        return;
-    }
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, ctx->uLoc_projection, m);
 }
 
@@ -1792,22 +1724,24 @@ static void make_ortho_top(C3D_Mtx *out, float w, float h) {
     Mtx_OrthoTilt(out, 0.f, w, h, 0.f, -1.f, 1.f, true);
 }
 
+// Surfaces
+
 static CtrSurface *get_surface(CtrRenderer *ctx, int32_t surfaceId) {
-    if (surfaceId < 0 || (uint32_t) surfaceId >= ctx->surfaceCount) return NULL;
+    if (surfaceId < 0 || (uint32_t)surfaceId >= ctx->surfaceCount) return NULL;
     return ctx->surfaces[surfaceId].used ? &ctx->surfaces[surfaceId] : NULL;
 }
 
 static bool surface_alloc_storage(CtrSurface *surf, int width, int height) {
-    surf->width = width;
+    surf->width  = width;
     surf->height = height;
-    surf->potW = next_pow2(width);
-    surf->potH = next_pow2(height);
+    surf->potW   = next_pow2(width);
+    surf->potH   = next_pow2(height);
 
-    if (!C3D_TexInitVRAM(&surf->tex, (u16) surf->potW, (u16) surf->potH, GPU_RGBA8)) {
+    if (!C3D_TexInitVRAM(&surf->tex, (u16)surf->potW, (u16)surf->potH, GPU_RGBA8)) {
         return false;
     }
-    C3D_TexSetFilter(&surf->tex, GPU_NEAREST, GPU_NEAREST);
-    C3D_TexSetWrap(&surf->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    C3D_TexSetFilter(&surf->tex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap  (&surf->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
     surf->target = C3D_RenderTargetCreateFromTex(&surf->tex, GPU_TEXFACE_2D, 0,
                                                  -1);
@@ -1829,6 +1763,8 @@ static void surface_release_storage(CtrRenderer *ctx, CtrSurface *surf) {
     }
 }
 
+// Application surface
+
 static void destroy_app_surface(CtrRenderer *ctx) {
     if (ctx->appTarget) {
         safe_delete_target(ctx, ctx->appTarget);
@@ -1838,129 +1774,46 @@ static void destroy_app_surface(CtrRenderer *ctx) {
         C3D_TexDelete(&ctx->appTex);
         memset(&ctx->appTex, 0, sizeof(ctx->appTex));
     }
-    if (ctx->appTargetRight) {
-        safe_delete_target(ctx, ctx->appTargetRight);
-        ctx->appTargetRight = NULL;
-    }
-    if (ctx->appTexRight.data) {
-        C3D_TexDelete(&ctx->appTexRight);
-        memset(&ctx->appTexRight, 0, sizeof(ctx->appTexRight));
-    }
     ctx->appReady = false;
-    ctx->appScreenW = 0;
-    ctx->appScreenH = 0;
-    ctx->appRenderW = 0;
-    ctx->appRenderH = 0;
 }
 
-static void destroy_right_app_surface(CtrRenderer *ctx) {
-    if (ctx->appTargetRight) {
-        safe_delete_target(ctx, ctx->appTargetRight);
-        ctx->appTargetRight = NULL;
-    }
-    if (ctx->appTexRight.data) {
-        C3D_TexDelete(&ctx->appTexRight);
-        memset(&ctx->appTexRight, 0, sizeof(ctx->appTexRight));
-    }
-}
-
-static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh, int targetW, int targetH) {
-    int renderW = 1;
-    int renderH = 1;
-    if (g_ctr_letterbox_mode == CTR_LETTERBOX_CONTAIN) {
-        contain_aspect(gw, gh, targetW, targetH, &renderW, &renderH);
-    } else {
-        cover_aspect(gw, gh, targetW, targetH, &renderW, &renderH);
-    }
-
-    if (ctx->appReady &&
-        ctx->appLogicW == gw && ctx->appLogicH == gh &&
-        ctx->appScreenW == targetW && ctx->appScreenH == targetH &&
-        ctx->appLetterboxMode == (int) g_ctr_letterbox_mode) {
-        return true;
-    }
+static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh) {
+    if (ctx->appReady && ctx->appLogicW == gw && ctx->appLogicH == gh) return true;
 
     destroy_app_surface(ctx);
 
     ctx->appLogicW = gw;
     ctx->appLogicH = gh;
-    ctx->appScreenW = targetW;
-    ctx->appScreenH = targetH;
-    ctx->appRenderW = renderW;
-    ctx->appRenderH = renderH;
-    ctx->appLetterboxMode = (int) g_ctr_letterbox_mode;
+    ctx->appPotW   = next_pow2(gw);
+    ctx->appPotH   = next_pow2(gh);
 
-    bool appTargetReady = false;
-    for (int divisor = 1; divisor <= 4 && !appTargetReady; divisor <<= 1) {
-        if (divisor > 1) {
-            int loW = (renderW >= targetW) ? targetW : 1;
-            int loH = (renderH >= targetH) ? targetH : 1;
-            ctx->appRenderW = clamp_int(renderW / divisor, loW, renderW);
-            ctx->appRenderH = clamp_int(renderH / divisor, loH, renderH);
-        }
-        ctx->appPotW = next_pow2(ctx->appRenderW);
-        ctx->appPotH = next_pow2(ctx->appRenderH);
-        CTR_RENDER_LOG("ensure app surface: logical=%dx%d screen=%dx%d render=%dx%d pot=%dx%d linearFree=%.2f MB",
-                       gw, gh, targetW, targetH, ctx->appRenderW, ctx->appRenderH, ctx->appPotW, ctx->appPotH,
-                       (double)linearSpaceFree() / (1024.0 * 1024.0));
+    if (!C3D_TexInitVRAM(&ctx->appTex, (u16)ctx->appPotW, (u16)ctx->appPotH, GPU_RGBA8)) {
+        return false;
+    }
+    apply_app_filter(ctx);
+    C3D_TexSetWrap  (&ctx->appTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
-        bool inVram = C3D_TexInitVRAM(&ctx->appTex, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8);
-        if (!inVram && !C3D_TexInit(&ctx->appTex, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8)) {
-            fprintf(stderr,
-                    "CtrRenderer: failed to allocate app surface texture %dx%d; linear free %.2f MB\n",
-                    ctx->appPotW, ctx->appPotH,
-                    (double) linearSpaceFree() / (1024.0 * 1024.0));
-            continue;
-        }
-        CTR_RENDER_LOG("app surface allocated in %s", inVram ? "VRAM" : "linear heap");
-
-        C3D_TexSetFilter(&ctx->appTex, GPU_LINEAR, GPU_LINEAR);
-        C3D_TexSetWrap(&ctx->appTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
-
-        ctx->appTarget = C3D_RenderTargetCreateFromTex(&ctx->appTex, GPU_TEXFACE_2D, 0, -1);
-        if (ctx->appTarget) {
-            appTargetReady = true;
-            break;
-        }
-
-        fprintf(stderr,
-                "CtrRenderer: failed to create app render target for %dx%d texture; retrying smaller\n",
-                ctx->appPotW, ctx->appPotH);
+    ctx->appTarget = C3D_RenderTargetCreateFromTex(&ctx->appTex, GPU_TEXFACE_2D, 0,
+                                                   -1);
+    if (!ctx->appTarget) {
         C3D_TexDelete(&ctx->appTex);
         memset(&ctx->appTex, 0, sizeof(ctx->appTex));
-        ctx->appRenderW = 0;
-        ctx->appRenderH = 0;
+        return false;
     }
-    if (!appTargetReady) return false;
 
+    // C3D_TexInitVRAM hands back uninitialised VRAM. The first frame's clear covers
+    // the logic region, but GPU_LINEAR sampling at the logic <-> POT-padding boundary
+    // can pull undefined bytes from the padding into the visible image (a 1-px
+    // garbage seam along the top/left of the game on a black room before content
+    // loads). Zero the entire POT framebuffer once at create time so even the
+    // padding is well-defined when the first sample lands on it.
     C3D_RenderTargetClear(ctx->appTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
 
-    bool rightEyeReady = false;
-    if (ctx->stereoEnabled) {
-        if (C3D_TexInitVRAM(&ctx->appTexRight, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8) ||
-            C3D_TexInit(&ctx->appTexRight, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8)) {
-            C3D_TexSetFilter(&ctx->appTexRight, GPU_LINEAR, GPU_LINEAR);
-            C3D_TexSetWrap(&ctx->appTexRight, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
-            ctx->appTargetRight = C3D_RenderTargetCreateFromTex(&ctx->appTexRight, GPU_TEXFACE_2D, 0, -1);
-            if (ctx->appTargetRight) {
-                C3D_RenderTargetClear(ctx->appTargetRight, C3D_CLEAR_ALL, 0x000000FF, 0);
-                rightEyeReady = true;
-                CTR_RENDER_LOG("right-eye app surface ready");
-            }
-        }
-        if (!rightEyeReady) {
-            destroy_right_app_surface(ctx);
-            fprintf(stderr, "CtrRenderer: right-eye app surface unavailable, stereoscopic pass disabled for this size\n");
-        }
-    } else {
-        destroy_right_app_surface(ctx);
-        CTR_RENDER_LOG("right-eye app surface skipped (stereo disabled)");
-    }
-
     ctx->appReady = true;
-    CTR_RENDER_LOG("app surface ready");
     return true;
 }
+
+// Target and viewport
 
 static void bind_target(CtrRenderer *ctx, C3D_RenderTarget *tgt) {
     if (!ctx->inFrame) return;
@@ -1973,65 +1826,27 @@ static void bind_target(CtrRenderer *ctx, C3D_RenderTarget *tgt) {
     apply_projection(ctx, &ctx->currentProjection);
 }
 
-static bool is_app_render_target(const CtrRenderer *ctx, const C3D_RenderTarget *tgt) {
-    return tgt && (tgt == ctx->appTarget || tgt == ctx->appTargetRight);
-}
-
 static void set_viewport_logical(CtrRenderer *ctx, C3D_RenderTarget *tgt,
                                  int x, int y, int w, int h) {
-    if (!tgt) return;
-    int logicalX = x;
-    int logicalY = y;
-    int logicalW = w;
-    int logicalH = h;
-    if (is_app_render_target(ctx, tgt) &&
-        ctx->appLogicW > 0 && ctx->appLogicH > 0 &&
-        ctx->appRenderW > 0 && ctx->appRenderH > 0) {
-        float sx = (float) ctx->appRenderW / (float) ctx->appLogicW;
-        float sy = (float) ctx->appRenderH / (float) ctx->appLogicH;
-        int x0 = (int) floorf((float) x * sx);
-        int y0 = (int) floorf((float) y * sy);
-        int x1 = (int) ceilf((float) (x + w) * sx);
-        int y1 = (int) ceilf((float) (y + h) * sy);
-        x = x0;
-        y = y0;
-        w = x1 - x0;
-        h = y1 - y0;
-    }
-    int fbW = tgt->frameBuf.width;
     int fbH = tgt->frameBuf.height;
-    if (w < 1) w = 1;
-    if (h < 1) h = 1;
-    if (x < 0) {
-        w += x;
-        x = 0;
-    }
-    if (y < 0) {
-        h += y;
-        y = 0;
-    }
-    if (x >= fbW) x = fbW > 0 ? fbW - 1 : 0;
-    if (y >= fbH) y = fbH > 0 ? fbH - 1 : 0;
-    if (w < 1) w = 1;
-    if (h < 1) h = 1;
-    if (x + w > fbW) w = fbW - x;
-    if (y + h > fbH) h = fbH - y;
-    if (w < 1) w = 1;
-    if (h < 1) h = 1;
     int vpY = fbH - y - h;
     if (vpY < 0) vpY = 0;
-    C3D_SetViewport((u32) x, (u32) vpY, (u32) w, (u32) h);
-    C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32) x, (u32) vpY, (u32) (x + w), (u32) (vpY + h));
-    ctx->currentViewport[0] = logicalX;
-    ctx->currentViewport[1] = logicalY;
-    ctx->currentViewport[2] = logicalW;
-    ctx->currentViewport[3] = logicalH;
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    C3D_SetViewport((u32)x, (u32)vpY, (u32)w, (u32)h);
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)x, (u32)vpY, (u32)(x + w), (u32)(vpY + h));
+    ctx->currentViewport[0] = x;
+    ctx->currentViewport[1] = y;
+    ctx->currentViewport[2] = w;
+    ctx->currentViewport[3] = h;
 }
 
 static void disable_scissor(CtrRenderer *ctx) {
-    (void) ctx;
+    (void)ctx;
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
 }
+
+// Blend state
 
 static void apply_blend(CtrRenderer *ctx, int mode) {
     flush_batch(ctx);
@@ -2055,56 +1870,32 @@ static void apply_blend(CtrRenderer *ctx, int mode) {
     }
 }
 
+// Frame lifecycle
+
 static void ctr_init(Renderer *ren, DataWin *dw) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     ren->dataWin = dw;
 
     setup_pipeline(ctx);
-    CTR_RENDER_LOG("init begin: dw=%p tpag=%lu txtr=%lu linearFree=%.2f MB",
-                   (void*)dw,
-                   (unsigned long)dw->tpag.count,
-                   (unsigned long)dw->txtr.count,
-                   (double)linearSpaceFree() / (1024.0 * 1024.0));
 
     if (!ctx->topTarget) {
         ctx->topTarget = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH16);
         if (ctx->topTarget) {
             C3D_RenderTargetSetOutput(ctx->topTarget, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
-        } else {
-            fprintf(stderr, "CtrRenderer: failed to create top render target\n");
-        }
-    }
-    if (!ctx->topTargetRight && ctx->stereoEnabled) {
-        ctx->topTargetRight = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH16);
-        if (ctx->topTargetRight) {
-            C3D_RenderTargetSetOutput(ctx->topTargetRight, GFX_TOP, GFX_RIGHT, DISPLAY_TRANSFER_FLAGS);
-        } else {
-            CTR_RENDER_LOG("right render target unavailable");
         }
     }
     if (!ctx->bottomTarget) {
         ctx->bottomTarget = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, GPU_RB_DEPTH16);
         if (ctx->bottomTarget) {
             C3D_RenderTargetSetOutput(ctx->bottomTarget, GFX_BOTTOM, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
-        } else {
-            fprintf(stderr, "CtrRenderer: failed to create bottom render target\n");
         }
     }
-    CTR_RENDER_LOG("targets: top=%p right=%p bottom=%p",
-                   (void*)ctx->topTarget, (void*)ctx->topTargetRight, (void*)ctx->bottomTarget);
 
-    ctx->originalTpagCount = dw->tpag.count;
+    ctx->originalTpagCount   = dw->tpag.count;
     ctx->originalSpriteCount = dw->sprt.count;
 
     CtrTextureCache_prepare(dw);
-    bool cacheApplied = CtrTextureCache_apply(ctx, dw);
-    fprintf(stderr,
-            "CTR cache: apply %s (%lu TPAGs, %lu atlases, %lu segments; TXTR parsed=%lu)\n",
-            cacheApplied ? "ok" : "failed",
-            (unsigned long) ctx->cacheItemCount,
-            (unsigned long) ctx->sourcePageCount,
-            (unsigned long) ctx->cacheSegmentCount,
-            (unsigned long) dw->txtr.count);
+    CtrTextureCache_apply(ctx, dw);
 
     char path[256];
     CtrTextureCache_indexPath(path, sizeof(path));
@@ -2114,12 +1905,15 @@ static void ctr_init(Renderer *ren, DataWin *dw) {
     }
 
     ctx->pageCount = dw->tpag.count;
-    ctx->pages = calloc(ctx->pageCount, sizeof(CtrPage));
+    ctx->pages     = calloc(ctx->pageCount, sizeof(CtrPage));
 
     if (!ctx->vbuf) {
+        // 4x batch capacity. With small vbuf, many tile-heavy rooms (bridge corridor
+        // before/with Undyne) trigger constant FrameSplits which both eat cmdbuf
+        // and stall the GPU. Larger vbuf = fewer splits per frame.
         ctx->vbufCap = BATCH_VERT_CAP * 4;
-        ctx->vbuf = linearAlloc(ctx->vbufCap * sizeof(CtrVertex));
-        ctx->vbufHead = 0;
+        ctx->vbuf    = linearAlloc(ctx->vbufCap * sizeof(CtrVertex));
+        ctx->vbufHead   = 0;
         ctx->batchStart = 0;
         ctx->batchVerts = 0;
     }
@@ -2134,13 +1928,14 @@ static void ctr_init(Renderer *ren, DataWin *dw) {
                 linearFree(tile);
             }
             C3D_TexSetFilter(&ctx->whiteTex, GPU_LINEAR, GPU_NEAREST);
-            C3D_TexSetWrap(&ctx->whiteTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+            C3D_TexSetWrap  (&ctx->whiteTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
         }
     }
+
 }
 
 static void ctr_destroy(Renderer *ren) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
 
     if (ctx->atlasFile) fclose(ctx->atlasFile);
 
@@ -2148,8 +1943,8 @@ static void ctr_destroy(Renderer *ren) {
         surface_release_storage(ctx, &ctx->surfaces[i]);
     }
     free(ctx->surfaces);
-    ctx->surfaces = NULL;
-    ctx->surfaceCount = 0;
+    ctx->surfaces      = NULL;
+    ctx->surfaceCount  = 0;
 
     destroy_app_surface(ctx);
 
@@ -2182,62 +1977,40 @@ static void ctr_destroy(Renderer *ren) {
 
     if (ctx->whiteTex.data) C3D_TexDelete(&ctx->whiteTex);
 
-    if (ctx->vbuf) {
-        linearFree(ctx->vbuf);
-        ctx->vbuf = NULL;
-    }
+    if (ctx->vbuf) { linearFree(ctx->vbuf); ctx->vbuf = NULL; }
 
     if (ctx->pipelineReady) {
         ctx->pipelineReady = false;
     }
 
-    if (ctx->topTarget) {
-        C3D_RenderTargetDelete(ctx->topTarget);
-        ctx->topTarget = NULL;
-    }
-    if (ctx->topTargetRight) {
-        C3D_RenderTargetDelete(ctx->topTargetRight);
-        ctx->topTargetRight = NULL;
-    }
-    if (ctx->bottomTarget) {
-        C3D_RenderTargetDelete(ctx->bottomTarget);
-        ctx->bottomTarget = NULL;
-    }
+    if (ctx->topTarget)    { C3D_RenderTargetDelete(ctx->topTarget);    ctx->topTarget    = NULL; }
+    if (ctx->bottomTarget) { C3D_RenderTargetDelete(ctx->bottomTarget); ctx->bottomTarget = NULL; }
 
     free(ctx);
 }
 
 static void ctr_begin_frame(Renderer *ren, int32_t gw, int32_t gh, int32_t ww, int32_t wh) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     gc_clear_targets();
     if (gw < 1) gw = 1;
     if (gh < 1) gh = 1;
     if (ww < 1) ww = 1;
     if (wh < 1) wh = 1;
-    ctx->winW = ww;
-    ctx->winH = wh;
+    ctx->winW  = ww;
+    ctx->winH  = wh;
     ctx->gameW = gw;
     ctx->gameH = gh;
 
-    if (!ensure_app_surface(ctx, gw, gh, ww, wh)) {
-        fprintf(stderr, "CtrRenderer: beginFrame aborted because app surface is not ready\n");
-        return;
-    }
+    if (!ensure_app_surface(ctx, gw, gh)) return;
+    apply_app_filter(ctx);
 
     if (!ctx->inFrame) {
-        if (!C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) {
-            fprintf(stderr, "CtrRenderer: C3D_FrameBegin failed\n");
-            return;
-        }
+        if (!C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) return;
         ctx->inFrame = true;
-        ctx->vbufHead = 0;
+        ctx->vbufHead   = 0;
         ctx->batchStart = 0;
         ctx->batchVerts = 0;
-        ctx->batchTex = NULL;
-        ctx->drawsSinceSplit = 0;
-    }
-    if (ctx->pendingLoadCount > 0) {
-        flush_pending_loads(ctx);
+        ctx->batchTex   = NULL;
     }
 
     C3D_BufInfo *buf = C3D_GetBufInfo();
@@ -2249,32 +2022,27 @@ static void ctr_begin_frame(Renderer *ren, int32_t gw, int32_t gh, int32_t ww, i
 
     set_viewport_logical(ctx, ctx->appTarget, 0, 0, ctx->appLogicW, ctx->appLogicH);
     C3D_Mtx proj;
-    make_ortho_topleft(&proj, (float) ctx->appLogicW, (float) ctx->appLogicH);
+    make_ortho_topleft(&proj, (float)ctx->appLogicW, (float)ctx->appLogicH);
     apply_projection(ctx, &proj);
 
-    ctx->appFrameCleared = true;
+    ctx->appFrameCleared  = true;
     ctx->targetStackDepth = 0;
 }
 
 static void ctr_end_frame(Renderer *ren) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     flush_batch(ctx);
 
     if (!ctx->inFrame) return;
 
     if (ctx->appReady) {
         C3D_RenderTarget *primary = (g_ctr_game_screen == CTR_GAME_SCREEN_BOTTOM)
-                                        ? ctx->bottomTarget
-                                        : ctx->topTarget;
+                                        ? ctx->bottomTarget : ctx->topTarget;
         C3D_RenderTarget *secondary = (g_ctr_game_screen == CTR_GAME_SCREEN_BOTTOM)
-                                          ? ctx->topTarget
-                                          : ctx->bottomTarget;
+                                          ? ctx->topTarget : ctx->bottomTarget;
         int primaryW = (g_ctr_game_screen == CTR_GAME_SCREEN_BOTTOM) ? 320 : 400;
         int primaryH = 240;
         int secondaryW = (g_ctr_game_screen == CTR_GAME_SCREEN_BOTTOM) ? 400 : 320;
-
-        ctx->currentShiftX = 0;
-        ctx->isGUI = true;
 
         if (secondary) {
             C3D_FrameDrawOn(secondary);
@@ -2282,11 +2050,11 @@ static void ctr_end_frame(Renderer *ren) {
             rebind_state(ctx);
 
             C3D_RenderTargetClear(secondary, C3D_CLEAR_ALL, 0x050711FF, 0);
-            C3D_SetViewport(0, 0, 240, (u32) secondaryW);
+            C3D_SetViewport(0, 0, 240, (u32)secondaryW);
             disable_scissor(ctx);
 
             C3D_Mtx projS;
-            make_ortho_top(&projS, (float) secondaryW, (float) primaryH);
+            make_ortho_top(&projS, (float)secondaryW, (float)primaryH);
             apply_projection(ctx, &projS);
 
             int savedWinW = ctx->winW;
@@ -2303,75 +2071,49 @@ static void ctr_end_frame(Renderer *ren) {
             C3D_FrameDrawOn(primary);
             ctx->activeTarget = primary;
             rebind_state(ctx);
+
             C3D_RenderTargetClear(primary, C3D_CLEAR_ALL, 0x050711FF, 0);
-            C3D_SetViewport(0, 0, 240, (u32) primaryW);
+            C3D_SetViewport(0, 0, 240, (u32)primaryW);
             disable_scissor(ctx);
 
+            // Override winW/winH so letterbox + scaling fit the chosen screen.
             int savedWinW = ctx->winW;
             int savedWinH = ctx->winH;
             ctx->winW = primaryW;
             ctx->winH = primaryH;
 
             C3D_Mtx proj;
-            make_ortho_top(&proj, (float) ctx->winW, (float) ctx->winH);
+            make_ortho_top(&proj, (float)ctx->winW, (float)ctx->winH);
             apply_projection(ctx, &proj);
 
             draw_letterbox_backdrop(ctx);
-            int drawW, drawH, drawX, drawY;
-            float sampleX, sampleY, sampleW, sampleH;
-            if (ctx->appLetterboxMode == (int) CTR_LETTERBOX_CONTAIN) {
-                drawW = ctx->appRenderW;
-                drawH = ctx->appRenderH;
-                drawX = (ctx->winW - drawW) / 2;
-                drawY = (ctx->winH - drawH) / 2;
-                sampleX = 0.f;
-                sampleY = 0.f;
-                sampleW = (float) ctx->appRenderW;
-                sampleH = (float) ctx->appRenderH;
-            } else {
+
+            int drawW, drawH;
+            if (g_ctr_display_mode == CTR_DISPLAY_STRETCH) {
                 drawW = ctx->winW;
                 drawH = ctx->winH;
-                drawX = 0;
-                drawY = 0;
-                sampleX = fmaxf(0.f, ((float) ctx->appRenderW - (float) ctx->winW) * 0.5f);
-                sampleY = fmaxf(0.f, ((float) ctx->appRenderH - (float) ctx->winH) * 0.5f);
-                sampleW = fminf((float) ctx->appRenderW, (float) ctx->winW);
-                sampleH = fminf((float) ctx->appRenderH, (float) ctx->winH);
+            } else if ((ctx->gameW * ctx->winH) / ctx->gameH < ctx->winW) {
+                drawW = (ctx->gameW * ctx->winH) / ctx->gameH;
+                drawH = ctx->winH;
+            } else {
+                drawW = ctx->winW;
+                drawH = (ctx->gameH * ctx->winW) / ctx->gameW;
             }
-            float u0 = sampleX / (float) ctx->appPotW;
-            float u1 = (sampleX + sampleW) / (float) ctx->appPotW;
-            float v0 = 1.f - (sampleY / (float) ctx->appPotH);
-            float v1 = 1.f - ((sampleY + sampleH) / (float) ctx->appPotH);
+            int drawX = (ctx->winW - drawW) / 2;
+            int drawY = (ctx->winH - drawH) / 2;
+
+            float u1 = (float)ctx->appLogicW / (float)ctx->appPotW;
+            float v0 = (float)(ctx->appPotH - ctx->appLogicH) / (float)ctx->appPotH;
+            float v1 = 1.f;
             float white[4] = {1.f, 1.f, 1.f, 1.f};
 
             push_quad(ctx, &ctx->appTex,
-                      (float) drawX, (float) drawY,
-                      (float) (drawX + drawW), (float) drawY,
-                      (float) (drawX + drawW), (float) (drawY + drawH),
-                      (float) drawX, (float) (drawY + drawH),
-                      u0, v0, u1, v1, white);
+                      (float)drawX,           (float)drawY,
+                      (float)(drawX + drawW), (float)drawY,
+                      (float)(drawX + drawW), (float)(drawY + drawH),
+                      (float)drawX,           (float)(drawY + drawH),
+                      0.f, v1, u1, v0, white);
             flush_batch(ctx);
-
-            if (ctx->depthSlider > 0.01f && primary == ctx->topTarget && ctx->topTargetRight != NULL) {
-                C3D_FrameDrawOn(ctx->topTargetRight);
-                ctx->activeTarget = ctx->topTargetRight;
-                rebind_state(ctx);
-                C3D_RenderTargetClear(ctx->topTargetRight, C3D_CLEAR_ALL, 0x050711FF, 0);
-                C3D_SetViewport(0, 0, 240, (u32) primaryW);
-                disable_scissor(ctx);
-
-                apply_projection(ctx, &proj);
-
-                draw_letterbox_backdrop(ctx);
-
-                push_quad(ctx, &ctx->appTexRight,
-                          (float) drawX, (float) drawY,
-                          (float) (drawX + drawW), (float) drawY,
-                          (float) (drawX + drawW), (float) (drawY + drawH),
-                          (float) drawX, (float) (drawY + drawH),
-                          u0, v0, u1, v1, white);
-                flush_batch(ctx);
-            }
 
             ctx->winW = savedWinW;
             ctx->winH = savedWinH;
@@ -2387,96 +2129,89 @@ static void ctr_end_frame(Renderer *ren) {
     g_gc_target_count = 0;
 }
 
-static void ctr_flush(Renderer *ren) { flush_batch((CtrRenderer *) ren); }
+static void ctr_flush(Renderer *ren) { flush_batch((CtrRenderer *)ren); }
+
+// Views and GUI
 
 static void ctr_begin_view(Renderer *ren, int32_t vx, int32_t vy, int32_t vw, int32_t vh,
                            int32_t px, int32_t py, int32_t pw, int32_t ph, float angle) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    if (!ctx || !ctx->inFrame || !ctx->appReady) return;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     flush_batch(ctx);
-    ctx->isGUI = false;
 
-    C3D_RenderTarget *canvas = (ctx->currentEye == 1) ? ctx->appTargetRight : ctx->appTarget;
-    if (!canvas) canvas = ctx->appTarget;
-    if (!canvas) return;
-    if (vw < 1) vw = ctx->gameW > 0 ? ctx->gameW : 1;
-    if (vh < 1) vh = ctx->gameH > 0 ? ctx->gameH : 1;
-    if (pw < 1) pw = vw;
-    if (ph < 1) ph = vh;
-    if (ctx->activeTarget != canvas) {
-        bind_target(ctx, canvas);
+    if (ctx->activeTarget != ctx->appTarget) {
+        bind_target(ctx, ctx->appTarget);
     }
 
-    set_viewport_logical(ctx, canvas, px, py, pw, ph);
+    set_viewport_logical(ctx, ctx->appTarget, px, py, pw, ph);
 
     C3D_Mtx proj, rot, res;
     Mtx_Identity(&proj);
-    Mtx_Ortho(&proj, (float) vx, (float) (vx + vw), (float) (vy + vh), (float) vy, -1.f, 1.f, true);
+    Mtx_Ortho(&proj, (float)vx, (float)(vx + vw), (float)(vy + vh), (float)vy, -1.f, 1.f, true);
 
     if (angle != 0.f) {
         float cx = vx + vw / 2.f, cy = vy + vh / 2.f;
         Mtx_Identity(&rot);
         Mtx_Translate(&rot, cx, cy, 0.f, true);
-        Mtx_RotateZ(&rot, -angle * (float) (M_PI / 180.f), true);
+        Mtx_RotateZ  (&rot, -angle * (float)(M_PI / 180.f), true);
         Mtx_Translate(&rot, -cx, -cy, 0.f, true);
         Mtx_Multiply(&res, &proj, &rot);
         proj = res;
     }
     apply_projection(ctx, &proj);
+
+    // Enable culling against the view rect in room coords. Disabled when the view
+    // is rotated — an axis-aligned cull rect doesn't match a rotated frustum.
     if (angle == 0.f) {
         ctx->cullEnabled = true;
-        ctx->cullL = (float) vx;
-        ctx->cullT = (float) vy;
-        ctx->cullR = (float) (vx + vw);
-        ctx->cullB = (float) (vy + vh);
+        ctx->cullL = (float)vx;
+        ctx->cullT = (float)vy;
+        ctx->cullR = (float)(vx + vw);
+        ctx->cullB = (float)(vy + vh);
     } else {
         ctx->cullEnabled = false;
     }
 }
 
 static void ctr_end_view(Renderer *ren) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     flush_batch(ctx);
     disable_scissor(ctx);
     ctx->cullEnabled = false;
 }
 
-static void ctr_begin_gui(Renderer *ren, int32_t gw, int32_t gh, int32_t px, int32_t py, int32_t pw, int32_t ph) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    if (!ctx || !ctx->inFrame || !ctx->appReady) return;
+static void ctr_begin_gui(Renderer *ren, int32_t gw, int32_t gh,
+                          int32_t px, int32_t py, int32_t pw, int32_t ph) {
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     flush_batch(ctx);
-    ctx->isGUI = true;
+    if (ctx->activeTarget != ctx->appTarget) bind_target(ctx, ctx->appTarget);
 
-    C3D_RenderTarget *canvas = (ctx->currentEye == 1) ? ctx->appTargetRight : ctx->appTarget;
-    if (!canvas) canvas = ctx->appTarget;
-    if (!canvas) return;
-    if (gw < 1) gw = ctx->gameW > 0 ? ctx->gameW : 1;
-    if (gh < 1) gh = ctx->gameH > 0 ? ctx->gameH : 1;
-    if (pw < 1) pw = gw;
-    if (ph < 1) ph = gh;
-    if (ctx->activeTarget != canvas) bind_target(ctx, canvas);
-
-    set_viewport_logical(ctx, canvas, px, py, pw, ph);
+    set_viewport_logical(ctx, ctx->appTarget, px, py, pw, ph);
 
     C3D_Mtx proj;
     Mtx_Identity(&proj);
-    Mtx_Ortho(&proj, 0.f, (float) gw, (float) gh, 0.f, -1.f, 1.f, true);
+    Mtx_Ortho(&proj, 0.f, (float)gw, (float)gh, 0.f, -1.f, 1.f, true);
     apply_projection(ctx, &proj);
 
+    // GUI uses logical coords (0..gw, 0..gh). Anything outside that rect is
+    // off-screen for this layer and can be culled.
     ctx->cullEnabled = true;
     ctx->cullL = 0.f;
     ctx->cullT = 0.f;
-    ctx->cullR = (float) gw;
-    ctx->cullB = (float) gh;
+    ctx->cullR = (float)gw;
+    ctx->cullB = (float)gh;
 }
 
 static void ctr_end_gui(Renderer *ren) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     flush_batch(ctx);
     disable_scissor(ctx);
     ctx->cullEnabled = false;
 }
 
+// View-bounds culling. Returns true if the quad's bbox is fully outside the
+// active cull rect (= safe to skip the draw entirely). Cheap: 4 fminf/fmaxf +
+// 4 compares. Bridge corridor + Hotland have rooms ~5000+ tiles; the renderer
+// previously emitted them all every frame, even though only ~400 fit on screen.
 static inline bool quad_culled(const CtrRenderer *ctx,
                                float x0, float y0, float x1, float y1,
                                float x2, float y2, float x3, float y3) {
@@ -2491,6 +2226,8 @@ static inline bool quad_culled(const CtrRenderer *ctx,
     if (maxY <= ctx->cullT) return true;
     return false;
 }
+
+// Region drawing
 
 static bool cache_item_available(CtrRenderer *ctx, uint32_t id) {
     return ctx->cacheItems &&
@@ -2515,27 +2252,27 @@ static bool draw_cached_region(CtrRenderer *ctx, uint32_t id,
 
     for (uint32_t i = 0; i < entry->segmentCount; i++) {
         CtrCachedSegment *seg = &ctx->cacheSegments[entry->segmentStart + i];
-        float sL = (float) seg->sourceX;
-        float sT = (float) seg->sourceY;
-        float sR = sL + (float) seg->width;
-        float sB = sT + (float) seg->height;
+        float sL = (float)seg->sourceX;
+        float sT = (float)seg->sourceY;
+        float sR = sL + (float)seg->width;
+        float sB = sT + (float)seg->height;
         float dL = fmaxf(rL, sL);
         float dT = fmaxf(rT, sT);
         float dR = fminf(rR, sR);
         float dB = fminf(rB, sB);
         if (dL >= dR || dT >= dB) continue;
 
-        int pageId = (int) (ctx->repackBasePageId + seg->atlasIndex);
+        int pageId = (int)(ctx->repackBasePageId + seg->atlasIndex);
         if (!load_source_page_dyn(ctx, pageId)) continue;
         CtrSourcePage *src = get_source_page(ctx, pageId);
         if (!src || !src->loaded) continue;
 
         float mX = 0.0f;
         float mY = 0.0f;
-        float u0 = ((float) seg->atlasX + (dL - sL) + mX) / (float) src->potW;
-        float v0 = ((float) seg->atlasY + (dT - sT) + mY) / (float) src->potH;
-        float u1 = ((float) seg->atlasX + (dR - sL) - mX) / (float) src->potW;
-        float v1 = ((float) seg->atlasY + (dB - sT) - mY) / (float) src->potH;
+        float u0 = ((float)seg->atlasX + (dL - sL) + mX) / (float)src->potW;
+        float v0 = ((float)seg->atlasY + (dT - sT) + mY) / (float)src->potH;
+        float u1 = ((float)seg->atlasX + (dR - sL) - mX) / (float)src->potW;
+        float v1 = ((float)seg->atlasY + (dB - sT) - mY) / (float)src->potH;
 
         float tL = (dL - rL) / sw, tR = (dR - rL) / sw;
         float tT = (dT - rT) / sh, tB = (dB - rT) / sh;
@@ -2564,6 +2301,10 @@ static void draw_region(CtrRenderer *ctx, uint32_t id,
                         float x2, float y2, float x3, float y3,
                         const float col[4]) {
     if (id >= ctx->pageCount) return;
+    // View-bounds culling. Single choke point: every sprite, tile, glyph, and
+    // tilemap cell goes through here. If the destination quad is entirely
+    // outside the active view/GUI rect, skip the source-page load + chunk
+    // intersection + push_quad entirely.
     if (quad_culled(ctx, x0, y0, x1, y1, x2, y2, x3, y3)) return;
     if (id < ctx->originalTpagCount) {
         draw_cached_region(ctx, id, sx, sy, sw, sh,
@@ -2583,16 +2324,16 @@ static void draw_region(CtrRenderer *ctx, uint32_t id,
         float rB = sy + sh;
         float dL = fmaxf(rL, 0.f);
         float dT = fmaxf(rT, 0.f);
-        float dR = fminf(rR, (float) item->sourceWidth);
-        float dB = fminf(rB, (float) item->sourceHeight);
+        float dR = fminf(rR, (float)item->sourceWidth);
+        float dB = fminf(rB, (float)item->sourceHeight);
         if (dL >= dR || dT >= dB) return;
 
         float mX = 0.0f;
         float mY = 0.0f;
-        float u0 = ((float) item->sourceX + dL + mX) / (float) src->potW;
-        float v0 = ((float) item->sourceY + dT + mY) / (float) src->potH;
-        float u1 = ((float) item->sourceX + dR - mX) / (float) src->potW;
-        float v1 = ((float) item->sourceY + dB - mY) / (float) src->potH;
+        float u0 = ((float)item->sourceX + dL + mX) / (float)src->potW;
+        float v0 = ((float)item->sourceY + dT + mY) / (float)src->potH;
+        float u1 = ((float)item->sourceX + dR - mX) / (float)src->potW;
+        float v1 = ((float)item->sourceY + dB - mY) / (float)src->potH;
 
         float tL = (dL - rL) / sw, tR = (dR - rL) / sw;
         float tT = (dT - rT) / sh, tB = (dB - rT) / sh;
@@ -2612,7 +2353,7 @@ static void draw_region(CtrRenderer *ctx, uint32_t id,
         return;
     }
 
-    if (!ctx->pages[id].loaded) load_page_dyn(ctx, ctx->base.dataWin, (int32_t) id);
+    if (!ctx->pages[id].loaded) load_page_dyn(ctx, ctx->base.dataWin, (int32_t)id);
     if (!ctx->pages[id].loaded || sw <= 0 || sh <= 0) return;
 
     CtrPage *page = &ctx->pages[id];
@@ -2625,19 +2366,19 @@ static void draw_region(CtrRenderer *ctx, uint32_t id,
             CtrAtlasChunk *c = &page->chunks[cx][cy];
             if (!c->valid) continue;
 
-            float dL = fmaxf(rL, (float) c->srcX);
-            float dT = fmaxf(rT, (float) c->srcY);
-            float dR = fminf(rR, (float) (c->srcX + c->width));
-            float dB = fminf(rB, (float) (c->srcY + c->height));
+            float dL = fmaxf(rL, (float)c->srcX);
+            float dT = fmaxf(rT, (float)c->srcY);
+            float dR = fminf(rR, (float)(c->srcX + c->width));
+            float dB = fminf(rB, (float)(c->srcY + c->height));
             if (dL >= dR || dT >= dB) continue;
 
             float mX = 0.0f;
             float mY = 0.0f;
 
-            float u0 = (dL - c->srcX + mX) / (float) c->potW;
-            float v0 = (dT - c->srcY + mY) / (float) c->potH;
-            float u1 = (dR - c->srcX - mX) / (float) c->potW;
-            float v1 = (dB - c->srcY - mY) / (float) c->potH;
+            float u0 = (dL - c->srcX + mX) / (float)c->potW;
+            float v0 = (dT - c->srcY + mY) / (float)c->potH;
+            float u1 = (dR - c->srcX - mX) / (float)c->potW;
+            float v1 = (dB - c->srcY - mY) / (float)c->potH;
 
             float tL = (dL - rL) / sw, tR = (dR - rL) / sw;
             float tT = (dT - rT) / sh, tB = (dB - rT) / sh;
@@ -2657,33 +2398,34 @@ static void draw_region(CtrRenderer *ctx, uint32_t id,
     }
 }
 
+// Sprites
+
 static void ctr_draw_sprite(Renderer *ren, int32_t id, float x, float y,
                             float ox, float oy, float sx, float sy, float ang,
                             uint32_t color, float a) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    if (id < 0 || (uint32_t) id >= ctx->pageCount) return;
-    float c[4];
-    col2fv(color, a, c);
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+    if (id < 0 || (uint32_t)id >= ctx->pageCount) return;
+    float c[4]; col2fv(color, a, c);
     if (c[3] <= 0.f) return;
 
     TexturePageItem *item = &ren->dataWin->tpag.items[id];
     float l0 = (item->targetX - ox) * sx;
     float t0 = (item->targetY - oy) * sy;
-    float l1 = l0 + item->sourceWidth * sx;
+    float l1 = l0 + item->sourceWidth  * sx;
     float t1 = t0 + item->sourceHeight * sy;
 
     if (ang == 0.f) {
-        draw_region(ctx, (uint32_t) id, 0, 0, item->sourceWidth, item->sourceHeight,
-                    x + l0, y + t0, x + l1, y + t0,
-                    x + l1, y + t1, x + l0, y + t1, c);
+        draw_region(ctx, (uint32_t)id, 0, 0, item->sourceWidth, item->sourceHeight,
+                    x + l0, y + t0,  x + l1, y + t0,
+                    x + l1, y + t1,  x + l0, y + t1,  c);
     } else {
-        float rad = -ang * (float) (M_PI / 180.f);
+        float rad = -ang * (float)(M_PI / 180.f);
         float sn = sinf(rad), cs = cosf(rad);
-        draw_region(ctx, (uint32_t) id, 0, 0, item->sourceWidth, item->sourceHeight,
+        draw_region(ctx, (uint32_t)id, 0, 0, item->sourceWidth, item->sourceHeight,
                     l0 * cs - t0 * sn + x, l0 * sn + t0 * cs + y,
                     l1 * cs - t0 * sn + x, l1 * sn + t0 * cs + y,
                     l1 * cs - t1 * sn + x, l1 * sn + t1 * cs + y,
-                    l0 * cs - t1 * sn + x, l0 * sn + t1 * cs + y, c);
+                    l0 * cs - t1 * sn + x, l0 * sn + t1 * cs + y,  c);
     }
 }
 
@@ -2692,9 +2434,8 @@ static void ctr_draw_sprite_part(Renderer *ren, int32_t id,
                                  float x, float y, float xscale, float yscale,
                                  float angleDeg, float pivotX, float pivotY,
                                  uint32_t color, float alpha) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    float c[4];
-    col2fv(color, alpha, c);
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+    float c[4]; col2fv(color, alpha, c);
     if (c[3] <= 0.f) return;
 
     float l0 = -pivotX * xscale;
@@ -2703,15 +2444,15 @@ static void ctr_draw_sprite_part(Renderer *ren, int32_t id,
     float t1 = t0 + sh * yscale;
 
     if (angleDeg == 0.f) {
-        draw_region(ctx, (uint32_t) id, sx, sy, sw, sh,
+        draw_region(ctx, (uint32_t)id, sx, sy, sw, sh,
                     x + l0, y + t0,
                     x + l1, y + t0,
                     x + l1, y + t1,
                     x + l0, y + t1, c);
     } else {
-        float rad = -angleDeg * (float) (M_PI / 180.f);
+        float rad = -angleDeg * (float)(M_PI / 180.f);
         float sn = sinf(rad), cs = cosf(rad);
-        draw_region(ctx, (uint32_t) id, sx, sy, sw, sh,
+        draw_region(ctx, (uint32_t)id, sx, sy, sw, sh,
                     l0 * cs - t0 * sn + x, l0 * sn + t0 * cs + y,
                     l1 * cs - t0 * sn + x, l1 * sn + t0 * cs + y,
                     l1 * cs - t1 * sn + x, l1 * sn + t1 * cs + y,
@@ -2722,46 +2463,43 @@ static void ctr_draw_sprite_part(Renderer *ren, int32_t id,
 static void ctr_draw_sprite_pos(Renderer *ren, int32_t id,
                                 float x1, float y1, float x2, float y2,
                                 float x3, float y3, float x4, float y4, float alpha) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    float c[4];
-    col2fv(ren->drawColor, alpha, c);
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+    float c[4]; col2fv(ren->drawColor, alpha, c);
     if (c[3] <= 0.f) return;
-    if (id < 0 || (uint32_t) id >= ren->dataWin->tpag.count) return;
+    if (id < 0 || (uint32_t)id >= ren->dataWin->tpag.count) return;
     if (ren->dataWin->tpag.items == nullptr) return;
     TexturePageItem *item = &ren->dataWin->tpag.items[id];
-    draw_region(ctx, (uint32_t) id, 0, 0, item->sourceWidth, item->sourceHeight,
+    draw_region(ctx, (uint32_t)id, 0, 0, item->sourceWidth, item->sourceHeight,
                 x1, y1, x2, y2, x3, y3, x4, y4, c);
 }
 
+// Tiles
+
 static void ctr_draw_tile(Renderer *ren, RoomTile *tile, float ox, float oy) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+
+    // Early cull: skip the TPAG resolve, clipping math, and the draw_region call
+    // chain entirely if the tile is off-camera. Big rooms (Undyne bridge, hotland)
+    // emit thousands of tiles per frame and only a few hundred fit on screen.
     {
-        float dxA = (float) tile->x + ox;
-        float dyA = (float) tile->y + oy;
-        float dxB = dxA + (float) tile->width * tile->scaleX;
-        float dyB = dyA + (float) tile->height * tile->scaleY;
+        float dxA = (float)tile->x + ox;
+        float dyA = (float)tile->y + oy;
+        float dxB = dxA + (float)tile->width  * tile->scaleX;
+        float dyB = dyA + (float)tile->height * tile->scaleY;
         if (quad_culled(ctx, dxA, dyA, dxB, dyA, dxB, dyB, dxA, dyB)) return;
     }
 
     int32_t id = Renderer_resolveObjectTPAGIndex(ren->dataWin, tile);
-    if (id < 0 || (uint32_t) id >= ren->dataWin->tpag.count) return;
+    if (id < 0 || (uint32_t)id >= ren->dataWin->tpag.count) return;
     if (ren->dataWin->tpag.items == nullptr) return;
 
     TexturePageItem *tpag = &ren->dataWin->tpag.items[id];
     int sx = tile->sourceX, sy = tile->sourceY;
-    int sw = (int) tile->width, sh = (int) tile->height;
+    int sw = (int)tile->width, sh = (int)tile->height;
     float dx = tile->x + ox, dy = tile->y + oy;
 
-    if (tpag->targetX > sx) {
-        dx += (tpag->targetX - sx) * tile->scaleX;
-        sw -= tpag->targetX - sx;
-        sx = tpag->targetX;
-    }
-    if (tpag->targetY > sy) {
-        dy += (tpag->targetY - sy) * tile->scaleY;
-        sh -= tpag->targetY - sy;
-        sy = tpag->targetY;
-    }
+    if (tpag->targetX > sx) { dx += (tpag->targetX - sx) * tile->scaleX; sw -= tpag->targetX - sx; sx = tpag->targetX; }
+    if (tpag->targetY > sy) { dy += (tpag->targetY - sy) * tile->scaleY; sh -= tpag->targetY - sy; sy = tpag->targetY; }
 
     int cR = tpag->targetX + tpag->sourceWidth;
     int cB = tpag->targetY + tpag->sourceHeight;
@@ -2780,10 +2518,10 @@ static void ctr_draw_tiled(Renderer *ren, int32_t id, float ox, float oy,
                            float x, float y, float sx, float sy,
                            bool tx, bool ty, float rw, float rh,
                            uint32_t col, float a) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    if (id < 0 || (uint32_t) id >= ren->dataWin->tpag.count) return;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+    if (id < 0 || (uint32_t)id >= ren->dataWin->tpag.count) return;
     TexturePageItem *t = &ren->dataWin->tpag.items[id];
-    float tw = t->boundingWidth * fabsf(sx);
+    float tw = t->boundingWidth  * fabsf(sx);
     float th = t->boundingHeight * fabsf(sy);
     if (tw <= 0.f || th <= 0.f) return;
 
@@ -2794,6 +2532,10 @@ static void ctr_draw_tiled(Renderer *ren, int32_t id, float ox, float oy,
 
     float eX = tx ? rw : sX + tw;
     float eY = ty ? rh : sY + th;
+
+    // Clamp the iteration window to the active cull rect so tiled-room-sized
+    // backgrounds (Hotland mountain BGs etc.) don't iterate the entire room.
+    // Per-quad cull in draw_region still catches partial-overlap edge cases.
     if (ctx->cullEnabled) {
         float minX = ctx->cullL - tw;
         if (sX < minX) {
@@ -2818,57 +2560,46 @@ static void ctr_draw_tiled(Renderer *ren, int32_t id, float ox, float oy,
     }
 }
 
+// Shapes
+
 static void ctr_draw_rect_c(Renderer *ren, float x1, float y1, float x2, float y2,
                             uint32_t c1, uint32_t c2, uint32_t c3, uint32_t c4,
                             float a, bool out) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     if (a <= 0.f) return;
     float l = roundf(fminf(x1, x2)), r = roundf(fmaxf(x1, x2));
     float t = roundf(fminf(y1, y2)), b = roundf(fmaxf(y1, y2));
 
     float r1[4], r2[4], r3[4], r4[4];
-    col2fv(c1, a, r1);
-    col2fv(c2, a, r2);
-    col2fv(c3, a, r3);
-    col2fv(c4, a, r4);
+    col2fv(c1, a, r1);  col2fv(c2, a, r2);  col2fv(c3, a, r3);  col2fv(c4, a, r4);
 
     if (out) {
-        float xs[4] = {l, r + 1, r + 1, l};
-        float ys[4] = {t, t, t + 2, t + 2};
-        float cs[4][4] = {
-            {r1[0], r1[1], r1[2], a}, {r2[0], r2[1], r2[2], a},
-            {r2[0], r2[1], r2[2], a}, {r1[0], r1[1], r1[2], a}
-        };
+        float xs[4]  = {l, r + 1, r + 1, l};
+        float ys[4]  = {t, t, t + 2, t + 2};
+        float cs[4][4] = { {r1[0],r1[1],r1[2],a}, {r2[0],r2[1],r2[2],a},
+                           {r2[0],r2[1],r2[2],a}, {r1[0],r1[1],r1[2],a} };
         push_quad_uvgrad(ctx, &ctx->whiteTex, xs, ys, .5f, .5f, .5f, .5f, cs);
 
         float ys2[4] = {b - 1, b - 1, b + 1, b + 1};
-        float cs2[4][4] = {
-            {r4[0], r4[1], r4[2], a}, {r3[0], r3[1], r3[2], a},
-            {r3[0], r3[1], r3[2], a}, {r4[0], r4[1], r4[2], a}
-        };
+        float cs2[4][4] = { {r4[0],r4[1],r4[2],a}, {r3[0],r3[1],r3[2],a},
+                            {r3[0],r3[1],r3[2],a}, {r4[0],r4[1],r4[2],a} };
         push_quad_uvgrad(ctx, &ctx->whiteTex, xs, ys2, .5f, .5f, .5f, .5f, cs2);
 
         float xsL[4] = {l, l + 2, l + 2, l};
         float ysM[4] = {t + 2, t + 2, b - 1, b - 1};
-        float csL[4][4] = {
-            {r1[0], r1[1], r1[2], a}, {r1[0], r1[1], r1[2], a},
-            {r4[0], r4[1], r4[2], a}, {r4[0], r4[1], r4[2], a}
-        };
+        float csL[4][4] = { {r1[0],r1[1],r1[2],a}, {r1[0],r1[1],r1[2],a},
+                            {r4[0],r4[1],r4[2],a}, {r4[0],r4[1],r4[2],a} };
         push_quad_uvgrad(ctx, &ctx->whiteTex, xsL, ysM, .5f, .5f, .5f, .5f, csL);
 
         float xsR[4] = {r - 1, r + 1, r + 1, r - 1};
-        float csR[4][4] = {
-            {r2[0], r2[1], r2[2], a}, {r2[0], r2[1], r2[2], a},
-            {r3[0], r3[1], r3[2], a}, {r3[0], r3[1], r3[2], a}
-        };
+        float csR[4][4] = { {r2[0],r2[1],r2[2],a}, {r2[0],r2[1],r2[2],a},
+                            {r3[0],r3[1],r3[2],a}, {r3[0],r3[1],r3[2],a} };
         push_quad_uvgrad(ctx, &ctx->whiteTex, xsR, ysM, .5f, .5f, .5f, .5f, csR);
     } else {
         float xs[4] = {l, r + 1, r + 1, l};
         float ys[4] = {t, t, b + 1, b + 1};
-        float cs[4][4] = {
-            {r1[0], r1[1], r1[2], a}, {r2[0], r2[1], r2[2], a},
-            {r3[0], r3[1], r3[2], a}, {r4[0], r4[1], r4[2], a}
-        };
+        float cs[4][4] = { {r1[0],r1[1],r1[2],a}, {r2[0],r2[1],r2[2],a},
+                           {r3[0],r3[1],r3[2],a}, {r4[0],r4[1],r4[2],a} };
         push_quad_uvgrad(ctx, &ctx->whiteTex, xs, ys, .5f, .5f, .5f, .5f, cs);
     }
 }
@@ -2880,10 +2611,8 @@ static void ctr_draw_rect(Renderer *ren, float x1, float y1, float x2, float y2,
 
 static void ctr_draw_line_c(Renderer *ren, float x1, float y1, float x2, float y2,
                             float w, uint32_t c1, uint32_t c2, float a) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    float r1[4], r2[4];
-    col2fv(c1, a, r1);
-    col2fv(c2, a, r2);
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+    float r1[4], r2[4]; col2fv(c1, a, r1); col2fv(c2, a, r2);
     if (r1[3] <= 0.f) return;
 
     w = fmaxf(2.f, w);
@@ -2895,21 +2624,15 @@ static void ctr_draw_line_c(Renderer *ren, float x1, float y1, float x2, float y
         return;
     }
 
-    x2 += (dx / len) * .5f;
-    y2 += (dy / len) * .5f;
-    x1 -= (dx / len) * .5f;
-    y1 -= (dy / len) * .5f;
-    dx = x2 - x1;
-    dy = y2 - y1;
-    len = sqrtf(dx * dx + dy * dy);
+    x2 += (dx / len) * .5f;  y2 += (dy / len) * .5f;
+    x1 -= (dx / len) * .5f;  y1 -= (dy / len) * .5f;
+    dx = x2 - x1; dy = y2 - y1; len = sqrtf(dx * dx + dy * dy);
 
     float px = (-dy / len) * (w * .5f), py = (dx / len) * (w * .5f);
     float xs[4] = {x1 + px, x1 - px, x2 - px, x2 + px};
     float ys[4] = {y1 + py, y1 - py, y2 - py, y2 + py};
-    float cs[4][4] = {
-        {r1[0], r1[1], r1[2], r1[3]}, {r1[0], r1[1], r1[2], r1[3]},
-        {r2[0], r2[1], r2[2], r2[3]}, {r2[0], r2[1], r2[2], r2[3]}
-    };
+    float cs[4][4] = { {r1[0],r1[1],r1[2],r1[3]}, {r1[0],r1[1],r1[2],r1[3]},
+                       {r2[0],r2[1],r2[2],r2[3]}, {r2[0],r2[1],r2[2],r2[3]} };
     push_quad_uvgrad(ctx, &ctx->whiteTex, xs, ys, .5f, .5f, .5f, .5f, cs);
 }
 
@@ -2928,10 +2651,8 @@ static void ctr_draw_tri_c(Renderer *ren, float x1, float y1, float x2, float y2
         return;
     }
     float r1[4], r2[4], r3[4];
-    col2fv(c1, a, r1);
-    col2fv(c2, a, r2);
-    col2fv(c3, a, r3);
-    push_solid_tri((CtrRenderer *) ren, x1, y1, x2, y2, x3, y3, r1, r2, r3);
+    col2fv(c1, a, r1);  col2fv(c2, a, r2);  col2fv(c3, a, r3);
+    push_solid_tri((CtrRenderer *)ren, x1, y1, x2, y2, x3, y3, r1, r2, r3);
 }
 
 static void ctr_draw_tri(Renderer *ren, float x1, float y1, float x2, float y2,
@@ -2942,25 +2663,22 @@ static void ctr_draw_tri(Renderer *ren, float x1, float y1, float x2, float y2,
 
 static void ctr_draw_ellipse(Renderer *ren, float cx, float cy, float rx, float ry,
                              uint32_t c, float a, bool out, int32_t prec) {
-    (void) prec;
-    rx = fabsf(rx);
-    ry = fabsf(ry);
+    (void)prec;
+    rx = fabsf(rx); ry = fabsf(ry);
     if (rx <= 2.5f && ry <= 2.5f) {
         ctr_draw_rect(ren, cx - rx, cy - ry, cx + rx, cy + ry, c, a, out);
         return;
     }
-    int segs = (int) fmaxf(8.f, fminf(32.f, sqrtf(fmaxf(rx, ry)) * 3.5f));
-    float step = (2.f * (float) M_PI) / segs;
-    float rgb[4];
-    col2fv(c, a, rgb);
+    int segs = (int)fmaxf(8.f, fminf(32.f, sqrtf(fmaxf(rx, ry)) * 3.5f));
+    float step = (2.f * (float)M_PI) / segs;
+    float rgb[4]; col2fv(c, a, rgb);
     float px = cx + rx, py = cy;
     for (int i = 1; i <= segs; i++) {
         float nx = cx + cosf(step * i) * rx;
         float ny = cy + sinf(step * i) * ry;
         if (out) ctr_draw_line(ren, px, py, nx, ny, 1.f, c, a);
-        else push_solid_tri((CtrRenderer *) ren, cx, cy, px, py, nx, ny, rgb, rgb, rgb);
-        px = nx;
-        py = ny;
+        else     push_solid_tri((CtrRenderer *)ren, cx, cy, px, py, nx, ny, rgb, rgb, rgb);
+        px = nx; py = ny;
     }
 }
 
@@ -2975,8 +2693,8 @@ static void get_arc(float *px, float *py, int *cnt,
     for (int i = 0; i <= seg; i++) {
         if (skip && !i) continue;
         if (*cnt >= MAX_RR_POINTS) break;
-        float ang = a1 + (a2 - a1) * (seg ? (float) i / seg : 0);
-        px[*cnt] = cx + cosf(ang) * rx;
+        float ang = a1 + (a2 - a1) * (seg ? (float)i / seg : 0);
+        px[*cnt]   = cx + cosf(ang) * rx;
         py[(*cnt)] = cy + sinf(ang) * ry;
         (*cnt)++;
     }
@@ -2984,7 +2702,7 @@ static void get_arc(float *px, float *py, int *cnt,
 
 static void ctr_draw_rr(Renderer *ren, float x1, float y1, float x2, float y2,
                         float rx, float ry, uint32_t c, float a, bool out, int32_t prec) {
-    (void) prec;
+    (void)prec;
     float l = fminf(x1, x2), r = fmaxf(x1, x2);
     float t = fminf(y1, y2), b = fmaxf(y1, y2);
     float w = r - l, h = b - t;
@@ -2995,66 +2713,109 @@ static void ctr_draw_rr(Renderer *ren, float x1, float y1, float x2, float y2,
     rx = fminf(fabsf(rx), w * .5f);
     ry = fminf(fabsf(ry), h * .5f);
 
-    int seg = (int) fmaxf(2.f, fminf(8.f, sqrtf(fmaxf(rx, ry)) * 0.8f));
+    int seg = (int)fmaxf(2.f, fminf(8.f, sqrtf(fmaxf(rx, ry)) * 0.8f));
     float px[MAX_RR_POINTS], py[MAX_RR_POINTS];
     int cnt = 0;
-    float hp = (float) M_PI * .5f;
+    float hp = (float)M_PI * .5f;
 
-    get_arc(px, py, &cnt, r - rx, t + ry, rx, ry, -hp, 0.f, seg, false);
-    get_arc(px, py, &cnt, r - rx, b - ry, rx, ry, 0.f, hp, seg, true);
-    get_arc(px, py, &cnt, l + rx, b - ry, rx, ry, hp, (float) M_PI, seg, true);
-    get_arc(px, py, &cnt, l + rx, t + ry, rx, ry, (float) M_PI, (float) M_PI + hp, seg, true);
+    get_arc(px, py, &cnt, r - rx, t + ry, rx, ry, -hp,            0.f,             seg, false);
+    get_arc(px, py, &cnt, r - rx, b - ry, rx, ry,  0.f,           hp,              seg, true);
+    get_arc(px, py, &cnt, l + rx, b - ry, rx, ry,  hp,            (float)M_PI,     seg, true);
+    get_arc(px, py, &cnt, l + rx, t + ry, rx, ry, (float)M_PI,    (float)M_PI + hp, seg, true);
 
-    float rgb[4];
-    col2fv(c, a, rgb);
+    float rgb[4]; col2fv(c, a, rgb);
     if (out) {
         for (int i = 0; i < cnt; i++)
             ctr_draw_line(ren, px[i], py[i], px[(i + 1) % cnt], py[(i + 1) % cnt], 1.f, c, a);
     } else {
         float ccx = (l + r) * .5f, ccy = (t + b) * .5f;
         for (int i = 0; i < cnt; i++)
-            push_solid_tri((CtrRenderer *) ren, ccx, ccy, px[i], py[i],
+            push_solid_tri((CtrRenderer *)ren, ccx, ccy, px[i], py[i],
                            px[(i + 1) % cnt], py[(i + 1) % cnt], rgb, rgb, rgb);
     }
 }
 
-static void ctr_draw_text(Renderer *ren, const char *txt, float x, float y,
-                          float sx, float sy, float ang) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    DataWin *dw = ren->dataWin;
-    int fidx = ren->drawFont;
-    if (fidx < 0 || (uint32_t) fidx >= dw->font.count) return;
+// Text
 
-    Font *font = &dw->font.fonts[fidx];
-    if (font->tpagIndex < 0 || (uint32_t) font->tpagIndex >= ctx->pageCount) return;
+static void ctr_draw_font_glyph(CtrRenderer *ctx, int tpagIndex, FontGlyph *g,
+                                Matrix4f *tr, float lx0, float ly0, float rgb[4]) {
+    float lx1 = lx0 + g->sourceWidth, ly1 = ly0 + g->sourceHeight;
+    float px0, py0, px1, py1, px2, py2, px3, py3;
+    Matrix4f_transformPoint(tr, lx0, ly0, &px0, &py0);
+    Matrix4f_transformPoint(tr, lx1, ly0, &px1, &py1);
+    Matrix4f_transformPoint(tr, lx1, ly1, &px2, &py2);
+    Matrix4f_transformPoint(tr, lx0, ly1, &px3, &py3);
 
-    if ((uint32_t) font->tpagIndex < ctx->originalTpagCount) {
-        if (!cache_item_available(ctx, (uint32_t) font->tpagIndex)) return;
-    } else {
-        if (!ctx->pages[font->tpagIndex].loaded) return;
+    draw_region(ctx, tpagIndex,
+                g->sourceX, g->sourceY, g->sourceWidth, g->sourceHeight,
+                px0, py0, px1, py1, px2, py2, px3, py3, rgb);
+}
+
+static bool ctr_resolve_font_glyph_tpag(CtrRenderer *ctx, DataWin *dw, Font *font,
+                                        FontGlyph *glyph, int *outTpagIndex,
+                                        float *outYOffset) {
+    if (outTpagIndex == NULL || outYOffset == NULL) return false;
+    *outYOffset = 0.0f;
+
+    if (!font->isSpriteFont) {
+        int tpagIndex = font->tpagIndex;
+        if (tpagIndex < 0 || (uint32_t)tpagIndex >= ctx->pageCount) return false;
+        *outTpagIndex = tpagIndex;
+        return true;
     }
 
-    float rgb[4];
-    col2fv(ren->drawColor, ren->drawAlpha, rgb);
+    if (font->spriteIndex < 0 || (uint32_t)font->spriteIndex >= dw->sprt.count)
+        return false;
+
+    Sprite *sprite = &dw->sprt.sprites[font->spriteIndex];
+    int32_t glyphIndex = (int32_t)(glyph - font->glyphs);
+    if (glyphIndex < 0 || (uint32_t)glyphIndex >= sprite->textureCount)
+        return false;
+
+    int32_t tpagIndex = sprite->tpagIndices ? sprite->tpagIndices[glyphIndex] : -1;
+    if (tpagIndex < 0 || (uint32_t)tpagIndex >= dw->tpag.count ||
+        (uint32_t)tpagIndex >= ctx->pageCount || dw->tpag.items == NULL)
+        return false;
+
+    TexturePageItem *tpag = &dw->tpag.items[tpagIndex];
+    *outTpagIndex = tpagIndex;
+    *outYOffset = (float)((int32_t)tpag->targetY - sprite->originY);
+    return true;
+}
+
+static void ctr_draw_text(Renderer *ren, const char *txt, float x, float y,
+                          float sx, float sy, float ang) {
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+    DataWin *dw = ren->dataWin;
+    int fidx = ren->drawFont;
+    if (fidx < 0 || (uint32_t)fidx >= dw->font.count) return;
+
+    Font *font = &dw->font.fonts[fidx];
+    if (!font->isSpriteFont) {
+        if (font->tpagIndex < 0 || (uint32_t)font->tpagIndex >= ctx->pageCount) return;
+        if ((uint32_t)font->tpagIndex < ctx->originalTpagCount) {
+            if (!cache_item_available(ctx, (uint32_t)font->tpagIndex)) return;
+        } else {
+            if (!ctx->pages[font->tpagIndex].loaded) return;
+        }
+    }
+
+    float rgb[4]; col2fv(ren->drawColor, ren->drawAlpha, rgb);
     if (rgb[3] <= 0.f) return;
 
     PreprocessedText ptxt = TextUtils_preprocessGmlText(txt);
-    if (!ptxt.text[0]) {
-        PreprocessedText_free(ptxt);
-        return;
-    }
+    if (!ptxt.text[0]) { PreprocessedText_free(ptxt); return; }
 
     int len = strlen(ptxt.text);
-    float stride = font->emSize > 0 ? font->emSize : 10.f;
+    float stride = TextUtils_lineStride(font);
     int lines = TextUtils_countLines(ptxt.text, len);
-    float valOff = ren->drawValign == 1
-                       ? -(lines * stride / 2.f)
-                       : (ren->drawValign == 2 ? -(lines * stride) : 0);
+    float valOff = ren->drawValign == 1 ? -(lines * stride / 2.f)
+                                        : (ren->drawValign == 2 ? -(lines * stride) : 0);
 
     Matrix4f tr;
     Matrix4f_setTransform2D(&tr, roundf(x), roundf(y),
-                            sx * font->scaleX, sy * font->scaleY,
-                            -ang * (float) (M_PI / 180.f));
+                             sx * font->scaleX, sy * font->scaleY,
+                             -ang * (float)(M_PI / 180.f));
 
     float cy = valOff;
     int start = 0;
@@ -3063,37 +2824,42 @@ static void ctr_draw_text(Renderer *ren, const char *txt, float x, float y,
         while (end < len && !TextUtils_isNewlineChar(ptxt.text[end])) end++;
 
         float lw = TextUtils_measureLineWidth(font, ptxt.text + start, end - start);
-        float cx = ren->drawHalign == 1
-                       ? -lw / 2.f
-                       : (ren->drawHalign == 2 ? -lw : 0);
+        float cx = ren->drawHalign == 1 ? -lw / 2.f
+                                        : (ren->drawHalign == 2 ? -lw : 0);
 
         int32_t pos = 0;
         while (pos < end - start) {
             int old = pos;
             uint16_t ch = TextUtils_decodeUtf8(ptxt.text + start, end - start, &pos);
-            if (pos == old) {
-                pos++;
-                continue;
-            }
+            if (pos == old) { pos++; continue; }
 
-            FontGlyph *g = TextUtils_findGlyph(font, ch);
+            FontGlyph *exact = TextUtils_findExactGlyph(font, ch);
+            FontGlyph *g = exact ? exact : TextUtils_findGlyph(font, ch);
             if (!g) continue;
-            if (!g->sourceWidth || !g->sourceHeight) {
-                cx += g->shift;
+            if (!g->sourceWidth || !g->sourceHeight) { cx += g->shift; continue; }
+
+            float baseX = cx + g->offset;
+            int glyphTpag = -1;
+            float glyphYOffset = 0.0f;
+            if (!ctr_resolve_font_glyph_tpag(ctx, dw, font, g, &glyphTpag, &glyphYOffset))
                 continue;
+            ctr_draw_font_glyph(ctx, glyphTpag, g, &tr, baseX, cy + glyphYOffset, rgb);
+
+            uint16_t accentCh = exact ? 0 : TextUtils_latinAccentCodepoint(ch);
+            FontGlyph *accent = accentCh ? TextUtils_findGlyph(font, accentCh) : nullptr;
+            if (accent && accent->sourceWidth && accent->sourceHeight) {
+                int accentTpag = -1;
+                float accentYOffset = 0.0f;
+                if (!ctr_resolve_font_glyph_tpag(ctx, dw, font, accent, &accentTpag, &accentYOffset)) {
+                    cx += g->shift;
+                    continue;
+                }
+                float accentX = baseX + (g->sourceWidth - accent->sourceWidth) * 0.5f;
+                float accentY = (accentCh == ',')
+                                    ? (cy + g->sourceHeight - accent->sourceHeight * 0.25f)
+                                    : (cy - accent->sourceHeight + 2.f);
+                ctr_draw_font_glyph(ctx, accentTpag, accent, &tr, accentX, accentY + accentYOffset, rgb);
             }
-
-            float lx0 = cx + g->offset, ly0 = cy;
-            float lx1 = lx0 + g->sourceWidth, ly1 = ly0 + g->sourceHeight;
-            float px0, py0, px1, py1, px2, py2, px3, py3;
-            Matrix4f_transformPoint(&tr, lx0, ly0, &px0, &py0);
-            Matrix4f_transformPoint(&tr, lx1, ly0, &px1, &py1);
-            Matrix4f_transformPoint(&tr, lx1, ly1, &px2, &py2);
-            Matrix4f_transformPoint(&tr, lx0, ly1, &px3, &py3);
-
-            draw_region(ctx, font->tpagIndex,
-                        g->sourceX, g->sourceY, g->sourceWidth, g->sourceHeight,
-                        px0, py0, px1, py1, px2, py2, px3, py3, rgb);
             cx += g->shift;
         }
         cy += stride;
@@ -3105,20 +2871,19 @@ static void ctr_draw_text(Renderer *ren, const char *txt, float x, float y,
 static void ctr_draw_text_c(Renderer *ren, const char *t, float x, float y,
                             float xs, float ys, float ang,
                             int32_t c1, int32_t c2, int32_t c3, int32_t c4, float a) {
-    (void) c1;
-    (void) c2;
-    (void) c3;
-    (void) c4;
+    (void)c1; (void)c2; (void)c3; (void)c4;
     float old = ren->drawAlpha;
     ren->drawAlpha = a;
     ctr_draw_text(ren, t, x, y, xs, ys, ang);
     ren->drawAlpha = old;
 }
 
+// Room cache
+
 static void mark_res(CtrRenderer *ctx, int id) {
-    if (id < 0 || (uint32_t) id >= ctx->pageCount) return;
+    if (id < 0 || (uint32_t)id >= ctx->pageCount) return;
     ctx->pages[id].keepResident = true;
-    if ((uint32_t) id < ctx->originalTpagCount && cache_item_available(ctx, (uint32_t) id)) {
+    if ((uint32_t)id < ctx->originalTpagCount && cache_item_available(ctx, (uint32_t)id)) {
         CtrCachedTpag *entry = &ctx->cacheItems[id];
         for (uint32_t i = 0; i < entry->segmentCount; i++) {
             CtrCachedSegment *seg = &ctx->cacheSegments[entry->segmentStart + i];
@@ -3129,13 +2894,79 @@ static void mark_res(CtrRenderer *ctx, int id) {
 }
 
 static void mark_spr(CtrRenderer *ctx, DataWin *dw, int id) {
-    if (id < 0 || (uint32_t) id >= dw->sprt.count) return;
+    if (id < 0 || (uint32_t)id >= dw->sprt.count) return;
     Sprite *s = &dw->sprt.sprites[id];
     for (uint32_t i = 0; i < s->textureCount; i++) mark_res(ctx, s->tpagIndices[i]);
 }
 
 static void mark_bg(CtrRenderer *ctx, DataWin *dw, int id) {
-    if (id >= 0 && (uint32_t) id < dw->bgnd.count) mark_res(ctx, dw->bgnd.backgrounds[id].tpagIndex);
+    if (id >= 0 && (uint32_t)id < dw->bgnd.count) mark_res(ctx, dw->bgnd.backgrounds[id].tpagIndex);
+}
+
+static uint32_t queue_tpag_prefetch(CtrRenderer *ctx, DataWin *dw, int id) {
+    if (!ctx || !dw || id < 0 || (uint32_t)id >= dw->tpag.count) return 0;
+
+    uint32_t queued = 0;
+    if ((uint32_t)id < ctx->originalTpagCount && cache_item_available(ctx, (uint32_t)id)) {
+        CtrCachedTpag *entry = &ctx->cacheItems[id];
+        for (uint32_t i = 0; i < entry->segmentCount; i++) {
+            CtrCachedSegment *seg = &ctx->cacheSegments[entry->segmentStart + i];
+            if (seg->atlasIndex >= ctx->sourcePageCount) continue;
+            if (queue_source_page_prefetch(ctx, (int32_t)(ctx->repackBasePageId + seg->atlasIndex)))
+                queued++;
+        }
+        return queued;
+    }
+
+    TexturePageItem *item = &dw->tpag.items[id];
+    if (is_repacked_page(ctx, item->texturePageId) &&
+        queue_source_page_prefetch(ctx, item->texturePageId)) {
+        queued++;
+    }
+    return queued;
+}
+
+static uint32_t queue_sprite_prefetch(CtrRenderer *ctx, DataWin *dw, int id) {
+    if (!ctx || !dw || id < 0 || (uint32_t)id >= dw->sprt.count) return 0;
+    Sprite *s = &dw->sprt.sprites[id];
+    uint32_t queued = 0;
+    for (uint32_t i = 0; i < s->textureCount; i++) {
+        queued += queue_tpag_prefetch(ctx, dw, s->tpagIndices[i]);
+        if (ctx->prefetchQueueCount >= CTR_PREFETCH_QUEUE_CAP) break;
+    }
+    return queued;
+}
+
+static uint32_t queue_room_warmup_pages(CtrRenderer *ctx, int32_t roomIndex) {
+    if (!ctx || !g_current_cache_dir[0]) return 0;
+
+    char path[320];
+    snprintf(path, sizeof(path), "%s/warmup_pages.txt", g_current_cache_dir);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+
+    uint32_t queued = 0;
+    char line[128];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+
+        int room = -999999;
+        int page = -1;
+        if (sscanf(line, "room=%d page=%d", &room, &page) != 2 &&
+            sscanf(line, "%d %d", &room, &page) != 2) {
+            continue;
+        }
+        if (room != roomIndex && room != -1) continue;
+
+        int pageId = page;
+        if (!is_repacked_page(ctx, pageId) && page >= 0 && (uint32_t)page < ctx->sourcePageCount) {
+            pageId = (int)(ctx->repackBasePageId + (uint32_t)page);
+        }
+        if (queue_source_page_prefetch(ctx, pageId)) queued++;
+        if (ctx->prefetchQueueCount >= CTR_PREFETCH_QUEUE_CAP) break;
+    }
+    fclose(f);
+    return queued;
 }
 
 static bool is_hot_font_name(const char *name) {
@@ -3177,7 +3008,7 @@ static void mark_tile(CtrRenderer *ctx, DataWin *dw, const RoomTile *tile) {
 
 static void mark_obj_and_parents(CtrRenderer *ctx, DataWin *dw, int id) {
     int guard = 0;
-    while (id >= 0 && (uint32_t) id < dw->objt.count && guard++ < 64) {
+    while (id >= 0 && (uint32_t)id < dw->objt.count && guard++ < 64) {
         GameObject *obj = &dw->objt.objects[id];
         mark_spr(ctx, dw, obj->spriteId);
         id = obj->parentId;
@@ -3225,7 +3056,7 @@ static void load_marked_room_pages(CtrRenderer *ctx, DataWin *dw) {
                 if (seg->atlasIndex < ctx->sourcePageCount) sourceLoadMap[seg->atlasIndex] = true;
             }
         } else if (i >= ctx->originalTpagCount) {
-            load_page_dyn(ctx, dw, (int32_t) i);
+            load_page_dyn(ctx, dw, (int32_t)i);
             dynamicLoadCount++;
         }
     }
@@ -3239,7 +3070,7 @@ static void load_marked_room_pages(CtrRenderer *ctx, DataWin *dw) {
             if (!sourceLoadMap[i]) continue;
             sourceNeedCount++;
             bool wasLoaded = ctx->sourcePages[i].loaded;
-            if (load_source_page_dyn(ctx, (int32_t) (ctx->repackBasePageId + i))) {
+            if (load_source_page_dyn(ctx, (int32_t)(ctx->repackBasePageId + i))) {
                 sourceReadyCount++;
                 if (!wasLoaded && ctx->sourcePages[i].loaded) sourceNewCount++;
             }
@@ -3251,32 +3082,38 @@ static void load_marked_room_pages(CtrRenderer *ctx, DataWin *dw) {
             if (ctx->sourcePages[i].loaded) sourceResidentCount++;
         }
         double sourceResidentMB =
-                0.0;
+            0.0;
         for (uint32_t i = 0; i < ctx->sourcePageCount; i++) {
             if (!ctx->sourcePages[i].loaded) continue;
-            sourceResidentMB += (double) ctx->sourcePages[i].dataSize / (1024.0 * 1024.0);
+            sourceResidentMB += (double)ctx->sourcePages[i].dataSize / (1024.0 * 1024.0);
         }
 
-        fprintf(stderr,
-                "CTR cache: room preload %lu TPAGs -> %lu/%lu atlas textures (%lu new, %lu resident, %.2f MB), %lu dynamic; linear free %.2f MB\n",
-                (unsigned long) markedTpagCount,
-                (unsigned long) sourceReadyCount,
-                (unsigned long) sourceNeedCount,
-                (unsigned long) sourceNewCount,
-                (unsigned long) sourceResidentCount,
-                sourceResidentMB,
-                (unsigned long) dynamicLoadCount,
-                (double) linearSpaceFree() / (1024.0 * 1024.0));
+        CTR_DIAG("CTR cache: room preload %lu TPAGs -> %lu/%lu atlas textures (%lu new, %lu resident, %.2f MB), %lu dynamic; linear free %.2f MB\n",
+                 (unsigned long)markedTpagCount,
+                 (unsigned long)sourceReadyCount,
+                 (unsigned long)sourceNeedCount,
+                 (unsigned long)sourceNewCount,
+                 (unsigned long)sourceResidentCount,
+                 sourceResidentMB,
+                 (unsigned long)dynamicLoadCount,
+                 (double)linearSpaceFree() / (1024.0 * 1024.0));
         free(sourceLoadMap);
     }
 }
 
+void CtrRenderer_prefetchTexturePage(Renderer *ren, int32_t tpagIdx) {
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+    if (!ctx || !ren || !ren->dataWin) return;
+    queue_tpag_prefetch(ctx, ren->dataWin, tpagIdx);
+    if (!ctx->inFrame) process_prefetch_queue(ctx, 1);
+}
+
 static void CtrRenderer_prefetchSprites(Renderer *ren, const int32_t *spriteIndices, uint32_t spriteCount) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     for (uint32_t i = 0; i < spriteCount; i++) {
-        mark_spr(ctx, ren->dataWin, spriteIndices[i]);
+        queue_sprite_prefetch(ctx, ren->dataWin, spriteIndices[i]);
     }
-    load_marked_room_pages(ctx, ren->dataWin);
+    if (!ctx->inFrame) process_prefetch_queue(ctx, 2);
 }
 
 void CtrRenderer_prefetchSprite(Renderer *ren, int32_t sprIdx) {
@@ -3284,10 +3121,16 @@ void CtrRenderer_prefetchSprite(Renderer *ren, int32_t sprIdx) {
 }
 
 static void ctr_on_room(Renderer *ren, int32_t rm) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     DataWin *dw = ren->dataWin;
-    if (rm < 0 || (uint32_t) rm >= dw->room.count) return;
+    if (rm < 0 || (uint32_t)rm >= dw->room.count) return;
     Room *room = &dw->room.rooms[rm];
+
+    ctx->prefetchQueueCount = 0;
+    ctx->currentRoomIndex = rm;
+    ctx->lazyLoadsThisRoom = 0;
+    snprintf(ctx->currentRoomName, sizeof(ctx->currentRoomName), "%s",
+             room->name ? room->name : "?");
 
     for (uint32_t i = 0; i < ctx->originalTpagCount && i < ctx->pageCount; i++)
         ctx->pages[i].keepResident = false;
@@ -3314,12 +3157,26 @@ static void ctr_on_room(Renderer *ren, int32_t rm) {
 
     unload_nonresident_source_pages(ctx);
     load_marked_room_pages(ctx, dw);
+    uint32_t warmupQueued = queue_room_warmup_pages(ctx, rm);
+    uint32_t hotQueued = 0;
+    uint32_t warmupLoaded = process_prefetch_queue(ctx, CTR_PREFETCH_ROOM_BUDGET);
+    (void)warmupQueued;
+    (void)hotQueued;
+    (void)warmupLoaded;
+    CTR_DIAG("CTR cache: queued warmup room=%d warmup=%lu hot=%lu loadedNow=%lu pending=%lu\n",
+             rm,
+             (unsigned long)warmupQueued,
+             (unsigned long)hotQueued,
+             (unsigned long)warmupLoaded,
+             (unsigned long)ctx->prefetchQueueCount);
 }
 
+// Surface API
+
 static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     if (width <= 0 || height <= 0) return -1;
-    if (width > 1024) width = 1024;
+    if (width  > 1024) width  = 1024;
     if (height > 1024) height = 1024;
 
     uint32_t slot = 0;
@@ -3345,12 +3202,14 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
         C3D_RenderTargetClear(surf->target, C3D_CLEAR_ALL, 0x00000000, 0);
         if (oldTgt) {
             C3D_FrameDrawOn(oldTgt);
+            // Re-bind shader/buffer state for the restored target so subsequent
+            // draws don't use stale BufInfo/AttrInfo from before the split.
             rebind_state(ctx);
             apply_projection(ctx, &ctx->currentProjection);
             apply_blend(ctx, ctx->currentBlendMode);
         }
 
-        return (int32_t) slot;
+        return (int32_t)slot;
     }
 
     surface_release_storage(ctx, surf);
@@ -3373,11 +3232,11 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
         apply_blend(ctx, ctx->currentBlendMode);
     }
 
-    return (int32_t) slot;
+    return (int32_t)slot;
 }
 
 static void ctr_free_surface(Renderer *ren, int32_t surfaceId) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     CtrSurface *surf = get_surface(ctx, surfaceId);
     if (!surf) return;
 
@@ -3390,11 +3249,11 @@ static void ctr_free_surface(Renderer *ren, int32_t surfaceId) {
 
 static bool ctr_surface_exists(Renderer *ren, int32_t surfaceId) {
     if (surfaceId < 0) return false;
-    return get_surface((CtrRenderer *) ren, surfaceId) != NULL;
+    return get_surface((CtrRenderer *)ren, surfaceId) != NULL;
 }
 
 static bool ctr_surface_get_size(Renderer *ren, int32_t surfaceId, int32_t *w, int32_t *h) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     if (surfaceId == -1) {
         if (w) *w = ctx->gameW;
         if (h) *h = ctx->gameH;
@@ -3408,7 +3267,7 @@ static bool ctr_surface_get_size(Renderer *ren, int32_t surfaceId, int32_t *w, i
 }
 
 static bool ctr_surface_set_target(Renderer *ren, int32_t surfaceId) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     CtrSurface *surf = get_surface(ctx, surfaceId);
     if (!surf || ctx->targetStackDepth >= CTR_TARGET_STACK_DEPTH) return false;
 
@@ -3416,24 +3275,24 @@ static bool ctr_surface_set_target(Renderer *ren, int32_t surfaceId) {
     C3D_FrameSplit(0);
 
     CtrTargetState *st = &ctx->targetStack[ctx->targetStackDepth++];
-    st->target = ctx->activeTarget ? ctx->activeTarget : ctx->appTarget;
-    st->viewport[0] = ctx->currentViewport[0];
-    st->viewport[1] = ctx->currentViewport[1];
-    st->viewport[2] = ctx->currentViewport[2];
-    st->viewport[3] = ctx->currentViewport[3];
+    st->target     = ctx->activeTarget ? ctx->activeTarget : ctx->appTarget;
+    st->viewport[0]= ctx->currentViewport[0];
+    st->viewport[1]= ctx->currentViewport[1];
+    st->viewport[2]= ctx->currentViewport[2];
+    st->viewport[3]= ctx->currentViewport[3];
     st->projection = ctx->currentProjection;
 
     bind_target(ctx, surf->target);
     set_viewport_logical(ctx, surf->target, 0, 0, surf->width, surf->height);
 
     C3D_Mtx proj;
-    make_ortho_topleft(&proj, (float) surf->width, (float) surf->height);
+    make_ortho_topleft(&proj, (float)surf->width, (float)surf->height);
     apply_projection(ctx, &proj);
     return true;
 }
 
 static void ctr_surface_reset_target(Renderer *ren) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     if (ctx->targetStackDepth <= 0) return;
 
     flush_batch(ctx);
@@ -3451,41 +3310,35 @@ static void ctr_surface_reset_target(Renderer *ren) {
 static void ctr_draw_surface(Renderer *ren, int32_t surfaceId,
                              float x, float y, float xscale, float yscale,
                              float angleDeg, uint32_t color, float alpha) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    float c[4];
-    col2fv(color, alpha, c);
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+    float c[4]; col2fv(color, alpha, c);
     if (c[3] <= 0.f) return;
 
-    C3D_Tex *tex;
-    int drawW, drawH, sampleW, sampleH, potW, potH;
+    C3D_Tex *tex; int drawW, drawH, potW, potH;
     C3D_RenderTarget *sourceTarget = NULL;
     if (surfaceId == -1) {
         if (!ctx->appReady) return;
-        tex = &ctx->appTex;
+        tex   = &ctx->appTex;
         drawW = ctx->appLogicW;
         drawH = ctx->appLogicH;
-        sampleW = ctx->appRenderW;
-        sampleH = ctx->appRenderH;
-        potW = ctx->appPotW;
-        potH = ctx->appPotH;
+        potW  = ctx->appPotW;
+        potH  = ctx->appPotH;
         sourceTarget = ctx->appTarget;
     } else {
         CtrSurface *surf = get_surface(ctx, surfaceId);
         if (!surf) return;
-        tex = &surf->tex;
+        tex   = &surf->tex;
         drawW = surf->width;
         drawH = surf->height;
-        sampleW = surf->width;
-        sampleH = surf->height;
-        potW = surf->potW;
-        potH = surf->potH;
+        potW  = surf->potW;
+        potH  = surf->potH;
         sourceTarget = surf->target;
     }
     if (sourceTarget && sourceTarget == ctx->activeTarget) return;
 
     float w = drawW * xscale, h = drawH * yscale;
-    float u1 = (float) sampleW / (float) potW;
-    float v0 = (float) (potH - sampleH) / (float) potH;
+    float u1 = (float)drawW / (float)potW;
+    float v0 = (float)(potH - drawH) / (float)potH;
     float v1 = 1.f;
 
     float x0 = 0, y0 = 0;
@@ -3494,7 +3347,7 @@ static void ctr_draw_surface(Renderer *ren, int32_t surfaceId,
     float x3 = 0, y3 = h;
 
     if (angleDeg != 0.f) {
-        float rad = -angleDeg * (float) (M_PI / 180.f);
+        float rad = -angleDeg * (float)(M_PI / 180.f);
         float sn = sinf(rad), cs = cosf(rad);
         float pts[4][2] = {{x0, y0}, {x1, y1}, {x2, y2}, {x3, y3}};
         for (int i = 0; i < 4; i++) {
@@ -3502,199 +3355,39 @@ static void ctr_draw_surface(Renderer *ren, int32_t surfaceId,
             pts[i][0] = qx * cs - qy * sn;
             pts[i][1] = qx * sn + qy * cs;
         }
-        x0 = pts[0][0];
-        y0 = pts[0][1];
-        x1 = pts[1][0];
-        y1 = pts[1][1];
-        x2 = pts[2][0];
-        y2 = pts[2][1];
-        x3 = pts[3][0];
-        y3 = pts[3][1];
+        x0=pts[0][0]; y0=pts[0][1]; x1=pts[1][0]; y1=pts[1][1];
+        x2=pts[2][0]; y2=pts[2][1]; x3=pts[3][0]; y3=pts[3][1];
     }
 
     if (quad_culled(ctx, x + x0, y + y0, x + x1, y + y1,
-                    x + x2, y + y2, x + x3, y + y3))
-        return;
+                          x + x2, y + y2, x + x3, y + y3)) return;
 
     flush_batch(ctx);
+    // Surface texture must be fully resolved before sampling; FrameSplit forces a
+    // GPU sync point. Use the safe variant — without rebind, the queued push_quad
+    // is later drawn with stale BufInfo/AttrInfo, which manifests as missing
+    // tiles in tile-heavy rooms (e.g. the Undyne bridge).
     ctr_safe_frame_split(ctx);
     push_quad(ctx, tex,
-              x + x0, y + y0, x + x1, y + y1,
-              x + x2, y + y2, x + x3, y + y3,
+              x + x0, y + y0,  x + x1, y + y1,
+              x + x2, y + y2,  x + x3, y + y3,
               0.f, v1, u1, v0, c);
 }
 
 static void ctr_clear_target(Renderer *ren, uint32_t color, float alpha) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     flush_batch(ctx);
     if (!ctx->inFrame || !ctx->activeTarget) return;
 
     uint8_t r = BGR_R(color), g = BGR_G(color), b = BGR_B(color), aa = clamp_u8(alpha);
-    uint32_t rgba = ((uint32_t) r << 24) | ((uint32_t) g << 16) | ((uint32_t) b << 8) | aa;
+    uint32_t rgba = ((uint32_t)r << 24) | ((uint32_t)g << 16) | ((uint32_t)b << 8) | aa;
+    // Use the safe variant: a bare C3D_FrameSplit leaves BufInfo/AttrInfo stale,
+    // and the next batched draw on this target then reads garbage vertices.
     ctr_safe_frame_split(ctx);
     C3D_RenderTargetClear(ctx->activeTarget, C3D_CLEAR_ALL, rgba, 0);
 }
-static void ctr_clear_screen(Renderer *ren, uint32_t color) {
-    ctr_clear_target(ren, color, 1.0f);
-}
 
-static void ctr_draw_surface_part(Renderer *ren, int32_t surfaceId,
-                                  int32_t x, int32_t y,
-                                  int32_t left, int32_t top, int32_t width, int32_t height,
-                                  float xscale, float yscale,
-                                  uint32_t color, float alpha) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    float c[4];
-    col2fv(color, alpha, c);
-    if (c[3] <= 0.f) return;
-
-    C3D_Tex *tex;
-    int srcW, srcH, potW, potH;
-    C3D_RenderTarget *sourceTarget;
-    if (surfaceId == -1) {
-        if (!ctx->appReady) return;
-        tex = &ctx->appTex;
-        srcW = ctx->appRenderW;
-        srcH = ctx->appRenderH;
-        potW = ctx->appPotW;
-        potH = ctx->appPotH;
-        sourceTarget = ctx->appTarget;
-    } else {
-        CtrSurface *surf = get_surface(ctx, surfaceId);
-        if (!surf) return;
-        tex = &surf->tex;
-        srcW = surf->width;
-        srcH = surf->height;
-        potW = surf->potW;
-        potH = surf->potH;
-        sourceTarget = surf->target;
-    }
-    if (sourceTarget && sourceTarget == ctx->activeTarget) return;
-    if (left < 0) { width += left; x += (int32_t)(-left * xscale); left = 0; }
-    if (top  < 0) { height += top; y += (int32_t)(-top  * yscale); top  = 0; }
-    if (left + width > srcW)  width  = srcW - left;
-    if (top  + height > srcH) height = srcH - top;
-    if (width <= 0 || height <= 0) return;
-    float u0 = (float) left / (float) potW;
-    float u1 = (float) (left + width) / (float) potW;
-    float v0 = (float) (potH - top) / (float) potH;
-    float v1 = (float) (potH - (top + height)) / (float) potH;
-
-    float dstW = (float) width * xscale;
-    float dstH = (float) height * yscale;
-    float fx = (float) x;
-    float fy = (float) y;
-
-    if (quad_culled(ctx, fx, fy, fx + dstW, fy, fx + dstW, fy + dstH, fx, fy + dstH)) return;
-
-    flush_batch(ctx);
-    ctr_safe_frame_split(ctx);
-    push_quad(ctx, tex,
-              fx,        fy,
-              fx + dstW, fy,
-              fx + dstW, fy + dstH,
-              fx,        fy + dstH,
-              u0, v0, u1, v1, c);
-}
-
-static void ctr_draw_surface_stretched(Renderer *ren, int32_t surfaceId,
-                                       float x, float y, float width, float height) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    if (width <= 0.f || height <= 0.f) return;
-
-    int32_t srcW = 0, srcH = 0;
-    if (!ctr_surface_get_size(ren, surfaceId, &srcW, &srcH)) return;
-    if (srcW <= 0 || srcH <= 0) return;
-
-    float xs = width  / (float) srcW;
-    float ys = height / (float) srcH;
-    uint32_t color = ren->drawColor;
-    float alpha = ren->drawAlpha;
-    ctr_draw_surface(ren, surfaceId, x, y, xs, ys, 0.0f, color, alpha);
-    (void) ctx;
-}
-
-static void ctr_surface_resize(Renderer *ren, int32_t surfaceId, int32_t width, int32_t height) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    CtrSurface *surf = get_surface(ctx, surfaceId);
-    if (!surf || width <= 0 || height <= 0) return;
-    if (surf->width == width && surf->height == height) return;
-    flush_batch(ctx);
-    if (ctx->inFrame) ctr_safe_frame_split(ctx);
-    bool wasActive = (ctx->activeTarget == surf->target);
-    if (wasActive) bind_target(ctx, ctx->appTarget);
-
-    surface_release_storage(ctx, surf);
-    memset(surf, 0, sizeof(*surf));
-    if (!surface_alloc_storage(surf, width, height)) {
-        return;
-    }
-    surf->used = true;
-
-    if (ctx->inFrame) {
-        C3D_RenderTarget *oldTgt = ctx->activeTarget;
-        C3D_FrameDrawOn(surf->target);
-        C3D_RenderTargetClear(surf->target, C3D_CLEAR_ALL, 0x00000000, 0);
-        if (oldTgt) {
-            C3D_FrameDrawOn(oldTgt);
-            rebind_state(ctx);
-            apply_projection(ctx, &ctx->currentProjection);
-            apply_blend(ctx, ctx->currentBlendMode);
-        }
-    }
-}
-static void ctr_surface_copy(Renderer *ren,
-                             int32_t destSurfaceId, int32_t destX, int32_t destY,
-                             int32_t srcSurfaceId, int32_t srcX, int32_t srcY,
-                             int32_t srcW, int32_t srcH, bool part) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    if (destSurfaceId < 0) return;
-    CtrSurface *dst = get_surface(ctx, destSurfaceId);
-    if (!dst || !dst->target) return;
-
-    int32_t fullW = 0, fullH = 0;
-    if (!ctr_surface_get_size(ren, srcSurfaceId, &fullW, &fullH)) return;
-    if (!part) {
-        srcX = 0;
-        srcY = 0;
-        srcW = fullW;
-        srcH = fullH;
-    }
-    if (srcW <= 0 || srcH <= 0) return;
-    flush_batch(ctx);
-    if (ctx->inFrame) ctr_safe_frame_split(ctx);
-
-    if (ctx->targetStackDepth >= CTR_TARGET_STACK_DEPTH) return;
-    CtrTargetState *st = &ctx->targetStack[ctx->targetStackDepth++];
-    st->target = ctx->activeTarget ? ctx->activeTarget : ctx->appTarget;
-    st->viewport[0] = ctx->currentViewport[0];
-    st->viewport[1] = ctx->currentViewport[1];
-    st->viewport[2] = ctx->currentViewport[2];
-    st->viewport[3] = ctx->currentViewport[3];
-    st->projection = ctx->currentProjection;
-    int savedBlend = ctx->currentBlendMode;
-
-    bind_target(ctx, dst->target);
-    set_viewport_logical(ctx, dst->target, 0, 0, dst->width, dst->height);
-
-    C3D_Mtx proj;
-    make_ortho_topleft(&proj, (float) dst->width, (float) dst->height);
-    apply_projection(ctx, &proj);
-    apply_blend(ctx, 0);
-
-    ctr_draw_surface_part(ren, srcSurfaceId, destX, destY, srcX, srcY, srcW, srcH, 1.0f, 1.0f, 0xFFFFFFu, 1.0f);
-
-    flush_batch(ctx);
-    ctr_safe_frame_split(ctx);
-    CtrTargetState restored = ctx->targetStack[--ctx->targetStackDepth];
-    C3D_RenderTarget *tgt = restored.target ? restored.target : ctx->appTarget;
-    bind_target(ctx, tgt);
-    set_viewport_logical(ctx, tgt,
-                         restored.viewport[0], restored.viewport[1],
-                         restored.viewport[2], restored.viewport[3]);
-    apply_projection(ctx, &restored.projection);
-    apply_blend(ctx, savedBlend);
-}
+// Sprite capture
 
 static uint32_t findOrAllocTpagSlot(CtrRenderer *ctx) {
     DataWin *dw = ctx->base.dataWin;
@@ -3702,11 +3395,8 @@ static uint32_t findOrAllocTpagSlot(CtrRenderer *ctx) {
         if (dw->tpag.items[i].texturePageId == -1) return i;
     }
     uint32_t newIndex = dw->tpag.count;
-    uint32_t oldCount = dw->tpag.count;
     dw->tpag.count++;
-    dw->tpag.items = bigRealloc(dw->tpag.items,
-                                (size_t)oldCount * sizeof(TexturePageItem),
-                                (size_t)dw->tpag.count * sizeof(TexturePageItem));
+    dw->tpag.items = safeRealloc(dw->tpag.items, dw->tpag.count * sizeof(TexturePageItem));
     memset(&dw->tpag.items[newIndex], 0, sizeof(TexturePageItem));
     dw->tpag.items[newIndex].texturePageId = -1;
 
@@ -3722,51 +3412,63 @@ static uint32_t findOrAllocTpagSlot(CtrRenderer *ctx) {
 static int32_t ctr_create_surf_ex(Renderer *ren, int32_t surfaceId,
                                   int32_t x, int32_t y, int32_t w, int32_t h,
                                   bool removeback, bool smooth, int32_t xo, int32_t yo) {
-    (void) removeback;
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    (void)removeback;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     DataWin *dw = ren->dataWin;
 
     if (w <= 0 || h <= 0) return -1;
 
     C3D_Tex *srcTex;
     int sourcePotW, sourcePotH;
-    float sourceScaleX = 1.f;
-    float sourceScaleY = 1.f;
 
     if (surfaceId == -1) {
         if (!ctx->appReady) return -1;
-        srcTex = &ctx->appTex;
+        srcTex     = &ctx->appTex;
         sourcePotW = ctx->appPotW;
         sourcePotH = ctx->appPotH;
-        if (ctx->appLogicW > 0 && ctx->appLogicH > 0) {
-            sourceScaleX = (float) ctx->appRenderW / (float) ctx->appLogicW;
-            sourceScaleY = (float) ctx->appRenderH / (float) ctx->appLogicH;
-        }
     } else {
         CtrSurface *surf = get_surface(ctx, surfaceId);
         if (!surf) return -1;
-        srcTex = &surf->tex;
+        srcTex     = &surf->tex;
         sourcePotW = surf->potW;
         sourcePotH = surf->potH;
     }
 
-    C3D_RenderTarget *oldTgt = ctx->activeTarget ? ctx->activeTarget : ctx->appTarget;
+    C3D_RenderTarget *oldTgt = ctx->inFrame
+                                   ? (ctx->activeTarget ? ctx->activeTarget : ctx->appTarget)
+                                   : ctx->activeTarget;
     C3D_Mtx oldProj = ctx->currentProjection;
-    int oldVp[4] = {ctx->currentViewport[0], ctx->currentViewport[1], ctx->currentViewport[2], ctx->currentViewport[3]};
+    int oldVp[4] = { ctx->currentViewport[0], ctx->currentViewport[1], ctx->currentViewport[2], ctx->currentViewport[3] };
     int oldBlend = ctx->currentBlendMode;
 
     int potW = next_pow2(w), potH = next_pow2(h);
     CtrAtlasChunk dstChunk;
     memset(&dstChunk, 0, sizeof(dstChunk));
 
-    if (!C3D_TexInitVRAM(&dstChunk.tex, (u16) potW, (u16) potH, GPU_RGBA8)) {
-        if (!C3D_TexInit(&dstChunk.tex, (u16) potW, (u16) potH, GPU_RGBA8)) return -1;
+    if (!C3D_TexInitVRAM(&dstChunk.tex, (u16)potW, (u16)potH, GPU_RGBA8)) {
+        if (!C3D_TexInit(&dstChunk.tex, (u16)potW, (u16)potH, GPU_RGBA8)) return -1;
     }
     C3D_TexSetFilter(&dstChunk.tex, smooth ? GPU_LINEAR : GPU_NEAREST, smooth ? GPU_LINEAR : GPU_NEAREST);
     C3D_TexSetWrap(&dstChunk.tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
     C3D_RenderTarget *tmpTarget = C3D_RenderTargetCreateFromTex(&dstChunk.tex, GPU_TEXFACE_2D, 0, -1);
     if (tmpTarget) {
+        bool ownFrame = false;
+        if (!ctx->inFrame) {
+            if (!C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) {
+                C3D_RenderTargetDelete(tmpTarget);
+                C3D_TexDelete(&dstChunk.tex);
+                return -1;
+            }
+            ownFrame = true;
+            ctx->inFrame = true;
+            ctx->activeTarget = NULL;
+            ctx->vbufHead   = 0;
+            ctx->batchStart = 0;
+            ctx->batchVerts = 0;
+            ctx->batchTex   = NULL;
+        }
+
         bind_target(ctx, tmpTarget);
         C3D_RenderTargetClear(tmpTarget, C3D_CLEAR_ALL, 0x00000000, 0);
 
@@ -3776,86 +3478,78 @@ static int32_t ctr_create_surf_ex(Renderer *ren, int32_t surfaceId,
 
         C3D_Mtx proj;
         Mtx_Identity(&proj);
-        Mtx_Ortho(&proj, 0.f, (float) w, (float) h, 0.f, -1.f, 1.f, true);
+        Mtx_Ortho(&proj, 0.f, (float)w, (float)h, 0.f, -1.f, 1.f, true);
         apply_projection(ctx, &proj);
 
-        float srcX0 = (float) x * sourceScaleX;
-        float srcY0 = (float) y * sourceScaleY;
-        float srcX1 = (float) (x + w) * sourceScaleX;
-        float srcY1 = (float) (y + h) * sourceScaleY;
-        float u0 = srcX0 / (float) sourcePotW;
-        float u1 = srcX1 / (float) sourcePotW;
-        float vTop = (float) sourcePotH - srcY0;
-        float vBot = (float) sourcePotH - srcY1;
-        vTop /= (float) sourcePotH;
-        vBot /= (float) sourcePotH;
+        float u0 = (float)x / (float)sourcePotW;
+        float u1 = (float)(x + w) / (float)sourcePotW;
+        float vTop = (float)(sourcePotH - y) / (float)sourcePotH;
+        float vBot = (float)(sourcePotH - (y + h)) / (float)sourcePotH;
 
         float white[4] = {1.f, 1.f, 1.f, 1.f};
 
         push_quad(ctx, srcTex,
-                  0, 0, w, 0,
-                  w, h, 0, h,
+                  0, 0,  w, 0,
+                  w, h,  0, h,
                   u0, vBot, u1, vTop, white);
 
         flush_batch(ctx);
-        C3D_FrameSplit(0);
+        if (ownFrame) {
+            C3D_FrameEnd(0);
+            ctx->inFrame = false;
+            ctx->activeTarget = NULL;
+            C3D_RenderTargetDelete(tmpTarget);
+        } else {
+            C3D_FrameSplit(0);
 
-        gc_add_target(tmpTarget);
+            gc_add_target(tmpTarget);
 
-        bind_target(ctx, oldTgt);
-        set_viewport_logical(ctx, oldTgt, oldVp[0], oldVp[1], oldVp[2], oldVp[3]);
-        apply_projection(ctx, &oldProj);
-        apply_blend(ctx, oldBlend);
+            bind_target(ctx, oldTgt);
+            set_viewport_logical(ctx, oldTgt, oldVp[0], oldVp[1], oldVp[2], oldVp[3]);
+            apply_projection(ctx, &oldProj);
+            apply_blend(ctx, oldBlend);
+        }
     } else {
         C3D_TexDelete(&dstChunk.tex);
         return -1;
     }
 
-    dstChunk.valid = true;
-    dstChunk.srcX = 0;
-    dstChunk.srcY = 0;
-    dstChunk.width = w;
+    dstChunk.valid  = true;
+    dstChunk.srcX   = 0;
+    dstChunk.srcY   = 0;
+    dstChunk.width  = w;
     dstChunk.height = h;
-    dstChunk.potW = potW;
-    dstChunk.potH = potH;
+    dstChunk.potW   = potW;
+    dstChunk.potH   = potH;
 
     uint32_t tpagIndex = findOrAllocTpagSlot(ctx);
     TexturePageItem *tpag = &dw->tpag.items[tpagIndex];
-    tpag->sourceX = 0;
-    tpag->sourceY = 0;
-    tpag->sourceWidth = (uint16_t) w;
-    tpag->sourceHeight = (uint16_t) h;
-    tpag->targetX = 0;
-    tpag->targetY = 0;
-    tpag->targetWidth = (uint16_t) w;
-    tpag->targetHeight = (uint16_t) h;
-    tpag->boundingWidth = (uint16_t) w;
-    tpag->boundingHeight = (uint16_t) h;
-    tpag->texturePageId = (int16_t) tpagIndex;
+    tpag->sourceX = 0; tpag->sourceY = 0;
+    tpag->sourceWidth   = (uint16_t)w; tpag->sourceHeight   = (uint16_t)h;
+    tpag->targetX = 0; tpag->targetY = 0;
+    tpag->targetWidth   = (uint16_t)w; tpag->targetHeight   = (uint16_t)h;
+    tpag->boundingWidth = (uint16_t)w; tpag->boundingHeight = (uint16_t)h;
+    tpag->texturePageId = (int16_t)tpagIndex;
 
     CtrPage *page = &ctx->pages[tpagIndex];
     memset(page, 0, sizeof(*page));
     page->loaded = true;
     page->keepResident = true;
-    page->origW = w;
-    page->origH = h;
-    page->chunksX = 1;
-    page->chunksY = 1;
+    page->origW = w; page->origH = h;
+    page->chunksX = 1; page->chunksY = 1;
     page->chunks[0][0] = dstChunk;
 
     uint32_t spriteIndex = DataWin_allocSpriteSlot(dw, ctx->originalSpriteCount);
     Sprite *sprite = &dw->sprt.sprites[spriteIndex];
-    sprite->width = (uint32_t) w;
-    sprite->height = (uint32_t) h;
-    sprite->originX = xo;
-    sprite->originY = yo;
+    sprite->width = (uint32_t)w; sprite->height = (uint32_t)h;
+    sprite->originX = xo; sprite->originY = yo;
     sprite->textureCount = 1;
     sprite->tpagIndices = safeMalloc(sizeof(int32_t));
-    sprite->tpagIndices[0] = (int32_t) tpagIndex;
+    sprite->tpagIndices[0] = (int32_t)tpagIndex;
     sprite->maskCount = 0;
     sprite->masks = NULL;
 
-    return (int32_t) spriteIndex;
+    return (int32_t)spriteIndex;
 }
 
 static int32_t ctr_create_surf(Renderer *ren, int32_t x, int32_t y, int32_t w, int32_t h,
@@ -3863,108 +3557,11 @@ static int32_t ctr_create_surf(Renderer *ren, int32_t x, int32_t y, int32_t w, i
     return ctr_create_surf_ex(ren, -1, x, y, w, h, rb, sm, xo, yo);
 }
 
-static int32_t ctr_create_sprite_rgba(Renderer *ren, const uint8_t *rgba,
-                                      int32_t w, int32_t h,
-                                      bool removeback, bool smooth,
-                                      int32_t xo, int32_t yo) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    DataWin *dw = ren->dataWin;
-    if (!rgba || w <= 0 || h <= 0) return -1;
-
-    int potW = next_pow2(w);
-    int potH = next_pow2(h);
-    uint16_t *linear = calloc((size_t) potW * (size_t) potH, sizeof(uint16_t));
-    if (!linear) return -1;
-
-    uint8_t keyR = rgba[0], keyG = rgba[1], keyB = rgba[2];
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            const uint8_t *p = &rgba[((size_t) y * (size_t) w + (size_t) x) * 4u];
-            uint8_t a = p[3];
-            if (removeback && p[0] == keyR && p[1] == keyG && p[2] == keyB) a = 0;
-            linear[y * potW + x] = pack_rgba4444(p[0], p[1], p[2], a);
-        }
-    }
-
-    CtrAtlasChunk dstChunk;
-    memset(&dstChunk, 0, sizeof(dstChunk));
-    if (!C3D_TexInit(&dstChunk.tex, (u16) potW, (u16) potH, GPU_RGBA4)) {
-        free(linear);
-        return -1;
-    }
-    C3D_TexSetFilter(&dstChunk.tex,
-                     smooth ? GPU_LINEAR : GPU_NEAREST,
-                     smooth ? GPU_LINEAR : GPU_NEAREST);
-    C3D_TexSetWrap(&dstChunk.tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
-
-    uint16_t *tiled = linearAlloc((size_t) potW * (size_t) potH * sizeof(uint16_t));
-    if (!tiled) {
-        C3D_TexDelete(&dstChunk.tex);
-        free(linear);
-        return -1;
-    }
-    tile_rgba4(linear, tiled, potW, potH, potW, potH);
-    free(linear);
-    C3D_TexLoadImage(&dstChunk.tex, tiled, GPU_TEXFACE_2D, 0);
-    C3D_TexFlush(&dstChunk.tex);
-    linearFree(tiled);
-
-    dstChunk.valid = true;
-    dstChunk.srcX = 0;
-    dstChunk.srcY = 0;
-    dstChunk.width = w;
-    dstChunk.height = h;
-    dstChunk.potW = potW;
-    dstChunk.potH = potH;
-
-    uint32_t tpagIndex = findOrAllocTpagSlot(ctx);
-    TexturePageItem *tpag = &dw->tpag.items[tpagIndex];
-    tpag->sourceX = 0;
-    tpag->sourceY = 0;
-    tpag->sourceWidth = (uint16_t) w;
-    tpag->sourceHeight = (uint16_t) h;
-    tpag->targetX = 0;
-    tpag->targetY = 0;
-    tpag->targetWidth = (uint16_t) w;
-    tpag->targetHeight = (uint16_t) h;
-    tpag->boundingWidth = (uint16_t) w;
-    tpag->boundingHeight = (uint16_t) h;
-    tpag->texturePageId = (int16_t) tpagIndex;
-
-    CtrPage *page = &ctx->pages[tpagIndex];
-    memset(page, 0, sizeof(*page));
-    page->loaded = true;
-    page->keepResident = true;
-    page->origW = w;
-    page->origH = h;
-    page->chunksX = 1;
-    page->chunksY = 1;
-    page->chunks[0][0] = dstChunk;
-
-    uint32_t spriteIndex = DataWin_allocSpriteSlot(dw, ctx->originalSpriteCount);
-    Sprite *sprite = &dw->sprt.sprites[spriteIndex];
-    sprite->width = (uint32_t) w;
-    sprite->height = (uint32_t) h;
-    sprite->marginLeft = 0;
-    sprite->marginRight = w - 1;
-    sprite->marginTop = 0;
-    sprite->marginBottom = h - 1;
-    sprite->originX = xo;
-    sprite->originY = yo;
-    sprite->textureCount = 1;
-    sprite->tpagIndices = safeMalloc(sizeof(int32_t));
-    sprite->tpagIndices[0] = (int32_t) tpagIndex;
-    sprite->maskCount = 0;
-    sprite->masks = NULL;
-
-    return (int32_t) spriteIndex;
-}
-
 static void ctr_del_sprite(Renderer *ren, int32_t spriteIndex) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     DataWin *dw = ren->dataWin;
-    if (spriteIndex < 0 || (uint32_t) spriteIndex >= dw->sprt.count) return;
-    if ((uint32_t) spriteIndex < ctx->originalSpriteCount) return;
+    if (spriteIndex < 0 || (uint32_t)spriteIndex >= dw->sprt.count) return;
+    if ((uint32_t)spriteIndex < ctx->originalSpriteCount) return;
 
     Sprite *sprite = &dw->sprt.sprites[spriteIndex];
     if (sprite->textureCount == 0) return;
@@ -3973,10 +3570,10 @@ static void ctr_del_sprite(Renderer *ren, int32_t spriteIndex) {
 
     for (uint32_t i = 0; i < sprite->textureCount; i++) {
         int32_t tpagIdx = sprite->tpagIndices[i];
-        if (tpagIdx < 0 || (uint32_t) tpagIdx < ctx->originalTpagCount) continue;
+        if (tpagIdx < 0 || (uint32_t)tpagIdx < ctx->originalTpagCount) continue;
 
         TexturePageItem *tpag = &dw->tpag.items[tpagIdx];
-        if ((uint32_t) tpagIdx < ctx->pageCount) {
+        if ((uint32_t)tpagIdx < ctx->pageCount) {
             CtrPage *page = &ctx->pages[tpagIdx];
             if (page->loaded) {
                 for (int cx = 0; cx < page->chunksX; cx++) {
@@ -3997,18 +3594,20 @@ static void ctr_del_sprite(Renderer *ren, int32_t spriteIndex) {
     sprite->name = keep;
 }
 
+// Misc
+
 static void ctr_gpu_blend_mode(Renderer *ren, int32_t mode) {
-    apply_blend((CtrRenderer *) ren, mode);
+    apply_blend((CtrRenderer *)ren, mode);
 }
 
 static void ctr_gpu_blend_mode_ext(Renderer *ren, int32_t sfactor, int32_t dfactor) {
-    (void) ren;
-    (void) sfactor;
-    (void) dfactor;
+    (void)ren;
+    (void)sfactor;
+    (void)dfactor;
 }
 
 static void ctr_gpu_blend_enable(Renderer *ren, bool enable) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     if (enable) {
         apply_blend(ctx, ctx->currentBlendMode);
     } else {
@@ -4018,102 +3617,57 @@ static void ctr_gpu_blend_enable(Renderer *ren, bool enable) {
 }
 
 static void ctr_gpu_alpha_test_enable(Renderer *ren, bool enable) {
-    (void) ren;
-    (void) enable;
+    (void)ren;
+    (void)enable;
 }
 
 static void ctr_gpu_alpha_test_ref(Renderer *ren, uint8_t ref) {
-    (void) ren;
-    (void) ref;
+    (void)ren;
+    (void)ref;
 }
 
 static void ctr_gpu_color_write_enable(Renderer *ren, bool r, bool g, bool b, bool a) {
-    (void) ren;
-    (void) r;
-    (void) g;
-    (void) b;
-    (void) a;
+    (void)ren;
+    (void)r;
+    (void)g;
+    (void)b;
+    (void)a;
 }
 
 static void ctr_set_blend(Renderer *ren, int32_t mode) {
-    apply_blend((CtrRenderer *) ren, mode);
-}
-
-void CtrRenderer_beginEye(Renderer *ren, int eye, float slider) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    if (!ctx) return;
-    if (eye == 1 && ctx->appTargetRight == NULL) {
-        eye = 0;
-        slider = 0.0f;
-    }
-    ctx->currentEye = eye;
-    ctx->depthSlider = slider;
-    ctx->current3DDepth = 0;
-
-    C3D_RenderTarget *currentDestTarget = (eye == 1) ? ctx->appTargetRight : ctx->appTarget;
-
-    if (currentDestTarget != NULL && ctx->inFrame) {
-        if (ctx->activeTarget != currentDestTarget) {
-            flush_batch(ctx);
-            C3D_FrameSplit(0);
-            C3D_FrameDrawOn(currentDestTarget);
-            ctx->activeTarget = currentDestTarget;
-            rebind_state(ctx);
-            apply_projection(ctx, &ctx->currentProjection);
-        }
-    }
-}
-
-bool CtrRenderer_hasRightEye(Renderer *ren) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    return ctx != NULL && ctx->appTargetRight != NULL;
+    apply_blend((CtrRenderer *)ren, mode);
 }
 
 static void ctr_set_3d_depth(Renderer *ren, float depth) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    ctx->current3DDepth = depth;
-
-    if (ctx->isGUI || ctx->depthSlider <= 0.01f) {
-        ctx->currentShiftX = 0.0f;
-        return;
-    }
-    float d = ctx->current3DDepth / 3000.0f;
-
-    if (d > 4.0f) d = 4.0f;
-    if (d < -4.0f) d = -4.0f;
-    float separation = d * 2.0f * ctx->depthSlider;
-
-    ctx->currentShiftX = (ctx->currentEye == 0) ? -separation : separation;
+    (void)ren; (void)depth;
 }
 
+// Renderer vtable
+
 static RendererVtable vtable = {
-    .init = ctr_init, .destroy = ctr_destroy,
-    .beginFrame = ctr_begin_frame, .endFrame = ctr_end_frame,
-    .beginView = ctr_begin_view, .endView = ctr_end_view,
-    .beginGUI = ctr_begin_gui, .endGUI = ctr_end_gui,
+    .init = ctr_init,                            .destroy = ctr_destroy,
+    .beginFrame = ctr_begin_frame,               .endFrame = ctr_end_frame,
+    .beginView = ctr_begin_view,                 .endView = ctr_end_view,
+    .beginGUI = ctr_begin_gui,                   .endGUI = ctr_end_gui,
     .drawSprite = ctr_draw_sprite,
     .drawSpritePart = ctr_draw_sprite_part,
     .drawSpritePos = ctr_draw_sprite_pos,
     .drawRectangle = ctr_draw_rect,
     .drawRectangleColor = ctr_draw_rect_c,
-    .drawLine = ctr_draw_line, .drawLineColor = ctr_draw_line_c,
-    .drawTriangle = ctr_draw_tri, .drawTriangleColor = ctr_draw_tri_c,
-    .drawText = ctr_draw_text, .drawTextColor = ctr_draw_text_c,
+    .drawLine = ctr_draw_line,                   .drawLineColor = ctr_draw_line_c,
+    .drawTriangle = ctr_draw_tri,                .drawTriangleColor = ctr_draw_tri_c,
+    .drawText = ctr_draw_text,                   .drawTextColor = ctr_draw_text_c,
     .flush = ctr_flush,
+    .prefetchTexturePage = CtrRenderer_prefetchTexturePage,
     .prefetchSprite = CtrRenderer_prefetchSprite,
     .prefetchSprites = CtrRenderer_prefetchSprites,
-    .createSpriteFromSurface = ctr_create_surf_ex,
-    .createSpriteFromRgba = ctr_create_sprite_rgba,
+    .createSpriteFromSurface = ctr_create_surf,
+    .createSpriteFromSurfaceEx = ctr_create_surf_ex,
     .deleteSprite = ctr_del_sprite,
-    .createSurface = ctr_create_surface, .freeSurface = ctr_free_surface,
-    .surfaceExists = ctr_surface_exists, .surfaceGetSize = ctr_surface_get_size,
-    .surfaceSetTarget = ctr_surface_set_target, .surfaceResetTarget = ctr_surface_reset_target,
+    .createSurface = ctr_create_surface,         .freeSurface = ctr_free_surface,
+    .surfaceExists = ctr_surface_exists,         .surfaceGetSize = ctr_surface_get_size,
+    .surfaceSetTarget = ctr_surface_set_target,  .surfaceResetTarget = ctr_surface_reset_target,
     .drawSurface = ctr_draw_surface,
-    .drawSurfacePart = ctr_draw_surface_part,
-    .drawSurfaceStretched = ctr_draw_surface_stretched,
-    .surfaceResize = ctr_surface_resize,
-    .surfaceCopy = ctr_surface_copy,
-    .clearScreen = ctr_clear_screen,
     .clearTarget = ctr_clear_target,
     .gpuSetBlendMode = ctr_gpu_blend_mode,
     .gpuSetBlendModeExt = ctr_gpu_blend_mode_ext,
@@ -4121,49 +3675,19 @@ static RendererVtable vtable = {
     .gpuSetAlphaTestEnable = ctr_gpu_alpha_test_enable,
     .gpuSetAlphaTestRef = ctr_gpu_alpha_test_ref,
     .gpuSetColorWriteEnable = ctr_gpu_color_write_enable,
-    .drawTile = ctr_draw_tile, .drawTiled = ctr_draw_tiled,
-    .drawCircle = ctr_draw_circle, .drawEllipse = ctr_draw_ellipse,
+    .drawTile = ctr_draw_tile,                   .drawTiled = ctr_draw_tiled,
+    .drawCircle = ctr_draw_circle,               .drawEllipse = ctr_draw_ellipse,
     .drawRoundrect = ctr_draw_rr,
     .onRoomChanged = ctr_on_room,
-    .set3DDepthOffset = ctr_set_3d_depth, .setBlendMode = ctr_set_blend,
+    .set3DDepthOffset = ctr_set_3d_depth,        .setBlendMode = ctr_set_blend,
 };
 
 Renderer *CtrRenderer_create(void) {
     CtrRenderer *ctx = calloc(1, sizeof(CtrRenderer));
-    ctx->base.vtable = &vtable;
-    ctx->base.drawColor = 0xFFFFFF;
-    ctx->base.drawAlpha = 1.0f;
-    ctx->base.drawFont = -1;
+    ctx->base.vtable          = &vtable;
+    ctx->base.drawColor       = 0xFFFFFF;
+    ctx->base.drawAlpha       = 1.0f;
+    ctx->base.drawFont        = -1;
     ctx->base.circlePrecision = 36;
-    ctx->stereoEnabled = false;
-    ctx->pendingLoadCount = 0;
-    return (Renderer *) ctx;
-}
-
-void CtrRenderer_setStereoEnabled(Renderer *ren, bool enabled) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    if (ctx == NULL) return;
-    if (ctx->stereoEnabled == enabled) return;
-    ctx->stereoEnabled = enabled;
-    if (!enabled) {
-        flush_batch(ctx);
-        destroy_right_app_surface(ctx);
-        if (ctx->topTargetRight) {
-            C3D_RenderTargetDelete(ctx->topTargetRight);
-            ctx->topTargetRight = NULL;
-        }
-    } else {
-        if (!ctx->topTargetRight && ctx->base.dataWin != NULL) {
-            ctx->topTargetRight = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH16);
-            if (ctx->topTargetRight) {
-                C3D_RenderTargetSetOutput(ctx->topTargetRight, GFX_TOP, GFX_RIGHT, DISPLAY_TRANSFER_FLAGS);
-            }
-        }
-        ctx->appReady = false;
-    }
-}
-
-bool CtrRenderer_getStereoEnabled(Renderer *ren) {
-    CtrRenderer *ctx = (CtrRenderer *) ren;
-    return ctx != NULL && ctx->stereoEnabled;
+    return (Renderer *)ctx;
 }

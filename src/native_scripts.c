@@ -1,12 +1,3 @@
-// Original Code by MrPowerGamerBR and the Butterscotch contributors.
-// Modifications Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
-//
-// This file is part of Butterscotch (Nintendo 3DS port).
-//
-// Butterscotch is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 3.
-
 #include "native_scripts.h"
 #include "data_win.h"
 #include "instance.h"
@@ -352,10 +343,36 @@ static void initWriterCache(VMContext *ctx, DataWin *dw) {
 }
 
 
-static inline char nativeStringCharAtBuf(const char *str, int32_t strLen, int32_t pos) {
+typedef struct {
+    uint16_t cp;
+    char text[5];
+    char ascii;
+    bool valid;
+} NativeTextChar;
+
+static inline NativeTextChar nativeStringCharInfoAtBuf(const char *str, int32_t strLen, int32_t pos) {
+    NativeTextChar out = {0};
     pos--;
-    if (0 > pos || pos >= strLen) return '\0';
-    return str[pos];
+    if (0 > pos) return out;
+
+    int32_t byteStart = TextUtils_utf8AdvanceCodepoints(str, strLen, pos);
+    if (byteStart >= strLen) return out;
+
+    int32_t byteEnd = byteStart;
+    out.cp = TextUtils_decodeUtf8(str, strLen, &byteEnd);
+    int32_t byteLen = byteEnd - byteStart;
+    if (byteLen <= 0) return out;
+    if (byteLen > 4) byteLen = 4;
+
+    memcpy(out.text, str + byteStart, (size_t) byteLen);
+    out.text[byteLen] = '\0';
+    out.ascii = (out.cp < 128) ? (char) out.cp : '\0';
+    out.valid = true;
+    return out;
+}
+
+static inline char nativeStringCharAtBuf(const char *str, int32_t strLen, int32_t pos) {
+    return nativeStringCharInfoAtBuf(str, strLen, pos).ascii;
 }
 
 
@@ -406,8 +423,9 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
     int32_t origStrLen = (int32_t) strlen(originalstring);
 
     for (int32_t n = 1; stringpos >= n; n++) {
-        char ch = nativeStringCharAtBuf(originalstring, origStrLen, n);
-        if (ch == '\0') break;
+        NativeTextChar chInfo = nativeStringCharInfoAtBuf(originalstring, origStrLen, n);
+        if (!chInfo.valid) break;
+        char ch = chInfo.ascii;
 
         if (ch >= ' ' && ch != '/' && ch != '\\' && ch != '^' && ch != '&' &&
             ch != 'z' && ch != '*' && ch != '>' && ch != '%' &&
@@ -441,12 +459,11 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
             float drawX = (float) GMLReal_round(letterx + offsetx);
             float drawY = (float) GMLReal_round(myy + offsety);
 
-            char letterStr[2] = {ch, '\0'};
             renderer->drawColor = (uint32_t) mycolor;
             renderer->drawFont = myfont;
             renderer->drawHalign = 0;
             renderer->drawValign = 0;
-            renderer->vtable->drawText(renderer, letterStr,
+            renderer->vtable->drawText(renderer, chInfo.text,
                                        drawX, drawY,
                                        (float) (htextscale * hs), (float) (vtextscale * hs), 0.f);
 
@@ -762,10 +779,14 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
             setAlarm(inst, 0, selfInt(inst, writerCache.textspeed));
             break;
         } else {
-            char myletter = nativeStringCharAtBuf(originalstring, origStrLen, n);
+            NativeTextChar myletterInfo = nativeStringCharInfoAtBuf(originalstring, origStrLen, n);
+            if (!myletterInfo.valid) break;
+            char myletter = myletterInfo.ascii;
             if (myletter == '^') {
                 n++;
-                myletter = nativeStringCharAtBuf(originalstring, origStrLen, n);
+                myletterInfo = nativeStringCharInfoAtBuf(originalstring, origStrLen, n);
+                if (!myletterInfo.valid) break;
+                myletter = myletterInfo.ascii;
             }
             if (!vtext && myx > writingxend) {
                 Instance_setSelfVar(inst, writerCache.myx, RValue_makeReal(myx));
@@ -800,13 +821,12 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
             } else if (isJapanese) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wtype-limits"
-                int32_t ordVal = (int32_t) (unsigned char) myletter;
+                int32_t ordVal = (int32_t) myletterInfo.cp;
                 if (vtext && (myfont == writerCache.fntJaPapyrus || myfont == writerCache.fntJaPapyrusBtl)) {
-                    char myletterStr[2] = {myletter, '\0'};
-                    bool isBracket = (strcmp(myletterStr, "\xe3\x80\x8c") == 0 || strcmp(myletterStr, "\xe3\x80\x8e") ==
+                    bool isBracket = (strcmp(myletterInfo.text, "\xe3\x80\x8c") == 0 || strcmp(myletterInfo.text, "\xe3\x80\x8e") ==
                                       0);
                     if ((int32_t) myy == (int32_t) writingy && isBracket) {
-                        RValue swArgs[1] = {RValue_makeString(myletterStr)};
+                        RValue swArgs[1] = {RValue_makeString(myletterInfo.text)};
                         RValue sw = callBuiltin(ctx, "string_width", swArgs, 1);
                         myy -= GMLReal_round((RValue_toReal(sw) / 2.0) * htextscale * halfscale);
                         RValue_free(&sw);
@@ -816,8 +836,8 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
                     if (myfont == writerCache.fntJaMain) unit *= 2;
                     if (ordVal < 1024 || ordVal == 8211) {
                         if (n > 1) {
-                            char lastchChar = nativeStringCharAtBuf(originalstring, origStrLen, n - 1);
-                            int32_t lastch = (int32_t) (unsigned char) lastchChar;
+                            NativeTextChar lastchInfo = nativeStringCharInfoAtBuf(originalstring, origStrLen, n - 1);
+                            int32_t lastch = lastchInfo.valid ? (int32_t) lastchInfo.cp : 0;
                             if (lastch >= 1024 && lastch < 65281 && lastch != 8211 && lastch != 12288) {
                                 letterx += unit;
                             }
@@ -870,13 +890,12 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
             GMLReal finaly = GMLReal_round(myy + offsety);
 
             {
-                char letterStr[2] = {myletter, '\0'};
                 float xsc = (float) (htextscale * halfscale);
                 float ysc = (float) (vtextscale * halfscale);
                 renderer->drawFont = (int32_t) myfont;
                 renderer->drawHalign = 0;
                 renderer->drawValign = 0;
-                renderer->vtable->drawText(renderer, letterStr, (float) finalx, (float) finaly, xsc, ysc,
+                renderer->vtable->drawText(renderer, myletterInfo.text, (float) finalx, (float) finaly, xsc, ysc,
                                            (float) angle);
             }
 
@@ -903,10 +922,9 @@ static void native_objBaseWriter_Draw0(VMContext *ctx, Runner *runner, Instance 
             } else if (isJapanese) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wtype-limits"
-                int32_t ordVal = (int32_t) (unsigned char) myletter;
+                int32_t ordVal = (int32_t) myletterInfo.cp;
                 if (vtext) {
-                    char letterStr[2] = {myletter, '\0'};
-                    RValue swArgs[1] = {RValue_makeString(letterStr)};
+                    RValue swArgs[1] = {RValue_makeString(myletterInfo.text)};
                     RValue sw = callBuiltin(ctx, "string_width", swArgs, 1);
                     myy += GMLReal_round(RValue_toReal(sw) * htextscale * halfscale);
                     RValue_free(&sw);

@@ -1,12 +1,3 @@
-// Original Code by MrPowerGamerBR and the Butterscotch contributors.
-// Modifications Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
-//
-// This file is part of Butterscotch (Nintendo 3DS port).
-//
-// Butterscotch is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 3.
-
 #include "gs_renderer.h"
 
 #include <stdlib.h>
@@ -886,7 +877,6 @@ static void gsInit(Renderer* renderer, DataWin* dataWin) {
     renderer->drawFont = -1;
     renderer->drawHalign = 0;
     renderer->drawValign = 0;
-    renderer->circlePrecision = 24;
 
     // Enable alpha blending
     gs->gsGlobal->PrimAlphaEnable = GS_SETTING_ON;
@@ -1959,15 +1949,7 @@ static void gsFlush(MAYBE_UNUSED Renderer* renderer) {
     // No-op: gsKit queues commands, executed in main loop
 }
 
-static void gsClearScreen(Renderer* renderer, uint32_t color) {
-    GsRenderer* gs = (GsRenderer*) renderer;
-    uint8_t r = BGR_R(color) >> 1;
-    uint8_t g = BGR_G(color) >> 1;
-    uint8_t b = BGR_B(color) >> 1;
-    gsKit_clear(gs->gsGlobal, GS_SETREG_RGBAQ(r, g, b, 0x80, 0x00));
-}
-
-static int32_t gsCreateSpriteFromSurface(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t surfaceID, MAYBE_UNUSED int32_t x, MAYBE_UNUSED int32_t y, MAYBE_UNUSED int32_t w, MAYBE_UNUSED int32_t h, MAYBE_UNUSED bool removeback, MAYBE_UNUSED bool smooth, MAYBE_UNUSED int32_t xorig, MAYBE_UNUSED int32_t yorig) {
+static int32_t gsCreateSpriteFromSurface(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t x, MAYBE_UNUSED int32_t y, MAYBE_UNUSED int32_t w, MAYBE_UNUSED int32_t h, MAYBE_UNUSED bool removeback, MAYBE_UNUSED bool smooth, MAYBE_UNUSED int32_t xorig, MAYBE_UNUSED int32_t yorig) {
     rendererPrintf("GsRenderer: createSpriteFromSurface not supported on PS2\n");
     return -1;
 }
@@ -2132,13 +2114,16 @@ static void gsDrawTile(Renderer* renderer, RoomTile* tile, float offsetX, float 
     float u2 = u1 + (float) tileEntry->width;
     float v2 = v1 + (float) tileEntry->height;
 
+    // Extract alpha from tile color high byte, default to 1.0 if 0
+    uint8_t alphaByte = (tile->color >> 24) & 0xFF;
+    float alpha = (alphaByte == 0) ? 1.0f : (float) alphaByte / 255.0f;
     uint32_t bgr = tile->color & 0x00FFFFFF;
 
     // GS modulate mode: scale RGB from 0-255 to 0-128
     uint8_t r = BGR_R(bgr) >> 1;
     uint8_t g = BGR_G(bgr) >> 1;
     uint8_t b = BGR_B(bgr) >> 1;
-    uint8_t a = alphaToGS(tile->alpha);
+    uint8_t a = alphaToGS(alpha);
     u64 gsColor = GS_SETREG_RGBAQ(r, g, b, a, 0x00);
 
     gsKit_prim_sprite_texture(gs->gsGlobal, &tex, sx1, sy1, u1, v1, sx2, sy2, u2, v2, 0, gsColor);
@@ -2165,7 +2150,6 @@ static RendererVtable gsVtable = {
     .drawTextColor = gsDrawTextColor,
     .drawTriangle = gsDrawTriangle,
     .flush = gsFlush,
-    .clearScreen = gsClearScreen,
     .createSpriteFromSurface = gsCreateSpriteFromSurface,
     .deleteSprite = gsDeleteSprite,
     .gpuSetBlendMode = gsGpuSetBlendMode,

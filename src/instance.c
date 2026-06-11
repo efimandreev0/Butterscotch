@@ -1,12 +1,3 @@
-// Original Code by MrPowerGamerBR and the Butterscotch contributors.
-// Modifications Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
-//
-// This file is part of Butterscotch (Nintendo 3DS port).
-//
-// Butterscotch is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 3.
-
 #include "instance.h"
 
 #include <stdlib.h>
@@ -83,7 +74,7 @@ void Instance_structIncRef(Instance* inst) {
 
 void Instance_structDecRef(Instance* inst) {
     if (inst == nullptr) return;
-    require(inst->refCount > 0);
+    if (inst->refCount == 0) return;
     inst->refCount--;
     // Never free here. The runner-side sweep reaps structs whose refCount has dropped to 1. (that is: when only the structInstances holds it)
 }
