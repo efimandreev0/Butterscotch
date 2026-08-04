@@ -63,11 +63,34 @@ typedef struct {
 } CtrSurface;
 
 typedef struct {
+    bool     valid;
+    int      x, y;
+    int      width, height;
+    int      potW, potH;
+    C3D_Tex  tex;
+} CtrTilemapChunk;
+
+typedef struct {
+    bool                 valid;
+    const RoomLayerTilesData *data;
+    uint32_t             hash;
+    int32_t              backgroundIndex;
+    uint32_t             tilesX, tilesY;
+    uint32_t             tileW, tileH;
+    uint32_t             chunkSize;
+    uint32_t             chunkCols, chunkRows;
+    uint32_t             chunkCount;
+    CtrTilemapChunk     *chunks;
+} CtrTilemapLayerCache;
+
+typedef struct {
     C3D_RenderTarget *target;
     int               viewport[4];
     bool              hasScissor;
     int               scissor[4];
     C3D_Mtx           projection;
+    bool              cullEnabled;
+    float             cullL, cullT, cullR, cullB;
 } CtrTargetState;
 
 typedef struct CtrRenderer {
@@ -113,6 +136,19 @@ typedef struct CtrRenderer {
     CtrSurface       *surfaces;
     uint32_t          surfaceCount;
 
+    // Deltarune GMS2 tile layers. These room-sized maps are more reliable as
+    // precomposited chunks than as hundreds of atlas sub-rect draws on 3DS.
+    CtrTilemapLayerCache *tilemapCaches;
+    uint32_t              tilemapCacheCount;
+    uint32_t              tilemapBuildAttempts;
+    uint32_t              tilemapBuildSuccesses;
+    uint32_t              tilemapBuildFailures;
+    uint32_t              tilemapChunksBuilt;
+    uint32_t              tilemapOpaquePixels;
+    uint32_t              tilemapDrawCalls;
+    uint32_t              tilemapChunksDrawn;
+    char                  tilemapLastStatus[96];
+
     // Vertex batch
     void             *vbuf;          // linearAlloc
     uint32_t          vbufCap;
@@ -127,6 +163,8 @@ typedef struct CtrRenderer {
     // Target stack
     CtrTargetState    targetStack[CTR_TARGET_STACK_DEPTH];
     int               targetStackDepth;
+    bool              surfaceDrawSuppressed;
+    int               surfaceDrawSuppressedDepth;
 
     // Current target state
     C3D_RenderTarget *activeTarget;
@@ -136,6 +174,14 @@ typedef struct CtrRenderer {
     // Frame state
     bool              inFrame;
     int               currentBlendMode;
+    bool              blendEnabled;
+    GPU_BLENDFACTOR   blendSrcColor;
+    GPU_BLENDFACTOR   blendDstColor;
+    GPU_BLENDFACTOR   blendSrcAlpha;
+    GPU_BLENDFACTOR   blendDstAlpha;
+    GPU_WRITEMASK     writeMask;
+    bool              alphaTestEnabled;
+    uint8_t           alphaTestRef;
 
     // Repacked atlas stream.
     FILE             *atlasFile;
@@ -170,8 +216,15 @@ void CtrRenderer_setCacheProgressCallback(CtrRendererCacheProgressFn callback, v
 // безопасно вызывать пока активен другой рендер (например, лаунчер).
 void CtrRenderer_prepareTextureCache(DataWin *dw);
 
+// Called between launcher/game sessions. This keeps Citro3D's queued work and
+// deferred render-target deletes from leaking across game launches.
+void CtrRenderer_resetSessionState(void);
+
 void CtrRenderer_prefetchSprite(Renderer *ren, int32_t sprIdx);
 void CtrRenderer_prefetchTexturePage(Renderer *ren, int32_t tpagIdx);
+void CtrRenderer_dumpTextureDiagnostics(Renderer *ren, FILE *out, const Room *room);
+bool CtrRenderer_drawGms2TileLayer(Renderer *ren, RoomLayerTilesData *data,
+                                   float layerOffsetX, float layerOffsetY, float alpha);
 
 // ---- Live appearance / layout controls --------------------------------------
 

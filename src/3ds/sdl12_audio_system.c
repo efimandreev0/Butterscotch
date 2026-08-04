@@ -330,6 +330,38 @@ static float current_music_base_volume(SysMixer *sm) {
     return 1.f;
 }
 
+static float music_elapsed_since(uint32_t startTicks) {
+    return (float) (SDL_GetTicks() - startTicks) / 1000.f;
+}
+
+static float music_handle_position(SysMixer *sm, int slot) {
+    if (!sm || slot < 0 || slot >= MAX_MUSIC_HANDLES) return 0.f;
+    SysMixerMusicHandle *mh = &sm->musicHandles[slot];
+    if (!mh->active) return 0.f;
+
+    float pos = mh->positionBase;
+    if (sm->curMusicHandle == music_handle_id(slot) && mh->playing && !mh->paused && Mix_PlayingMusic()) {
+        pos += music_elapsed_since(mh->positionStartedTicks);
+    }
+    return pos < 0.f ? 0.f : pos;
+}
+
+static void music_handle_store_position(SysMixer *sm, int slot) {
+    if (!sm || slot < 0 || slot >= MAX_MUSIC_HANDLES) return;
+    SysMixerMusicHandle *mh = &sm->musicHandles[slot];
+    if (!mh->active) return;
+    mh->positionBase = music_handle_position(sm, slot);
+    mh->positionStartedTicks = SDL_GetTicks();
+}
+
+static void music_handle_start_position(SysMixer *sm, int slot, float positionSeconds) {
+    if (!sm || slot < 0 || slot >= MAX_MUSIC_HANDLES) return;
+    SysMixerMusicHandle *mh = &sm->musicHandles[slot];
+    if (!mh->active) return;
+    mh->positionBase = positionSeconds < 0.f ? 0.f : positionSeconds;
+    mh->positionStartedTicks = SDL_GetTicks();
+}
+
 static void apply_music_gain(SysMixer *sm) {
     Mix_VolumeMusic(gain_to_volume(sm->musicGain * current_music_base_volume(sm) * sm->masterGain));
 }
@@ -359,6 +391,7 @@ static void restart_current_music_if_silent(SysMixer *sm) {
             apply_music_gain(sm);
             Mix_ResumeMusic();
             if (Mix_PlayMusic(sm->streams[streamSlot].music, loop ? -1 : 0) == 0 && currentSlot >= 0) {
+                music_handle_start_position(sm, currentSlot, 0.f);
                 sm->musicHandles[currentSlot].playing = true;
                 sm->musicHandles[currentSlot].paused = false;
             }
@@ -370,6 +403,7 @@ static void restart_current_music_if_silent(SysMixer *sm) {
         apply_music_gain(sm);
         Mix_ResumeMusic();
         if (Mix_PlayMusic(sm->music[sm->curMusicId], loop ? -1 : 0) == 0 && currentSlot >= 0) {
+            music_handle_start_position(sm, currentSlot, 0.f);
             sm->musicHandles[currentSlot].playing = true;
             sm->musicHandles[currentSlot].paused = false;
         }
@@ -399,6 +433,7 @@ static bool play_music_for_handle(SysMixer *sm, int slot, float startGain, uint3
     if (sm->curMusicHandle > MUS_ID_BASE) {
         int oldSlot = music_slot_from_handle(sm, sm->curMusicHandle);
         if (oldSlot >= 0) {
+            music_handle_store_position(sm, oldSlot);
             sm->musicHandles[oldSlot].playing = false;
             sm->musicHandles[oldSlot].displacedFrame = sm->frame;
             if (sm->musicHandles[oldSlot].gain > music_audible_epsilon(sm)) {
@@ -425,9 +460,12 @@ static bool play_music_for_handle(SysMixer *sm, int slot, float startGain, uint3
         return false;
     }
 
+    float startPos = mh->positionBase;
+    if (startPos > 0.f) Mix_SetMusicPosition(startPos);
     Mix_ResumeMusic();
     mh->playing = true;
     mh->paused = false;
+    music_handle_start_position(sm, slot, startPos);
     mh->createdFrame = sm->frame;
     return true;
 }
@@ -541,6 +579,7 @@ static bool restore_previous_music(SysMixer *sm, int stoppedSlot) {
         }
     }
     sm->musicHandles[best].paused = false;
+    music_handle_start_position(sm, best, 0.f);
 
     // Restart the displaced music from the beginning. This is intentional:
     // SDL_mixer only has one music channel, so we cannot preserve the exact
@@ -572,6 +611,7 @@ static bool restore_undertale_paused_music(SysMixer *sm, int stoppedSlot) {
         sm->soundGains[soundId] = sm->musicHandles[best].gain;
     }
     sm->musicHandles[best].paused = false;
+    music_handle_start_position(sm, best, 0.f);
     return play_music_for_handle(sm, best, 0.f, 250);
 }
 
@@ -1170,6 +1210,8 @@ static void sys_stop_all(AudioSystem *sys) {
         sm->musicHandles[i].active = false;
         sm->musicHandles[i].playing = false;
         sm->musicHandles[i].paused = false;
+        sm->musicHandles[i].positionBase = 0.f;
+        sm->musicHandles[i].positionStartedTicks = SDL_GetTicks();
     }
     for (int ch = 0; ch < MAX_CHANS; ch++) reset_channel_state(sm, ch);
     if (suppressGameoverRestart) {
@@ -1222,6 +1264,7 @@ static void sys_pause(AudioSystem *sys, int32_t id) {
     int musicSlot = music_slot_from_handle(sm, id);
     if (musicSlot >= 0) {
         SysMixerMusicHandle *mh = &sm->musicHandles[musicSlot];
+        if (sm->curMusicHandle == id) music_handle_store_position(sm, musicSlot);
         mh->paused = true;
         mh->playing = false;
         if (sm->curMusicHandle == id) Mix_PauseMusic();
@@ -1229,6 +1272,8 @@ static void sys_pause(AudioSystem *sys, int32_t id) {
     }
 
     if (id == MUS_ID_BASE || sm->curMusicId == id) {
+        int currentSlot = music_slot_from_handle(sm, sm->curMusicHandle);
+        if (currentSlot >= 0) music_handle_store_position(sm, currentSlot);
         set_current_music_paused(sm, true);
         Mix_PauseMusic();
     } else if (id >= SND_ID_BASE && id < SND_ID_BASE + MAX_CHANS) Mix_Pause(id - SND_ID_BASE);
@@ -1251,6 +1296,7 @@ static void sys_resume(AudioSystem *sys, int32_t id) {
         if (sm->curMusicHandle == id) {
             Mix_ResumeMusic();
             mh->playing = true;
+            music_handle_start_position(sm, musicSlot, mh->positionBase);
         } else {
             play_music_for_handle(sm, musicSlot, sm->musicHandles[musicSlot].gain, 0);
         }
@@ -1260,6 +1306,8 @@ static void sys_resume(AudioSystem *sys, int32_t id) {
     if (id == MUS_ID_BASE || sm->curMusicId == id) {
         set_current_music_paused(sm, false);
         Mix_ResumeMusic();
+        int currentSlot = music_slot_from_handle(sm, sm->curMusicHandle);
+        if (currentSlot >= 0) music_handle_start_position(sm, currentSlot, sm->musicHandles[currentSlot].positionBase);
     } else if (id >= SND_ID_BASE && id < SND_ID_BASE + MAX_CHANS) Mix_Resume(id - SND_ID_BASE);
     else if (id >= 0 && (uint32_t) id < sm->base.dataWin->sond.count) {
         bool resumedMusic = false;
@@ -1273,15 +1321,29 @@ static void sys_resume(AudioSystem *sys, int32_t id) {
     }
 }
 
-static void sys_pause_all(MAYBE_UNUSED AudioSystem *sys) {
+static void sys_pause_all(AudioSystem *sys) {
     if (s_mixerReady) {
+        SysMixer *sm = (SysMixer *) sys;
+        int currentSlot = music_slot_from_handle(sm, sm->curMusicHandle);
+        if (currentSlot >= 0) {
+            music_handle_store_position(sm, currentSlot);
+            sm->musicHandles[currentSlot].paused = true;
+            sm->musicHandles[currentSlot].playing = false;
+        }
         Mix_Pause(-1);
         Mix_PauseMusic();
     }
 }
 
-static void sys_resume_all(MAYBE_UNUSED AudioSystem *sys) {
+static void sys_resume_all(AudioSystem *sys) {
     if (s_mixerReady) {
+        SysMixer *sm = (SysMixer *) sys;
+        int currentSlot = music_slot_from_handle(sm, sm->curMusicHandle);
+        if (currentSlot >= 0) {
+            sm->musicHandles[currentSlot].paused = false;
+            sm->musicHandles[currentSlot].playing = true;
+            music_handle_start_position(sm, currentSlot, sm->musicHandles[currentSlot].positionBase);
+        }
         Mix_Resume(-1);
         Mix_ResumeMusic();
     }
@@ -1446,7 +1508,18 @@ static float sys_get_pitch(AudioSystem *sys, int32_t id) {
     return 1.f;
 }
 
-static float sys_get_pos(MAYBE_UNUSED AudioSystem *sys, MAYBE_UNUSED int32_t id) {
+static float sys_get_pos(AudioSystem *sys, int32_t id) {
+    if (!s_mixerReady) return 0.f;
+    SysMixer *sm = (SysMixer *) sys;
+
+    int musicSlot = music_slot_from_handle(sm, id);
+    if (musicSlot >= 0) return music_handle_position(sm, musicSlot);
+
+    int currentSlot = music_slot_from_handle(sm, sm->curMusicHandle);
+    if (currentSlot >= 0 && (id == MUS_ID_BASE || id == sm->curMusicId)) {
+        return music_handle_position(sm, currentSlot);
+    }
+
     return 0.f;
 }
 
@@ -1456,9 +1529,14 @@ static void sys_set_pos(AudioSystem *sys, int32_t id, float pos) {
     int musicSlot = music_slot_from_handle(sm, id);
     if (musicSlot >= 0) {
         if (sm->curMusicHandle == id) Mix_SetMusicPosition(pos);
+        music_handle_start_position(sm, musicSlot, pos);
         return;
     }
-    if (id == MUS_ID_BASE || sm->curMusicId == id) Mix_SetMusicPosition(pos);
+    if (id == MUS_ID_BASE || sm->curMusicId == id) {
+        int currentSlot = music_slot_from_handle(sm, sm->curMusicHandle);
+        Mix_SetMusicPosition(pos);
+        if (currentSlot >= 0) music_handle_start_position(sm, currentSlot, pos);
+    }
 }
 
 static float sys_get_length(AudioSystem *sys, int32_t id) {

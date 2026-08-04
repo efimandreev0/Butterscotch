@@ -1,10 +1,12 @@
 #pragma once
 
 #include "common.h"
+#include <stdio.h>
 #include "audio_system.h"
 #include "data_win.h"
 #include "event_table.h"
 #include "file_system.h"
+#include "game_profile.h"
 #include "ini.h"
 #include "instance.h"
 #include "renderer.h"
@@ -56,12 +58,6 @@
 #define MAX_DEFAULT_ROOM_CAMERAS MAX_VIEWS
 #define MAX_USER_CAMERAS 56
 #define MAX_CAMERAS (MAX_DEFAULT_ROOM_CAMERAS + MAX_USER_CAMERAS)
-
-typedef enum {
-    GAME_PROFILE_GENERIC = 0,
-    GAME_PROFILE_UNDERTALE,
-    GAME_PROFILE_DELTARUNE,
-} GameProfile;
 
 // ===[ Operating System Types ]===
 // See GameMaker-HTML5's Globals.js
@@ -187,6 +183,7 @@ typedef struct {
 typedef enum {
     RuntimeLayerElementType_Background = 1,
     RuntimeLayerElementType_Sprite = 4,
+    RuntimeLayerElementType_Tilemap = 5,
     RuntimeLayerElementType_Tile = 7,
 } RuntimeLayerElementType;
 
@@ -198,6 +195,8 @@ typedef struct {
     RuntimeBackgroundElement* backgroundElement; // owned; nullptr if type != Background
     RuntimeSpriteElement* spriteElement; // owned; nullptr if type != Sprite
     RoomTile* tileElement; // borrowed; nullptr if type != Tile
+    RoomLayerTilesData* tilemapElement; // borrowed; nullptr if type != Tilemap
+    uint32_t tilemapLayerId; // parsed RoomLayer id for a GMS2 tilemap element
 } RuntimeLayerElement;
 
 // Runtime-mutable state for a GMS2 room layer. Parsed layers are populated at room load from RoomLayer and share IDs with the parsed data.
@@ -231,7 +230,10 @@ typedef struct {
     union {
         Instance* instance;
         int32_t tileIndex;
-        RuntimeLayer* runtimeLayer;
+        // Stored as an ID instead of a pointer because layer_create/layer_destroy
+        // can reallocate runner->runtimeLayers while we are still iterating the
+        // cached drawable list.
+        int32_t runtimeLayerId;
     };
 } Drawable;
 
@@ -461,7 +463,7 @@ typedef struct Runner {
 
 const char* Runner_getEventName(int32_t eventType, int32_t eventSubtype);
 void Runner_reset(Runner* runner);
-Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileSystem* fileSystem, AudioSystem* audioSystem);
+Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileSystem* fileSystem, AudioSystem* audioSystem, GameProfile gameProfile);
 void Runner_initFirstRoom(Runner* runner);
 void Runner_step(Runner* runner);
 void Runner_executeEvent(Runner* runner, Instance* instance, int32_t eventType, int32_t eventSubtype);
@@ -474,6 +476,7 @@ void Runner_computeViewDisplayScale(Runner* runner, int32_t gameW, int32_t gameH
 void Runner_drawViews(Runner* runner, int32_t gameW, int32_t gameH, float displayScaleX, float displayScaleY, bool debugShowCollisionMasks);
 void Runner_scrollBackgrounds(Runner* runner);
 void Runner_drawTileLayer(Runner* runner, RoomLayerTilesData* data, float layerOffsetX, float layerOffsetY);
+void Runner_drawTileLayerEx(Runner* runner, RoomLayerTilesData* data, float layerOffsetX, float layerOffsetY, float alpha);
 Instance* Runner_createInstance(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex);
 Instance* Runner_createInstanceWithDepth(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex, int32_t depth);
 Instance* Runner_createInstanceWithLayer(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex, int32_t layerId);
@@ -500,6 +503,7 @@ void Runner_popInstanceSnapshot(Runner* runner, int32_t base);
 
 void Runner_dumpState(Runner* runner);
 char* Runner_dumpStateJson(Runner* runner);
+void Runner_dumpDiagnostics(Runner* runner, FILE* out);
 void Runner_free(Runner* runner);
 RuntimeLayer* Runner_findRuntimeLayerById(Runner* runner, int32_t id);
 RoomLayer* Runner_findRoomLayerById(Runner* runner, int32_t id);

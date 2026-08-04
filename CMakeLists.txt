@@ -512,7 +512,7 @@ elseif(PLATFORM STREQUAL "3ds")
 
     ctr_create_3dsx(butterscotch)
 
-    set(APP_TITLE "Butterscotch V4.2")
+    set(APP_TITLE "Butterscotch V7.2 EPdN")
     set(APP_DESCRIPTION "GMS1.4-2.0 runner for 3DS")
     set(APP_AUTHOR "efimandreev0, Pugemon")
     set(APP_PRODUCT_CODE "CTR-P-BTRS")

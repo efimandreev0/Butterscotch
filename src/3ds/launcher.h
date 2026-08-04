@@ -134,7 +134,7 @@ typedef enum {
     LAUNCHER_INPUT_MODE_COUNT
 } LauncherInputMode;
 
-#define LAUNCHER_SETTINGS_VERSION 7u
+#define LAUNCHER_SETTINGS_VERSION 8u
 
 typedef struct {
     uint32_t           magic;
@@ -149,7 +149,8 @@ typedef struct {
     LauncherDisplayMode  display_mode;
     LauncherAppFilterMode app_filter;
     LauncherFramePacing frame_pacing;
-    int                _reserved[2];
+    int                debug_mode;
+    int                _reserved[1];
     LauncherControlMap global_controls;
 } LauncherSettings;
 
@@ -207,7 +208,8 @@ void                 launcher_save_settings(void);
 void                 launcher_load_settings(void);
 void                 launcher_load_active_controls(const char *data_win_path);
 void                 launcher_save_active_controls(void);
-void                 launcher_apply_3ds_input(RunnerKeyboardState *kb, u32 down, u32 up, u32 held);
+void                 launcher_apply_3ds_input(RunnerKeyboardState *kb, u32 down, u32 up, u32 held,
+                                               int cstickX, int cstickY);
 
 // Populates gamepad slot 0 of `gp` from current 3DS hardware state. Treats the
 // circle pad / c-stick as left/right analog axes and any held button as a
@@ -257,7 +259,11 @@ void launcher_render_loading(LauncherGfx *gfx, const char *gameName, const char 
                              int page, int total, float percent);
 
 // In-game pause menu. Borrowed gfx that draws on whatever target is active.
-LauncherPauseAction launcher_run_pause(LauncherGfx *gfx);
+// Debug controls are exposed only to the Deltarune profile.
+LauncherPauseAction launcher_run_pause(LauncherGfx *gfx, bool allowDebugMode);
+
+// Quick in-game START prompt. Returns true when A confirms returning to the launcher.
+bool launcher_confirm_quit_to_launcher(LauncherGfx *gfx);
 
 // ---- Helpers used by main and ctr_renderer ----------------------------------
 

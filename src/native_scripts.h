@@ -10,6 +10,9 @@ typedef void (*NativeCodeFunc)(VMContext *ctx, Runner *runner, Instance *instanc
 void NativeScripts_init(VMContext *ctx, Runner *runner);
 
 
+void NativeScripts_reset(void);
+
+
 NativeCodeFunc NativeScripts_find(const char *codeName);
 
 

@@ -663,7 +663,7 @@ int main(int argc, char* argv[]) {
 
     drawStatusScreen(gsGlobal, gsFontM, dataWin->gen8.displayName, "Creating runner...", &loadingState);
 
-    Runner* runner = Runner_create(dataWin, vm, renderer, fileSystem, audioSystem);
+    Runner* runner = Runner_create(dataWin, vm, renderer, fileSystem, audioSystem, GAME_PROFILE_GENERIC);
 
     // Parse disabledObjects from CONFIG.JSN
     JsonValue* disabledObjectsArr = JsonReader_getObject(configRoot, "disabledObjects");

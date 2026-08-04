@@ -475,6 +475,11 @@ static int compareDrawableDepth(const void* a, const void* b) {
         if (db->instance->instanceId > da->instance->instanceId) return 1;
         if (da->instance->instanceId > db->instance->instanceId) return -1;
     }
+    // At same depth, layers with higher ID draw first (behind).
+    if (da->type == DRAWABLE_LAYER && db->type == DRAWABLE_LAYER) {
+        if (db->runtimeLayerId > da->runtimeLayerId) return 1;
+        if (da->runtimeLayerId > db->runtimeLayerId) return -1;
+    }
     return 0;
 }
 
@@ -498,15 +503,66 @@ static void fireDrawSubtype(Runner* runner, Drawable* drawables, int32_t drawabl
     }
 }
 
+static void Runner_getCurrentViewBounds(Runner* runner, float* left, float* top, float* right, float* bottom) {
+    float l = 0.0f;
+    float t = 0.0f;
+    float r = runner && runner->currentRoom ? (float) runner->currentRoom->width : 0.0f;
+    float b = runner && runner->currentRoom ? (float) runner->currentRoom->height : 0.0f;
+
+    if (runner != nullptr && runner->viewsEnabled &&
+        runner->viewCurrent >= 0 && runner->viewCurrent < MAX_VIEWS) {
+        RuntimeView* view = &runner->views[runner->viewCurrent];
+        if (view->enabled) {
+            GMLCamera* camera = Runner_getCameraForView(runner, runner->viewCurrent);
+            int32_t viewX = camera != nullptr ? camera->viewX : view->viewX;
+            int32_t viewY = camera != nullptr ? camera->viewY : view->viewY;
+            int32_t viewW = camera != nullptr ? camera->viewWidth : view->viewWidth;
+            int32_t viewH = camera != nullptr ? camera->viewHeight : view->viewHeight;
+            if (viewW > 0 && viewH > 0) {
+                l = (float) viewX;
+                t = (float) viewY;
+                r = (float) (viewX + viewW);
+                b = (float) (viewY + viewH);
+            }
+        }
+    }
+
+    *left = l;
+    *top = t;
+    *right = r;
+    *bottom = b;
+}
+
 // GMS2 tilemap cell bit layout (matches HTML5 Function_Layers.js TileIndex/Mirror/Flip/Rotate masks)
 #define GMS2_TILE_INDEX_MASK  0x0007FFFF // bits 0..18
 #define GMS2_TILE_MIRROR_MASK 0x10000000 // bit 28 (horizontal flip)
 #define GMS2_TILE_FLIP_MASK   0x20000000 // bit 29 (vertical flip)
 #define GMS2_TILE_ROTATE_MASK 0x40000000 // bit 30 (90 CW)
 
-void Runner_drawTileLayer(Runner* runner, RoomLayerTilesData* data, float layerOffsetX, float layerOffsetY) {
+static void Runner_prepareAutomaticTileLayerDraw(Runner* runner) {
+    if (runner == nullptr || runner->renderer == nullptr) return;
+    if (runner->gameProfile != GAME_PROFILE_DELTARUNE) return;
+
+    RendererVtable* vtable = runner->renderer->vtable;
+    if (vtable == nullptr) return;
+
+    // Parsed room tile layers are engine-owned background geometry. Deltarune's
+    // Draw events use surfaces/masks heavily, so do not let those GPU states
+    // leak into the automatic tile pass.
+    if (vtable->gpuSetColorWriteEnable != nullptr)
+        vtable->gpuSetColorWriteEnable(runner->renderer, true, true, true, true);
+    if (vtable->gpuSetAlphaTestEnable != nullptr)
+        vtable->gpuSetAlphaTestEnable(runner->renderer, false);
+    if (vtable->gpuSetBlendEnable != nullptr)
+        vtable->gpuSetBlendEnable(runner->renderer, true);
+    if (vtable->gpuSetBlendMode != nullptr)
+        vtable->gpuSetBlendMode(runner->renderer, bm_normal);
+}
+
+void Runner_drawTileLayerEx(Runner* runner, RoomLayerTilesData* data, float layerOffsetX, float layerOffsetY, float alpha) {
     if (data == nullptr || data->tileData == nullptr) return;
     if (0 > data->backgroundIndex) return;
+    if (alpha <= 0.0f) return;
 
     DataWin* dw = runner->dataWin;
     if ((uint32_t) data->backgroundIndex >= dw->bgnd.count) return;
@@ -516,25 +572,42 @@ void Runner_drawTileLayer(Runner* runner, RoomLayerTilesData* data, float layerO
 
     int32_t tpagIndex = tileset->tpagIndex;
     if (0 > tpagIndex) return;
+    if ((uint32_t) tpagIndex >= dw->tpag.count || dw->tpag.items == nullptr) return;
+    TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
 
     uint32_t tileW = tileset->gms2TileWidth;
     uint32_t tileH = tileset->gms2TileHeight;
     uint32_t borderX = tileset->gms2OutputBorderX;
     uint32_t borderY = tileset->gms2OutputBorderY;
     uint32_t columns = tileset->gms2TileColumns;
+    if (alpha > 1.0f) alpha = 1.0f;
+    uint8_t alphaByte = (uint8_t) (alpha * 255.0f + 0.5f);
+
+    int32_t startX = 0;
+    int32_t startY = 0;
+    int32_t endX = (int32_t) data->tilesX;
+    int32_t endY = (int32_t) data->tilesY;
+    if (runner->gameProfile != GAME_PROFILE_DELTARUNE) {
+        float viewLeft, viewTop, viewRight, viewBottom;
+        Runner_getCurrentViewBounds(runner, &viewLeft, &viewTop, &viewRight, &viewBottom);
+        startX = (int32_t) floorf((viewLeft - layerOffsetX) / (float) tileW) - 1;
+        startY = (int32_t) floorf((viewTop - layerOffsetY) / (float) tileH) - 1;
+        endX = (int32_t) ceilf((viewRight - layerOffsetX) / (float) tileW) + 1;
+        endY = (int32_t) ceilf((viewBottom - layerOffsetY) / (float) tileH) + 1;
+        if (startX < 0) startX = 0;
+        if (startY < 0) startY = 0;
+        if (endX > (int32_t) data->tilesX) endX = (int32_t) data->tilesX;
+        if (endY > (int32_t) data->tilesY) endY = (int32_t) data->tilesY;
+    }
+    if (startX >= endX || startY >= endY) return;
 
     static bool rotateWarned = false;
 
-    repeat(data->tilesY, ty) {
-        repeat(data->tilesX, tx) {
+    for (int32_t ty = startY; ty < endY; ty++) {
+        for (int32_t tx = startX; tx < endX; tx++) {
             uint32_t cell = data->tileData[ty * data->tilesX + tx];
             uint32_t tileIndex = cell & GMS2_TILE_INDEX_MASK;
             if (tileIndex == 0) continue; // 0 = empty
-
-            uint32_t col = tileIndex % columns;
-            uint32_t row = tileIndex / columns;
-            int32_t srcX = (int32_t) (col * (tileW + 2 * borderX) + borderX);
-            int32_t srcY = (int32_t) (row * (tileH + 2 * borderY) + borderY);
 
             bool mirror = (cell & GMS2_TILE_MIRROR_MASK) != 0;
             bool flip = (cell & GMS2_TILE_FLIP_MASK) != 0;
@@ -550,12 +623,60 @@ void Runner_drawTileLayer(Runner* runner, RoomLayerTilesData* data, float layerO
 
             // With negative scale the quad grows in the opposite direction, so shift the
             // destination by one tile to keep the origin at the top-left of the cell.
-            float dstX = (float) (tx * tileW) + layerOffsetX + (mirror ? (float) tileW : 0.0f);
-            float dstY = (float) (ty * tileH) + layerOffsetY + (flip ? (float) tileH : 0.0f);
+            int32_t dstX = (int32_t) (tx * tileW) + (mirror ? (int32_t) tileW : 0);
+            int32_t dstY = (int32_t) (ty * tileH) + (flip ? (int32_t) tileH : 0);
 
-            runner->renderer->vtable->drawSpritePart(runner->renderer, tpagIndex, srcX, srcY, (int32_t) tileW, (int32_t) tileH, dstX, dstY, xscale, yscale, 0.0f, 0.0f, 0.0f, 0xFFFFFF, 1.0f);
+            // GMS2 room tile data stores the tileset slot directly. Slot 0 is
+            // reserved for the empty tile and is already skipped above, so do
+            // not subtract one here. This matches UndertaleModTool's room
+            // renderer and avoids shifting Deltarune tilesets into repeated
+            // or visually blank slots.
+            uint32_t tileSlot = tileIndex;
+            uint32_t col = tileSlot % columns;
+            uint32_t row = tileSlot / columns;
+
+            int32_t srcX = (int32_t) (col * (tileW + 2 * borderX) + borderX);
+            int32_t srcY = (int32_t) (row * (tileH + 2 * borderY) + borderY);
+            int32_t srcW = (int32_t) tileW;
+            int32_t srcH = (int32_t) tileH;
+            float drawX = (float) dstX + layerOffsetX;
+            float drawY = (float) dstY + layerOffsetY;
+
+            // GMS2 tilemaps already know the exact BGND TPAG. Drawing the part
+            // directly avoids the platform-specific RoomTile path and keeps
+            // large Deltarune tile layers on the same renderer path as sprites.
+            if (tpag->targetX > srcX) {
+                int32_t clip = tpag->targetX - srcX;
+                drawX += (float) clip * xscale;
+                srcW -= clip;
+                srcX = tpag->targetX;
+            }
+            if (tpag->targetY > srcY) {
+                int32_t clip = tpag->targetY - srcY;
+                drawY += (float) clip * yscale;
+                srcH -= clip;
+                srcY = tpag->targetY;
+            }
+
+            int32_t contentRight = tpag->targetX + tpag->sourceWidth;
+            int32_t contentBottom = tpag->targetY + tpag->sourceHeight;
+            if (srcX + srcW > contentRight) srcW = contentRight - srcX;
+            if (srcY + srcH > contentBottom) srcH = contentBottom - srcY;
+            if (srcW <= 0 || srcH <= 0) continue;
+
+            runner->renderer->vtable->drawSpritePart(
+                runner->renderer, tpagIndex,
+                srcX - tpag->targetX, srcY - tpag->targetY,
+                srcW, srcH,
+                drawX, drawY, xscale, yscale,
+                0.0f, 0.0f, 0.0f,
+                0xFFFFFFu, (float) alphaByte / 255.0f);
         }
     }
+}
+
+void Runner_drawTileLayer(Runner* runner, RoomLayerTilesData* data, float layerOffsetX, float layerOffsetY) {
+    Runner_drawTileLayerEx(runner, data, layerOffsetX, layerOffsetY, 1.0f);
 }
 
 // Returns true if "drawables" is already in compareDrawableDepth order. Used by the sort-dirty path to skip qsort when small depth perturbations didn't actually cross any neighbor.
@@ -567,13 +688,14 @@ static bool isDrawableArraySorted(Drawable* drawables, int32_t count) {
 }
 
 // Refreshes each entry's cached .depth from the live instance/runtime-layer pointer. Tile entries never change depth mid-room so they're left alone.
-static void refreshDrawableDepths(Drawable* drawables, int32_t count) {
+static void refreshDrawableDepths(Runner* runner, Drawable* drawables, int32_t count) {
     for (int32_t i = 0; count > i; i++) {
         Drawable* d = &drawables[i];
         if (d->type == DRAWABLE_INSTANCE) {
             d->depth = d->instance->depth;
         } else if (d->type == DRAWABLE_LAYER) {
-            d->depth = d->runtimeLayer->depth;
+            RuntimeLayer* rl = Runner_findRuntimeLayerById(runner, d->runtimeLayerId);
+            if (rl != nullptr) d->depth = rl->depth;
         }
     }
 }
@@ -608,7 +730,7 @@ static void rebuildDrawableCacheIfDirty(Runner* runner) {
             size_t runtimeLayersCount = arrlenu(runner->runtimeLayers);
             repeat(runtimeLayersCount, i) {
                 RuntimeLayer* runtimeLayer = &runner->runtimeLayers[i];
-                Drawable d = { .type = DRAWABLE_LAYER, .depth = runtimeLayer->depth, .runtimeLayer = runtimeLayer };
+                Drawable d = { .type = DRAWABLE_LAYER, .depth = runtimeLayer->depth, .runtimeLayerId = (int32_t) runtimeLayer->id };
                 arrput(runner->cachedDrawables, d);
             }
         }
@@ -624,7 +746,7 @@ static void rebuildDrawableCacheIfDirty(Runner* runner) {
 
     if (runner->drawableListSortDirty) {
         int32_t count = (int32_t) arrlen(runner->cachedDrawables);
-        refreshDrawableDepths(runner->cachedDrawables, count);
+        refreshDrawableDepths(runner, runner->cachedDrawables, count);
         if (count > 1 && !isDrawableArraySorted(runner->cachedDrawables, count)) {
             qsort(runner->cachedDrawables, count, sizeof(Drawable), compareDrawableDepth);
         }
@@ -708,7 +830,7 @@ void Runner_draw(Runner* runner) {
             }
         } else if (d->type == DRAWABLE_LAYER)
         {
-            RuntimeLayer* runtimeLayer = d->runtimeLayer;
+            RuntimeLayer* runtimeLayer = Runner_findRuntimeLayerById(runner, d->runtimeLayerId);
             if (runtimeLayer == nullptr || !runtimeLayer->visible) continue;
             float layerOffsetX = runtimeLayer->xOffset;
             float layerOffsetY = runtimeLayer->yOffset;
@@ -729,6 +851,13 @@ void Runner_draw(Runner* runner) {
                         if (!layerElement->visible || !bg->visible) continue;
                         float alpha = bg->alpha * layerElement->alpha;
                         if (alpha <= 0.0f) continue;
+                        if (bg->spriteIndex < 0) {
+                            runner->renderer->vtable->drawRectangle(
+                                runner->renderer,
+                                0.0f, 0.0f, roomW, roomH,
+                                bg->blend, alpha, false);
+                            continue;
+                        }
                         int32_t tpagIndex = Renderer_resolveTPAGIndex(dataWin, bg->spriteIndex, (int32_t) bg->frameIndex);
                         // See note in the legacy backgrounds path above — the
                         // resolved TPAG index can pass `< 0` while still being
@@ -836,70 +965,93 @@ void Runner_draw(Runner* runner) {
                     if (0 > spr->spriteIndex) continue;
                     Renderer_drawSpriteExt(
                         runner->renderer, spr->spriteIndex, (int32_t) spr->frameIndex,
-                        spr->x, spr->y, spr->scaleX,
+                        spr->x + layerOffsetX, spr->y + layerOffsetY, spr->scaleX,
                         spr->scaleY, spr->rotation, spr->color,
                         1.0);
                 }
             } else if(parsedLayer->type == RoomLayerType_Background) {
                 if (runner->renderer == nullptr) return;
-                    DataWin* dataWin = runner->dataWin;
-                    float roomW = (float) runner->currentRoom->width;
-                    float roomH = (float) runner->currentRoom->height;
-                    RoomLayerBackgroundData* data = parsedLayer->backgroundData;
+                DataWin* dataWin = runner->dataWin;
+                float roomW = (float) runner->currentRoom->width;
+                float roomH = (float) runner->currentRoom->height;
+                RoomLayerBackgroundData* data = parsedLayer->backgroundData;
 
-                        RuntimeBackgroundElement* bg = nullptr;
-                        float elementAlpha = 1.0f;
-                        size_t elementCount = arrlenu(runtimeLayer->elements);
-                        repeat(elementCount, j) {
-                            RuntimeLayerElement* el = &runtimeLayer->elements[j];
-                            if (el->type == RuntimeLayerElementType_Background && el->backgroundElement != nullptr) {
-                                if (!el->visible) continue;
-                                bg = el->backgroundElement;
-                                elementAlpha = el->alpha;
-                                break;
-                            }
-                        }
+                RuntimeBackgroundElement* bg = nullptr;
+                float elementAlpha = 1.0f;
+                size_t elementCount = arrlenu(runtimeLayer->elements);
+                repeat(elementCount, j) {
+                    RuntimeLayerElement* el = &runtimeLayer->elements[j];
+                    if (el->type == RuntimeLayerElementType_Background && el->backgroundElement != nullptr) {
+                        if (!el->visible) continue;
+                        bg = el->backgroundElement;
+                        elementAlpha = el->alpha;
+                        break;
+                    }
+                }
 
-                        int32_t spriteIndex = bg != nullptr ? bg->spriteIndex : data->spriteIndex;
-                        bool visible = bg != nullptr ? bg->visible : data->visible;
-                        bool stretch = bg != nullptr ? bg->stretch : data->stretch;
-                        bool hTiled = bg != nullptr ? bg->htiled : data->hTiled;
-                        bool vTiled = bg != nullptr ? bg->vtiled : data->vTiled;
-                        float xScale = bg != nullptr ? bg->xScale : 1.0f;
-                        float yScale = bg != nullptr ? bg->yScale : 1.0f;
-                        uint32_t blend = bg != nullptr ? bg->blend : 0xFFFFFFu;
-                        float alpha = (bg != nullptr ? bg->alpha : 1.0f) * elementAlpha;
-                        float xOffset = bg != nullptr ? bg->xOffset : 0.0f;
-                        float yOffset = bg != nullptr ? bg->yOffset : 0.0f;
-                        int32_t frameIndex = bg != nullptr ? (int32_t) bg->frameIndex : (int32_t) data->firstFrame;
-                        if (!visible || alpha <= 0.0f) continue;
+                int32_t spriteIndex = bg != nullptr ? bg->spriteIndex : data->spriteIndex;
+                bool visible = bg != nullptr ? bg->visible : data->visible;
+                bool stretch = bg != nullptr ? bg->stretch : data->stretch;
+                bool hTiled = bg != nullptr ? bg->htiled : data->hTiled;
+                bool vTiled = bg != nullptr ? bg->vtiled : data->vTiled;
+                float xScale = bg != nullptr ? bg->xScale : 1.0f;
+                float yScale = bg != nullptr ? bg->yScale : 1.0f;
+                uint32_t blend = bg != nullptr ? bg->blend : (data->color & 0x00FFFFFFu);
+                float alpha = (bg != nullptr ? bg->alpha : (float) ((data->color >> 24) & 0xFF) / 255.0f) * elementAlpha;
+                float xOffset = bg != nullptr ? bg->xOffset : 0.0f;
+                float yOffset = bg != nullptr ? bg->yOffset : 0.0f;
+                int32_t frameIndex = bg != nullptr ? (int32_t) bg->frameIndex : (int32_t) data->firstFrame;
+                if (!visible || alpha <= 0.0f) continue;
 
-                        int32_t tpagIndex = Renderer_resolveTPAGIndex(dataWin, spriteIndex, frameIndex);
-                        // See note in the legacy backgrounds path above.
-                        if (0 > tpagIndex || (uint32_t) tpagIndex >= dataWin->tpag.count) continue;
-                        if (dataWin->tpag.items == nullptr) continue;
+                if (spriteIndex < 0) {
+                    runner->renderer->vtable->drawRectangle(
+                        runner->renderer,
+                        0.0f, 0.0f, roomW, roomH,
+                        blend, alpha, false);
+                    continue;
+                }
 
-                        if (stretch) {
-                            // Stretch to fill room dimensions
-                            TexturePageItem* tpag = &dataWin->tpag.items[tpagIndex];
-                            if (tpag->boundingWidth == 0 || tpag->boundingHeight == 0) continue;
-                            float xscale = roomW / (float) tpag->boundingWidth;
-                            float yscale = roomH / (float) tpag->boundingHeight;
-                            runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex, 0.0f, 0.0f, 0.0f, 0.0f, xscale, yscale, 0.0f, blend, alpha);
-                        } else if (hTiled || vTiled) {
-                            Renderer_drawBackgroundTiled(runner->renderer, tpagIndex, layerOffsetX + xOffset, layerOffsetY + yOffset, hTiled, vTiled, roomW, roomH, alpha);
-                        } else {
-                            // Single placement
-                            Renderer_drawSpriteExt(runner->renderer, spriteIndex, frameIndex,
-                                                   layerOffsetX + xOffset, layerOffsetY + yOffset,
-                                                   xScale, yScale, 0.0f, blend, alpha);
-                        }
+                int32_t tpagIndex = Renderer_resolveTPAGIndex(dataWin, spriteIndex, frameIndex);
+                // See note in the legacy backgrounds path above.
+                if (0 > tpagIndex || (uint32_t) tpagIndex >= dataWin->tpag.count) continue;
+                if (dataWin->tpag.items == nullptr) continue;
+
+                if (stretch) {
+                    TexturePageItem* tpag = &dataWin->tpag.items[tpagIndex];
+                    if (tpag->boundingWidth == 0 || tpag->boundingHeight == 0) continue;
+                    float xscale = roomW / (float) tpag->boundingWidth;
+                    float yscale = roomH / (float) tpag->boundingHeight;
+                    runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex, 0.0f, 0.0f, 0.0f, 0.0f, xscale, yscale, 0.0f, blend, alpha);
+                } else if (hTiled || vTiled) {
+                    Renderer_drawBackgroundTiled(runner->renderer, tpagIndex, layerOffsetX + xOffset, layerOffsetY + yOffset, hTiled, vTiled, roomW, roomH, alpha);
+                } else {
+                    Renderer_drawSpriteExt(runner->renderer, spriteIndex, frameIndex,
+                                           layerOffsetX + xOffset, layerOffsetY + yOffset,
+                                           xScale, yScale, 0.0f, blend, alpha);
+                }
             } else if(parsedLayer->type == RoomLayerType_Instances) {
                 // Instance depth is assigned from layers during room init (initRoom).
                 // Nothing to do here - instances are drawn from the DRAWABLE_INSTANCE path.
             } else if(parsedLayer->type == RoomLayerType_Tiles) {
                 if (runner->renderer == nullptr) continue;
-                Runner_drawTileLayer(runner, parsedLayer->tilesData, layerOffsetX, layerOffsetY);
+                RuntimeLayerElement* tilemapEl = nullptr;
+                size_t elementCount = arrlenu(runtimeLayer->elements);
+                repeat(elementCount, j) {
+                    RuntimeLayerElement* el = &runtimeLayer->elements[j];
+                    if (el->type == RuntimeLayerElementType_Tilemap &&
+                        el->tilemapElement == parsedLayer->tilesData) {
+                        tilemapEl = el;
+                        break;
+                    }
+                }
+                if (tilemapEl != nullptr) {
+                    if (!tilemapEl->visible || tilemapEl->alpha <= 0.0f) continue;
+                    Runner_prepareAutomaticTileLayerDraw(runner);
+                    Runner_drawTileLayerEx(runner, parsedLayer->tilesData, layerOffsetX, layerOffsetY, tilemapEl->alpha);
+                } else {
+                    Runner_prepareAutomaticTileLayerDraw(runner);
+                    Runner_drawTileLayer(runner, parsedLayer->tilesData, layerOffsetX, layerOffsetY);
+                }
             }
         }
     }
@@ -1198,6 +1350,18 @@ static bool queueSpriteIndexOnce(DataWin* dataWin, bool* seen, int32_t** spriteQ
     return true;
 }
 
+static bool queueSpriteNameOnce(DataWin* dataWin, bool* seen, int32_t** spriteQueue,
+                                const char* spriteName) {
+    if (spriteName == nullptr || spriteName[0] == '\0') return false;
+    repeat(dataWin->sprt.count, i) {
+        const char* name = dataWin->sprt.sprites[i].name;
+        if (name != nullptr && strcmp(name, spriteName) == 0) {
+            return queueSpriteIndexOnce(dataWin, seen, spriteQueue, (int32_t)i);
+        }
+    }
+    return false;
+}
+
 static bool rvalueToLikelySpriteIndex(RValue value, int32_t* outSpriteIndex) {
     GMLReal n;
     switch (value.type) {
@@ -1321,6 +1485,39 @@ static uint32_t Runner_prefetchInstanceSprites(Runner* runner, Instance* inst) {
         if (!varIdLooksLikeSpriteRef(dataWin, entry->key)) continue;
         queueSpriteRefsFromValue(dataWin, seen, &spriteQueue, entry->value);
         if (arrlenu(spriteQueue) >= 32) break;
+    }
+
+    if (runner->gameProfile == GAME_PROFILE_DELTARUNE &&
+        inst->objectIndex >= 0 && (uint32_t)inst->objectIndex < dataWin->objt.count) {
+        const char* objectName = dataWin->objt.objects[inst->objectIndex].name;
+        if (objectName != nullptr && strcmp(objectName, "obj_tensionbar") == 0) {
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_tensionbar");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_tensionbar_cutout");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_tensionmarker");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_tplogo");
+        } else if (objectName != nullptr && strcmp(objectName, "obj_teacup") == 0) {
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_screw");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_screw_end");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_base");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_platform");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_center");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacuparrow");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_empty");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_kris");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_susie");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_ralsei");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_tea");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_tea2");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_kris_tea");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_kris_tea2");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_susie_tea");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_ralsei_tea");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_ralsei_tea2");
+        } else if (objectName != nullptr && strcmp(objectName, "obj_teacup_bullet") == 0) {
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_bullet");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_bullet_big");
+            queueSpriteNameOnce(dataWin, seen, &spriteQueue, "spr_teacup_bullet_good");
+        }
     }
 
     uint32_t prefetchedCount = (uint32_t)arrlenu(spriteQueue);
@@ -1479,6 +1676,8 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
                 .backgroundElement = nullptr,
                 .spriteElement = spriteElement,
                 .tileElement = nullptr,
+                .tilemapElement = nullptr,
+                .tilemapLayerId = 0,
             };
             arrput(runtimeLayer->elements, el);
         }
@@ -1493,10 +1692,32 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
                     .backgroundElement = nullptr,
                     .spriteElement = nullptr,
                     .tileElement = tile,
+                    .tilemapElement = nullptr,
+                    .tilemapLayerId = 0,
                 };
                 arrput(runtimeLayer->elements, el);
             }
         }
+    }
+
+    // Populate GMS2 tilemap elements for parsed tile layers. Deltarune scripts
+    // query these through layer_get_all_elements() / layer_tilemap_get_id().
+    repeat(room->layerCount, i) {
+        RoomLayer* layerSource = &room->layers[i];
+        if (layerSource->type != RoomLayerType_Tiles || layerSource->tilesData == nullptr) continue;
+        RuntimeLayer* runtimeLayer = &runner->runtimeLayers[i];
+        RuntimeLayerElement el = {
+            .id = Runner_getNextLayerId(runner),
+            .type = RuntimeLayerElementType_Tilemap,
+            .visible = true,
+            .alpha = 1.0f,
+            .backgroundElement = nullptr,
+            .spriteElement = nullptr,
+            .tileElement = nullptr,
+            .tilemapElement = layerSource->tilesData,
+            .tilemapLayerId = layerSource->id,
+        };
+        arrput(runtimeLayer->elements, el);
     }
 
     // Populate mutable background elements for parsed GMS2 background layers.
@@ -1532,6 +1753,8 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
             .backgroundElement = bg,
             .spriteElement = nullptr,
             .tileElement = nullptr,
+            .tilemapElement = nullptr,
+            .tilemapLayerId = 0,
         };
         arrput(runtimeLayer->elements, el);
     }
@@ -1843,7 +2066,7 @@ static void populateObjectsWithAnyEventOfType(Runner* runner) {
     free(seen);
 }
 
-Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileSystem* fileSystem, AudioSystem* audioSystem) {
+Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileSystem* fileSystem, AudioSystem* audioSystem, GameProfile gameProfile) {
     requireNotNull(dataWin);
     requireNotNull(vm);
     requireNotNull(renderer);
@@ -1856,6 +2079,8 @@ Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileS
     runner->renderer = renderer;
     runner->fileSystem = fileSystem;
     runner->audioSystem = audioSystem;
+    runner->gameProfile = gameProfile;
+    renderer->gameProfile = gameProfile;
     runner->frameCount = 0;
     runner->osType = OS_WINDOWS;
     runner->keyboard = RunnerKeyboard_create();
@@ -1906,7 +2131,10 @@ Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileS
     // Link runner to VM context
     vm->runner = (struct Runner*) runner;
 
-    if (dataWin->gen8.name != nullptr && strstr(dataWin->gen8.name, "UNDERTALE") != nullptr) {
+    // Native script overrides are game-specific. Keep Undertale's optimized
+    // handlers from leaking into Deltarune when returning through the launcher.
+    NativeScripts_reset();
+    if (runner->gameProfile == GAME_PROFILE_UNDERTALE) {
         NativeScripts_init(vm, runner);
     }
 
@@ -2791,13 +3019,11 @@ void Runner_step(Runner* runner) {
     // Execute End Step for all instances
     Runner_executeEventForAll(runner, EVENT_STEP, STEP_END);
 
-    // Deltarune swaps several sprite ids through instance variables right before
-    // draw. Keep this warming path scoped to Deltarune so Undertale/Flowey does
-    // not regain the periodic atlas work that caused combat stutter.
-    if (runner->gameProfile == GAME_PROFILE_DELTARUNE &&
-        (runner->frameCount % 30) == 0) {
-        Runner_prefetchRuntimeSprites(runner);
-    }
+    // Do not run broad Deltarune sprite prefetch periodically during gameplay.
+    // It scans live instances and can synchronously load atlas pages; at 30 FPS
+    // the old once-per-30-frames path produced a visible once-per-second hitch
+    // in heavier Chapter 2 rooms. Room-start and instance-create prefetches
+    // remain active, so newly entered rooms still warm their expected sprites.
 
     // Update view following
     updateViews(runner);
@@ -3204,6 +3430,305 @@ char* Runner_dumpStateJson(Runner* runner) {
     return result;
 }
 
+static const char* roomLayerTypeName(uint32_t type) {
+    switch (type) {
+        case RoomLayerType_Path: return "Path";
+        case RoomLayerType_Background: return "Background";
+        case RoomLayerType_Instances: return "Instances";
+        case RoomLayerType_Assets: return "Assets";
+        case RoomLayerType_Tiles: return "Tiles";
+        case RoomLayerType_Effect: return "Effect";
+        case RoomLayerType_Path2: return "Path2";
+        default: return "Unknown";
+    }
+}
+
+static const char* runtimeElementTypeName(RuntimeLayerElementType type) {
+    switch (type) {
+        case RuntimeLayerElementType_Background: return "Background";
+        case RuntimeLayerElementType_Sprite: return "Sprite";
+        case RuntimeLayerElementType_Tilemap: return "Tilemap";
+        case RuntimeLayerElementType_Tile: return "Tile";
+        default: return "Unknown";
+    }
+}
+
+static const char* gameProfileName(GameProfile profile) {
+    switch (profile) {
+        case GAME_PROFILE_UNDERTALE: return "UNDERTALE";
+        case GAME_PROFILE_DELTARUNE: return "DELTARUNE";
+        case GAME_PROFILE_GENERIC:
+        default: return "GENERIC";
+    }
+}
+
+static uint32_t countNonEmptyTileCells(RoomLayerTilesData* tiles) {
+    if (tiles == nullptr || tiles->tileData == nullptr) return 0;
+    uint32_t nonEmpty = 0;
+    uint32_t total = tiles->tilesX * tiles->tilesY;
+    repeat(total, i) {
+        if ((tiles->tileData[i] & GMS2_TILE_INDEX_MASK) != 0) nonEmpty++;
+    }
+    return nonEmpty;
+}
+
+void Runner_dumpDiagnostics(Runner* runner, FILE* out) {
+    if (runner == nullptr || out == nullptr) return;
+    DataWin* dw = runner->dataWin;
+    Room* room = runner->currentRoom;
+
+    fprintf(out, "Butterscotch runtime diagnostics\n");
+    fprintf(out, "frame=%d\n", runner->frameCount);
+    fprintf(out, "profile=%s\n", gameProfileName(runner->gameProfile));
+    fprintf(out, "data_win=%s\n", dw != nullptr && dw->filePath != nullptr ? dw->filePath : "<unknown>");
+    fprintf(out, "game_name=%s\n", dw != nullptr && dw->gen8.name != nullptr ? dw->gen8.name : "<unknown>");
+    fprintf(out, "room=%s index=%d order=%d size=%ux%u payloadLoaded=%d eagerlyLoaded=%d\n",
+            room != nullptr && room->name != nullptr ? room->name : "<none>",
+            runner->currentRoomIndex,
+            runner->currentRoomOrderPosition,
+            room != nullptr ? room->width : 0,
+            room != nullptr ? room->height : 0,
+            room != nullptr ? room->payloadLoaded : 0,
+            room != nullptr ? room->eagerlyLoaded : 0);
+    fprintf(out, "viewsEnabled=%d drawBackgroundColor=%d backgroundColor=0x%06X gui=%dx%d pendingRoom=%d shouldExit=%d\n",
+            runner->viewsEnabled,
+            runner->drawBackgroundColor,
+            runner->backgroundColor,
+            runner->guiWidth,
+            runner->guiHeight,
+            runner->pendingRoom,
+            runner->shouldExit);
+    fprintf(out, "instances=%td runtimeLayers=%td cachedDrawables=%td structureDirty=%d sortDirty=%d\n",
+            arrlen(runner->instances),
+            arrlen(runner->runtimeLayers),
+            arrlen(runner->cachedDrawables),
+            runner->drawableListStructureDirty,
+            runner->drawableListSortDirty);
+
+    fprintf(out, "\n[views]\n");
+    repeat(MAX_VIEWS, i) {
+        RuntimeView* v = &runner->views[i];
+        if (!v->enabled) continue;
+        GMLCamera* cam = Runner_getCameraForView(runner, (int32_t)i);
+        fprintf(out, "view[%d] port=(%d,%d %dx%d) view=(%d,%d %dx%d) cam=%d camView=(%d,%d %dx%d) angle=%.3f\n",
+                (int)i,
+                v->portX, v->portY, v->portWidth, v->portHeight,
+                v->viewX, v->viewY, v->viewWidth, v->viewHeight,
+                v->cameraId,
+                cam != nullptr ? cam->viewX : -1,
+                cam != nullptr ? cam->viewY : -1,
+                cam != nullptr ? cam->viewWidth : -1,
+                cam != nullptr ? cam->viewHeight : -1,
+                cam != nullptr ? cam->viewAngle : 0.0f);
+    }
+
+    fprintf(out, "\n[room-layers]\n");
+    if (room != nullptr) {
+        repeat(room->layerCount, i) {
+            RoomLayer* layer = &room->layers[i];
+            RuntimeLayer* runtimeLayer = Runner_findRuntimeLayerById(runner, (int32_t)layer->id);
+            fprintf(out, "layer[%u] id=%u name=%s type=%s(%u) depth=%d visible=%d off=(%.2f,%.2f) speed=(%.2f,%.2f) runtime=%s rtVisible=%d rtDepth=%d rtOff=(%.2f,%.2f) elements=%td\n",
+                    (unsigned)i,
+                    layer->id,
+                    layer->name != nullptr ? layer->name : "<unnamed>",
+                    roomLayerTypeName(layer->type),
+                    layer->type,
+                    layer->depth,
+                    layer->visible,
+                    layer->xOffset, layer->yOffset,
+                    layer->hSpeed, layer->vSpeed,
+                    runtimeLayer != nullptr ? "yes" : "no",
+                    runtimeLayer != nullptr ? runtimeLayer->visible : 0,
+                    runtimeLayer != nullptr ? runtimeLayer->depth : 0,
+                    runtimeLayer != nullptr ? runtimeLayer->xOffset : 0.0f,
+                    runtimeLayer != nullptr ? runtimeLayer->yOffset : 0.0f,
+                    runtimeLayer != nullptr ? arrlen(runtimeLayer->elements) : 0);
+
+            if (layer->type == RoomLayerType_Tiles && layer->tilesData != nullptr) {
+                RoomLayerTilesData* tiles = layer->tilesData;
+                const char* bgName = "<invalid>";
+                if (tiles->backgroundIndex >= 0 && dw != nullptr && (uint32_t)tiles->backgroundIndex < dw->bgnd.count) {
+                    bgName = dw->bgnd.backgrounds[tiles->backgroundIndex].name;
+                }
+                fprintf(out, "  tilemap bg=%d/%s grid=%ux%u nonEmpty=%u total=%u\n",
+                        tiles->backgroundIndex,
+                        bgName != nullptr ? bgName : "<unnamed>",
+                        tiles->tilesX,
+                        tiles->tilesY,
+                        countNonEmptyTileCells(tiles),
+                        tiles->tilesX * tiles->tilesY);
+            } else if (layer->type == RoomLayerType_Background && layer->backgroundData != nullptr) {
+                RoomLayerBackgroundData* bg = layer->backgroundData;
+                const char* spriteName = "<none>";
+                if (bg->spriteIndex >= 0 && dw != nullptr && (uint32_t)bg->spriteIndex < dw->sprt.count) {
+                    spriteName = dw->sprt.sprites[bg->spriteIndex].name;
+                }
+                fprintf(out, "  background visible=%d sprite=%d/%s tiled=(%d,%d) stretch=%d color=0x%08X firstFrame=%.2f alphaFromColor=%.3f\n",
+                        bg->visible,
+                        bg->spriteIndex,
+                        spriteName != nullptr ? spriteName : "<unnamed>",
+                        bg->hTiled,
+                        bg->vTiled,
+                        bg->stretch,
+                        bg->color,
+                        bg->firstFrame,
+                        (float)((bg->color >> 24) & 0xFF) / 255.0f);
+            } else if (layer->type == RoomLayerType_Assets && layer->assetsData != nullptr) {
+                fprintf(out, "  assets sprites=%u legacyTiles=%u\n",
+                        layer->assetsData->spriteCount,
+                        layer->assetsData->legacyTileCount);
+            }
+        }
+    }
+
+    fprintf(out, "\n[runtime-layers]\n");
+    repeat(arrlen(runner->runtimeLayers), i) {
+        RuntimeLayer* layer = &runner->runtimeLayers[i];
+        fprintf(out, "runtimeLayer[%d] id=%u depth=%d visible=%d dynamic=%d name=%s off=(%.2f,%.2f) speed=(%.2f,%.2f) elements=%td\n",
+                (int)i,
+                layer->id,
+                layer->depth,
+                layer->visible,
+                layer->dynamic,
+                layer->dynamicName != nullptr ? layer->dynamicName : "<parsed>",
+                layer->xOffset, layer->yOffset,
+                layer->hSpeed, layer->vSpeed,
+                arrlen(layer->elements));
+        repeat(arrlen(layer->elements), j) {
+            RuntimeLayerElement* el = &layer->elements[j];
+            fprintf(out, "  element[%d] id=%u type=%s(%d) visible=%d alpha=%.3f\n",
+                    (int)j,
+                    el->id,
+                    runtimeElementTypeName(el->type),
+                    el->type,
+                    el->visible,
+                    el->alpha);
+            if (el->type == RuntimeLayerElementType_Tilemap && el->tilemapElement != nullptr) {
+                RoomLayerTilesData* tiles = el->tilemapElement;
+                fprintf(out, "    tilemapLayerId=%u bg=%d grid=%ux%u nonEmpty=%u\n",
+                        el->tilemapLayerId,
+                        tiles->backgroundIndex,
+                        tiles->tilesX,
+                        tiles->tilesY,
+                        countNonEmptyTileCells(tiles));
+            } else if (el->type == RuntimeLayerElementType_Background && el->backgroundElement != nullptr) {
+                RuntimeBackgroundElement* bg = el->backgroundElement;
+                const char* spriteName = "<none>";
+                if (bg->spriteIndex >= 0 && dw != nullptr && (uint32_t)bg->spriteIndex < dw->sprt.count) {
+                    spriteName = dw->sprt.sprites[bg->spriteIndex].name;
+                }
+                fprintf(out, "    background sprite=%d/%s visible=%d tiled=(%d,%d) stretch=%d alpha=%.3f blend=0x%06X off=(%.2f,%.2f) scale=(%.2f,%.2f) frame=%.2f speed=%.2f\n",
+                        bg->spriteIndex,
+                        spriteName != nullptr ? spriteName : "<unnamed>",
+                        bg->visible,
+                        bg->htiled,
+                        bg->vtiled,
+                        bg->stretch,
+                        bg->alpha,
+                        bg->blend,
+                        bg->xOffset, bg->yOffset,
+                        bg->xScale, bg->yScale,
+                        bg->frameIndex,
+                        bg->animationSpeed);
+            } else if (el->type == RuntimeLayerElementType_Sprite && el->spriteElement != nullptr) {
+                RuntimeSpriteElement* spr = el->spriteElement;
+                const char* spriteName = "<none>";
+                if (spr->spriteIndex >= 0 && dw != nullptr && (uint32_t)spr->spriteIndex < dw->sprt.count) {
+                    spriteName = dw->sprt.sprites[spr->spriteIndex].name;
+                }
+                fprintf(out, "    sprite=%d/%s pos=(%d,%d) scale=(%.2f,%.2f) rot=%.2f frame=%.2f speed=%.2f color=0x%08X\n",
+                        spr->spriteIndex,
+                        spriteName != nullptr ? spriteName : "<unnamed>",
+                        spr->x, spr->y,
+                        spr->scaleX, spr->scaleY,
+                        spr->rotation,
+                        spr->frameIndex,
+                        spr->animationSpeed,
+                        spr->color);
+            } else if (el->type == RuntimeLayerElementType_Tile && el->tileElement != nullptr) {
+                RoomTile* tile = el->tileElement;
+                fprintf(out, "    tile bg=%d src=(%d,%d %ux%u) dst=(%d,%d) depth=%d color=0x%08X\n",
+                        tile->backgroundDefinition,
+                        tile->sourceX, tile->sourceY,
+                        tile->width, tile->height,
+                        tile->x, tile->y,
+                        tile->tileDepth,
+                        tile->color);
+            }
+        }
+    }
+
+    fprintf(out, "\n[drawables]\n");
+    repeat(arrlen(runner->cachedDrawables), i) {
+        Drawable* d = &runner->cachedDrawables[i];
+        if (d->type == DRAWABLE_INSTANCE) {
+            Instance* inst = d->instance;
+            const char* objName = "<invalid>";
+            const char* spriteName = "<none>";
+            if (inst != nullptr && inst->objectIndex >= 0 && dw != nullptr && (uint32_t)inst->objectIndex < dw->objt.count) {
+                objName = dw->objt.objects[inst->objectIndex].name;
+            }
+            if (inst != nullptr && inst->spriteIndex >= 0 && dw != nullptr && (uint32_t)inst->spriteIndex < dw->sprt.count) {
+                spriteName = dw->sprt.sprites[inst->spriteIndex].name;
+            }
+            fprintf(out, "drawable[%d] INSTANCE depth=%d id=%u obj=%d/%s sprite=%d/%s pos=(%.2f,%.2f) visible=%d active=%d layer=%d alpha=%.3f\n",
+                    (int)i,
+                    d->depth,
+                    inst != nullptr ? inst->instanceId : 0,
+                    inst != nullptr ? inst->objectIndex : -1,
+                    objName != nullptr ? objName : "<unnamed>",
+                    inst != nullptr ? inst->spriteIndex : -1,
+                    spriteName != nullptr ? spriteName : "<unnamed>",
+                    inst != nullptr ? inst->x : 0.0f,
+                    inst != nullptr ? inst->y : 0.0f,
+                    inst != nullptr ? inst->visible : 0,
+                    inst != nullptr ? inst->active : 0,
+                    inst != nullptr ? inst->layer : -1,
+                    inst != nullptr ? inst->imageAlpha : 0.0f);
+        } else if (d->type == DRAWABLE_LAYER) {
+            RuntimeLayer* layer = Runner_findRuntimeLayerById(runner, d->runtimeLayerId);
+            fprintf(out, "drawable[%d] LAYER depth=%d runtimeLayerId=%d found=%d visible=%d elements=%td\n",
+                    (int)i,
+                    d->depth,
+                    d->runtimeLayerId,
+                    layer != nullptr,
+                    layer != nullptr ? layer->visible : 0,
+                    layer != nullptr ? arrlen(layer->elements) : 0);
+        } else {
+            fprintf(out, "drawable[%d] TILE depth=%d tileIndex=%d\n", (int)i, d->depth, d->tileIndex);
+        }
+    }
+
+    fprintf(out, "\n[active-instances-summary]\n");
+    repeat(arrlen(runner->instances), i) {
+        Instance* inst = runner->instances[i];
+        if (inst == nullptr || !inst->active) continue;
+        const char* objName = "<invalid>";
+        const char* spriteName = "<none>";
+        if (inst->objectIndex >= 0 && dw != nullptr && (uint32_t)inst->objectIndex < dw->objt.count) {
+            objName = dw->objt.objects[inst->objectIndex].name;
+        }
+        if (inst->spriteIndex >= 0 && dw != nullptr && (uint32_t)inst->spriteIndex < dw->sprt.count) {
+            spriteName = dw->sprt.sprites[inst->spriteIndex].name;
+        }
+        fprintf(out, "inst id=%u obj=%d/%s sprite=%d/%s pos=(%.2f,%.2f) depth=%d layer=%d vis=%d alpha=%.3f image=(%.2f spd %.2f)\n",
+                inst->instanceId,
+                inst->objectIndex,
+                objName != nullptr ? objName : "<unnamed>",
+                inst->spriteIndex,
+                spriteName != nullptr ? spriteName : "<unnamed>",
+                inst->x, inst->y,
+                inst->depth,
+                inst->layer,
+                inst->visible,
+                inst->imageAlpha,
+                inst->imageIndex,
+                inst->imageSpeed);
+    }
+
+    fprintf(out, "\n[end]\n");
+}
+
 void Runner_free(Runner* runner) {
     if (runner == nullptr) return;
 
@@ -3246,5 +3771,6 @@ void Runner_free(Runner* runner) {
     RunnerMouse_free(runner->mouse);
     RunnerGamepad_free(runner->gamepads);
     Instance_free(runner->globalScopeInstance);
+    NativeScripts_reset();
     free(runner);
 }

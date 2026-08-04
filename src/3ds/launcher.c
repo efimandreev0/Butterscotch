@@ -26,7 +26,7 @@
 #define SETTINGS_PATH BASE_DIR "/launcher_settings.bin"
 #define LAUNCHER_SETTINGS_MAGIC 0x4253544Cu // 'LTSB'
 #define GAME_CONTROL_MAP_NAME "controls.bin"
-#define LAUNCHER_APP_TITLE "BUTTERSCOTCH - v4.2 EPdN"
+#define LAUNCHER_APP_TITLE "BUTTERSCOTCH - v7.2 EPdN"
 
 // Each glyph in the bitmap font expands to ~17 6-vertex rects, so a single full footer
 // line can burn ~4k verts. Three footer lines + gradient + particles + chrome easily blew
@@ -143,6 +143,7 @@ static LauncherSettings g_settings = {
     .app_filter = LAUNCHER_APP_FILTER_LINEAR,
     .os_type = OS_WINDOWS,
     .input_mode = LAUNCHER_INPUT_KEYBOARD,
+    .debug_mode = 0,
 };
 
 // Subset of YoYoOperatingSystem the user can pick from in settings. Order
@@ -318,6 +319,16 @@ void launcher_save_active_controls(void) {
     fclose(f);
 }
 
+static u32 launcher_cstick_as_cpad_mask(int cstickX, int cstickY) {
+    const int deadzone = 45;
+    u32 mask = 0;
+    if (cstickX <= -deadzone) mask |= KEY_CPAD_LEFT;
+    if (cstickX >=  deadzone) mask |= KEY_CPAD_RIGHT;
+    if (cstickY <= -deadzone) mask |= KEY_CPAD_DOWN;
+    if (cstickY >=  deadzone) mask |= KEY_CPAD_UP;
+    return mask;
+}
+
 static void launcher_apply_vk_edge(RunnerKeyboardState *kb, int vk, bool down, bool up, bool held) {
     if (!kb || vk < 0 || vk >= GML_KEY_COUNT || vk == VK_NOKEY) return;
     if (down) {
@@ -327,7 +338,15 @@ static void launcher_apply_vk_edge(RunnerKeyboardState *kb, int vk, bool down, b
     }
 }
 
-void launcher_apply_3ds_input(RunnerKeyboardState *kb, u32 down, u32 up, u32 held) {
+void launcher_apply_3ds_input(RunnerKeyboardState *kb, u32 down, u32 up, u32 held,
+                              int cstickX, int cstickY) {
+    static u32 cstickHeldPrev = 0;
+    u32 cstickHeld = launcher_cstick_as_cpad_mask(cstickX, cstickY);
+    down |= cstickHeld & ~cstickHeldPrev;
+    up |= cstickHeldPrev & ~cstickHeld;
+    held |= cstickHeld;
+    cstickHeldPrev = cstickHeld;
+
     bool vk_down[GML_KEY_COUNT];
     bool vk_up[GML_KEY_COUNT];
     bool vk_held[GML_KEY_COUNT];
@@ -424,14 +443,20 @@ void launcher_apply_3ds_gamepad(RunnerGamepadState *gp,
         slot->buttonValue[i] = slot->buttonDown[i] ? 1.0f : 0.0f;
     }
 
-    // Circle pad → left stick. Y is inverted to match XInput/GameMaker.
+    // Circle pad -> left stick. C-stick mirrors left-stick movement too, so New
+    // 3DS users can move with either nub without changing per-game controls.
     float lh = circle_axis_normalize(circleX);
     float lv = -circle_axis_normalize(circleY);
-    // C-stick (New 3DS) → right stick.
     float rh = circle_axis_normalize(cstickX);
     float rv = -circle_axis_normalize(cstickY);
-    slot->axisValue[0] = deadzone(lh, slot->deadzone);
-    slot->axisValue[1] = deadzone(lv, slot->deadzone);
+    float leftH = deadzone(lh, slot->deadzone);
+    float leftV = deadzone(lv, slot->deadzone);
+    float cstickH = deadzone(rh, slot->deadzone);
+    float cstickV = deadzone(rv, slot->deadzone);
+    if (fabsf(cstickH) > fabsf(leftH)) leftH = cstickH;
+    if (fabsf(cstickV) > fabsf(leftV)) leftV = cstickV;
+    slot->axisValue[0] = leftH;
+    slot->axisValue[1] = leftV;
     slot->axisValue[2] = deadzone(rh, slot->deadzone);
     slot->axisValue[3] = deadzone(rv, slot->deadzone);
 
@@ -544,6 +569,8 @@ void launcher_apply_theme_index(int index) {
 void launcher_apply_settings(const LauncherSettings *s) {
     if (!s) return;
     g_settings.theme_index = s->theme_index;
+    if (g_settings.theme_index < 0 || g_settings.theme_index >= THEME_COUNT)
+        g_settings.theme_index = 0;
     g_settings.game_screen = s->game_screen;
     g_settings.show_side_blur = s->show_side_blur;
     g_settings.show_side_particles = s->show_side_particles;
@@ -552,6 +579,7 @@ void launcher_apply_settings(const LauncherSettings *s) {
     g_settings.app_filter = s->app_filter;
     g_settings.os_type = s->os_type;
     g_settings.input_mode = s->input_mode;
+    g_settings.debug_mode = s->debug_mode ? 1 : 0;
     g_settings.global_controls = s->global_controls;
     launcher_normalize_control_map(&g_settings.global_controls);
     int backdropValue = (int)g_settings.backdrop_mode;
@@ -627,6 +655,11 @@ void launcher_load_settings(void) {
             tmp.frame_pacing = LAUNCHER_FRAME_PACING_30;
         }
         tmp.frame_pacing = LAUNCHER_FRAME_PACING_30;
+        if (tmp.version < 8u) {
+            tmp.debug_mode = 0;
+        } else {
+            tmp.debug_mode = tmp.debug_mode ? 1 : 0;
+        }
         // Older settings files (version 3) don't have os_type / input_mode —
         // their bytes will be whatever happened to live in the previous
         // _reserved[] padding. Fall back to defaults if they're out of range.
@@ -1414,6 +1447,11 @@ static void launcher_draw_centered_text_rgb(LauncherGfx *gfx, const char *text, 
 
 void launcher_gfx_destroy(LauncherGfx *gfx) {
     if (!gfx) return;
+    if (gfx->inFrame) {
+        launcher_gfx_flush(gfx);
+        C3D_FrameEnd(0);
+        gfx->inFrame = false;
+    }
     if (gfx->whiteTex.data) C3D_TexDelete(&gfx->whiteTex);
     if (gfx->vbuf) linearFree(gfx->vbuf);
     if (gfx->topScreen.owns && gfx->topScreen.target) C3D_RenderTargetDelete(gfx->topScreen.target);
@@ -1993,6 +2031,40 @@ static bool launcher_confirm_clear_cache(LauncherGfx *gfx, const LauncherGameEnt
                                         "A CONFIRM   B CANCEL", "THIS ONLY DELETES CACHE FOLDERS", t);
             launcher_end_frame(gfx);
         }
+    }
+    return false;
+}
+
+bool launcher_confirm_quit_to_launcher(LauncherGfx *gfx) {
+    while (aptMainLoop()) {
+        hidScanInput();
+        if (!(hidKeysHeld() & KEY_START)) break;
+        float t = (float)osGetTime() * 0.001f;
+        if (gfx && gfx->ready && launcher_begin_frame(gfx)) {
+            launcher_draw_cache_message(gfx, "QUIT TO LAUNCHER",
+                                        "RETURN TO BUTTERSCOTCH MENU?",
+                                        "A CONFIRM   B CANCEL",
+                                        "GAME STATE IS NOT SAVED", t);
+            launcher_end_frame(gfx);
+        }
+        gspWaitForVBlank();
+    }
+
+    while (aptMainLoop()) {
+        hidScanInput();
+        u32 kDown = hidKeysDown();
+        if (kDown & KEY_A) return true;
+        if (kDown & (KEY_B | KEY_START)) return false;
+
+        float t = (float)osGetTime() * 0.001f;
+        if (gfx && gfx->ready && launcher_begin_frame(gfx)) {
+            launcher_draw_cache_message(gfx, "QUIT TO LAUNCHER",
+                                        "RETURN TO BUTTERSCOTCH MENU?",
+                                        "A CONFIRM   B CANCEL",
+                                        "GAME STATE IS NOT SAVED", t);
+            launcher_end_frame(gfx);
+        }
+        gspWaitForVBlank();
     }
     return false;
 }
@@ -2671,7 +2743,15 @@ void launcher_render_loading(LauncherGfx *gfx, const char *gameName, const char 
 // In-game pause overlay
 // ---------------------------------------------------------------------------
 
-#define PAUSE_OPTION_COUNT 9
+#define PAUSE_OPTION_COUNT 10
+
+static int pause_option_count(bool allowDebugMode) {
+    return allowDebugMode ? PAUSE_OPTION_COUNT : PAUSE_OPTION_COUNT - 1;
+}
+
+static int pause_option_index(int visibleIndex, bool allowDebugMode) {
+    return (!allowDebugMode && visibleIndex >= 7) ? visibleIndex + 1 : visibleIndex;
+}
 
 static const char *pause_option_label(int idx) {
     switch (idx) {
@@ -2682,8 +2762,9 @@ static const char *pause_option_label(int idx) {
         case 4: return "EMPTY SPACE";
         case 5: return "SIDE PARTICLES";
         case 6: return "SIDE BLUR";
-        case 7: return "GAME CONTROLS";
-        case 8: return "QUIT TO LAUNCHER";
+        case 7: return "DEBUG MODE";
+        case 8: return "GAME CONTROLS";
+        case 9: return "QUIT TO LAUNCHER";
         default: return "?";
     }
 }
@@ -2713,9 +2794,12 @@ static void pause_option_value(int idx, char *out, size_t size) {
             snprintf(out, size, "< %s >", g_settings.show_side_blur ? "ON" : "OFF");
             break;
         case 7:
-            snprintf(out, size, "PRESS A");
+            snprintf(out, size, "< %s >", g_settings.debug_mode ? "ON" : "OFF");
             break;
         case 8:
+            snprintf(out, size, "PRESS A");
+            break;
+        case 9:
             snprintf(out, size, "PRESS A");
             break;
         default:
@@ -2757,6 +2841,9 @@ static bool pause_option_step(int idx, int dir) {
             launcher_push_theme_to_renderer();
             return true;
         case 7:
+            g_settings.debug_mode = !g_settings.debug_mode;
+            return true;
+        case 8:
             return false;
         default:
             return false;
@@ -2764,9 +2851,11 @@ static bool pause_option_step(int idx, int dir) {
 }
 
 static void pause_draw_overlay(LauncherGfx *gfx, LauncherScreen *scr, int sel, float t,
-                               const char *headline) {
-    const LauncherTheme *th = launcher_current_theme();
+                               const char *headline, bool allowDebugMode) {
     if (!scr || !scr->ready) return;
+    const LauncherTheme *themePtr = launcher_current_theme();
+    LauncherTheme theme = themePtr ? *themePtr : g_themes[0];
+    const LauncherTheme *th = &theme;
 
     launcher_bind_screen(gfx, scr, false, 0);
 
@@ -2795,7 +2884,9 @@ static void pause_draw_overlay(LauncherGfx *gfx, LauncherScreen *scr, int sel, f
     float rowH  = 16.f;
     char value[48];
 
-    for (int i = 0; i < PAUSE_OPTION_COUNT; i++) {
+    int optionCount = pause_option_count(allowDebugMode);
+    for (int i = 0; i < optionCount; i++) {
+        int option = pause_option_index(i, allowDebugMode);
         float ry = listY + (float)i * rowH;
         bool selRow = (i == sel);
         if (selRow) {
@@ -2805,9 +2896,9 @@ static void pause_draw_overlay(LauncherGfx *gfx, LauncherScreen *scr, int sel, f
             launcher_rect(gfx, listX - 6, ry - 3, 3, rowH - 2,
                           th->accent[0], th->accent[1], th->accent[2], 1.f);
         }
-        launcher_draw_text_rgb(gfx, pause_option_label(i), listX, ry, 1.0f,
+        launcher_draw_text_rgb(gfx, pause_option_label(option), listX, ry, 1.0f,
                                selRow ? th->text_main : th->text_subtle, 1.f);
-        pause_option_value(i, value, sizeof(value));
+        pause_option_value(option, value, sizeof(value));
         float vw = launcher_text_width(value, 1.0f);
         launcher_draw_text_rgb(gfx, value, cardX + cardW - 14.f - vw, ry, 1.0f,
                                selRow ? th->text_title : th->text_main, 1.f);
@@ -2818,10 +2909,11 @@ static void pause_draw_overlay(LauncherGfx *gfx, LauncherScreen *scr, int sel, f
                                     0.95f, th->text_subtle, 0.95f);
 }
 
-LauncherPauseAction launcher_run_pause(LauncherGfx *gfx) {
+LauncherPauseAction launcher_run_pause(LauncherGfx *gfx, bool allowDebugMode) {
     if (!gfx || !gfx->ready) return LAUNCHER_PAUSE_RESUME;
 
     int sel = 0;
+    int optionCount = pause_option_count(allowDebugMode);
 
     // Wait for the chord-trigger keys to be released so we don't immediately bounce.
     while (aptMainLoop()) {
@@ -2837,31 +2929,32 @@ LauncherPauseAction launcher_run_pause(LauncherGfx *gfx) {
 
         if (kDown & KEY_B) return LAUNCHER_PAUSE_RESUME;
         if (kDown & (KEY_DOWN | KEY_DDOWN | KEY_CPAD_DOWN)) {
-            sel = (sel + 1) % PAUSE_OPTION_COUNT;
+            sel = (sel + 1) % optionCount;
         }
         if (kDown & (KEY_UP | KEY_DUP | KEY_CPAD_UP)) {
-            sel = (sel - 1 + PAUSE_OPTION_COUNT) % PAUSE_OPTION_COUNT;
+            sel = (sel - 1 + optionCount) % optionCount;
         }
         if (kDown & (KEY_RIGHT | KEY_DRIGHT | KEY_CPAD_RIGHT | KEY_R)) {
-            pause_option_step(sel, +1);
+            pause_option_step(pause_option_index(sel, allowDebugMode), +1);
         }
         if (kDown & (KEY_LEFT | KEY_DLEFT | KEY_CPAD_LEFT | KEY_L)) {
-            pause_option_step(sel, -1);
+            pause_option_step(pause_option_index(sel, allowDebugMode), -1);
         }
         if (kDown & KEY_A) {
-            if (sel == 0) {
+            int option = pause_option_index(sel, allowDebugMode);
+            if (option == 0) {
                 launcher_save_settings();
                 return LAUNCHER_PAUSE_RESUME;
-            } else if (sel == 7) {
+            } else if (option == 8) {
                 if (launcher_run_control_mapper(gfx, &g_active_controls, "GAME CONTROLS")) {
                     launcher_save_active_controls();
                 }
                 continue;
-            } else if (sel == 8) {
+            } else if (option == 9) {
                 launcher_save_settings();
                 return LAUNCHER_PAUSE_QUIT_TO_LAUNCHER;
             } else {
-                pause_option_step(sel, +1);
+                pause_option_step(option, +1);
             }
         }
         if (kDown & KEY_START) {
@@ -2896,7 +2989,7 @@ LauncherPauseAction launcher_run_pause(LauncherGfx *gfx) {
                                                 1.10f, th->text_subtle, 0.95f);
             }
 
-            pause_draw_overlay(gfx, overlay, sel, t, "PAUSED");
+            pause_draw_overlay(gfx, overlay, sel, t, "PAUSED", allowDebugMode);
             launcher_end_frame(gfx);
         }
         gspWaitForVBlank();

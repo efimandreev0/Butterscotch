@@ -6,6 +6,7 @@
 #include <math.h>
 
 #include "data_win.h"
+#include "game_profile.h"
 #include "instance.h"
 
 // GameMaker Blend Modes
@@ -103,6 +104,7 @@ typedef struct {
 struct Renderer {
     RendererVtable* vtable;
     DataWin* dataWin;
+    GameProfile gameProfile;
     uint32_t drawColor;  // BGR format, default 0xFFFFFF (white)
     float drawAlpha;     // default 1.0
     int32_t drawFont;    // default -1 (no font)

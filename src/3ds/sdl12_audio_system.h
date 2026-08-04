@@ -36,6 +36,8 @@ typedef struct {
     float gain;
     float lastAudibleGain;
     float pitch;
+    float positionBase;
+    uint32_t positionStartedTicks;
     uint32_t createdFrame;
     uint32_t displacedFrame;
 } SysMixerMusicHandle;

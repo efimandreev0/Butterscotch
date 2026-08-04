@@ -4214,8 +4214,11 @@ static RValue builtinSurfaceGetPixel(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED R
 static RValue builtinSurfaceCheck(VMContext* ctx, RValue* args, int32_t argCount) {
     if (1 > argCount) return RValue_makeBool(false);
     int32_t surfaceId = RValue_toInt32(args[0]);
-    if (surfaceId == -1) return RValue_makeBool(true);
     Runner* runner = (Runner*) ctx->runner;
+    if (surfaceId == -1) {
+        return RValue_makeBool(runner == nullptr ||
+                               runner->gameProfile != GAME_PROFILE_DELTARUNE);
+    }
     if (runner == nullptr || runner->renderer == nullptr || runner->renderer->vtable->surfaceExists == nullptr)
         return RValue_makeBool(false);
     return RValue_makeBool(runner->renderer->vtable->surfaceExists(runner->renderer, surfaceId));
@@ -7130,9 +7133,13 @@ static RValue builtin_surface_reset_target(VMContext* ctx, MAYBE_UNUSED RValue* 
 static RValue builtin_surface_exists(VMContext* ctx, RValue* args, int32_t argCount) {
     if (1 > argCount) return RValue_makeBool(false);
     int32_t surfaceId = RValue_toInt32(args[0]);
-    if (surfaceId == -1) return RValue_makeBool(true);
-
     Runner* runner = (Runner*) ctx->runner;
+    // Deltarune creates user surfaces lazily and initializes their handles to
+    // -1. Undertale keeps the legacy application_surface sentinel behavior.
+    if (surfaceId == -1) {
+        return RValue_makeBool(runner == nullptr ||
+                               runner->gameProfile != GAME_PROFILE_DELTARUNE);
+    }
     if (runner->renderer == nullptr || runner->renderer->vtable->surfaceExists == nullptr) {
         return RValue_makeBool(false);
     }
@@ -8813,6 +8820,16 @@ static RValue builtinLayerTilemapGetId(VMContext* ctx, RValue* args, MAYBE_UNUSE
     int32_t layerId = resolveLayerIdArg(runner, args[0]);
     if (0 > layerId) return RValue_makeReal(-1.0);
 
+    RuntimeLayer* runtimeLayer = Runner_findRuntimeLayerById(runner, layerId);
+    if (runtimeLayer != nullptr) {
+        size_t count = arrlenu(runtimeLayer->elements);
+        repeat(count, i) {
+            RuntimeLayerElement* el = &runtimeLayer->elements[i];
+            if (el->type == RuntimeLayerElementType_Tilemap && el->tilemapElement != nullptr)
+                return RValue_makeReal((GMLReal) el->id);
+        }
+    }
+
     RoomLayer* foundLayer = Runner_findRoomLayerById(runner, layerId);
     if (foundLayer != nullptr && foundLayer->type == RoomLayerType_Tiles) {
         return RValue_makeReal(layerId);
@@ -8821,20 +8838,90 @@ static RValue builtinLayerTilemapGetId(VMContext* ctx, RValue* args, MAYBE_UNUSE
     return RValue_makeReal(-1.0);
 }
 
+static RoomLayerTilesData* findTilemapData(Runner* runner, int32_t tilemapId, RuntimeLayer** outLayer) {
+    if (outLayer != nullptr) *outLayer = nullptr;
+    RuntimeLayer* owner = nullptr;
+    RuntimeLayerElement* el = Runner_findLayerElementById(runner, tilemapId, &owner);
+    if (el != nullptr &&
+        el->type == RuntimeLayerElementType_Tilemap &&
+        el->tilemapElement != nullptr) {
+        if (outLayer != nullptr) *outLayer = owner;
+        return el->tilemapElement;
+    }
+
+    RoomLayer* foundLayer = Runner_findRoomLayerById(runner, tilemapId);
+    if (foundLayer != nullptr && foundLayer->type == RoomLayerType_Tiles) {
+        if (outLayer != nullptr) *outLayer = Runner_findRuntimeLayerById(runner, tilemapId);
+        return foundLayer->tilesData;
+    }
+    return nullptr;
+}
+
 static RValue builtinDrawTilemap(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     if (3 > argCount) return RValue_makeUndefined();
     Runner* runner = (Runner*) ctx->runner;
     int32_t tilemapLayerId = RValue_toInt32(args[0]);
     GMLReal x = RValue_toReal(args[1]);
     GMLReal y = RValue_toReal(args[2]);
-
-    RoomLayer* foundLayer = Runner_findRoomLayerById(runner, tilemapLayerId);
-    if (foundLayer != nullptr && foundLayer->type == RoomLayerType_Tiles) {
-        Runner_drawTileLayer(runner, foundLayer->tilesData, x, y);
+    RuntimeLayer* owner = nullptr;
+    RoomLayerTilesData* tilesData = findTilemapData(runner, tilemapLayerId, &owner);
+    if (tilesData != nullptr) {
+        float alpha = 1.0f;
+        if (owner != nullptr) {
+            size_t count = arrlenu(owner->elements);
+            repeat(count, i) {
+                RuntimeLayerElement* el = &owner->elements[i];
+                if (el->type == RuntimeLayerElementType_Tilemap &&
+                    el->tilemapElement == tilesData) {
+                    alpha = el->alpha;
+                    break;
+                }
+            }
+        }
+        Runner_drawTileLayerEx(runner, tilesData, x, y, alpha);
     }
 
     return RValue_makeUndefined();
 }
+
+static RValue builtinTilemapX(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    if (2 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    RuntimeLayer* owner = nullptr;
+    if (findTilemapData(runner, RValue_toInt32(args[0]), &owner) == nullptr || owner == nullptr)
+        return RValue_makeUndefined();
+    owner->xOffset = (float) RValue_toReal(args[1]);
+    return RValue_makeUndefined();
+}
+
+static RValue builtinTilemapY(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    if (2 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    RuntimeLayer* owner = nullptr;
+    if (findTilemapData(runner, RValue_toInt32(args[0]), &owner) == nullptr || owner == nullptr)
+        return RValue_makeUndefined();
+    owner->yOffset = (float) RValue_toReal(args[1]);
+    return RValue_makeUndefined();
+}
+
+static RValue builtinTilemapGetX(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    if (1 > argCount) return RValue_makeReal(-1.0);
+    Runner* runner = (Runner*) ctx->runner;
+    RuntimeLayer* owner = nullptr;
+    if (findTilemapData(runner, RValue_toInt32(args[0]), &owner) == nullptr || owner == nullptr)
+        return RValue_makeReal(-1.0);
+    return RValue_makeReal((GMLReal) owner->xOffset);
+}
+
+static RValue builtinTilemapGetY(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    if (1 > argCount) return RValue_makeReal(-1.0);
+    Runner* runner = (Runner*) ctx->runner;
+    RuntimeLayer* owner = nullptr;
+    if (findTilemapData(runner, RValue_toInt32(args[0]), &owner) == nullptr || owner == nullptr)
+        return RValue_makeReal(-1.0);
+    return RValue_makeReal((GMLReal) owner->yOffset);
+}
+
 static RValue builtinLayerGetAllElements(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = (Runner*) ctx->runner;
     int32_t id = resolveLayerIdArg(runner, args[0]);
@@ -8853,6 +8940,18 @@ static RValue builtinLayerGetAllElements(VMContext* ctx, RValue* args, MAYBE_UNU
 }
 #endif
 
+static RuntimeLayerElement* findLayerTileLikeElement(Runner* runner, int32_t elementId, RuntimeLayer** outLayer) {
+    RuntimeLayerElement* el = Runner_findLayerElementById(runner, elementId, outLayer);
+    if (el == nullptr) return nullptr;
+    if (el->type == RuntimeLayerElementType_Tile) return el;
+    if (runner->gameProfile == GAME_PROFILE_DELTARUNE &&
+        el->type == RuntimeLayerElementType_Tilemap &&
+        el->tilemapElement != nullptr) {
+        return el;
+    }
+    return nullptr;
+}
+
 static RValue builtinLayerGetElementType(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = (Runner*) ctx->runner;
     int32_t id = RValue_toInt32(args[0]);
@@ -8862,14 +8961,19 @@ static RValue builtinLayerGetElementType(VMContext* ctx, RValue* args, MAYBE_UNU
     if (el == nullptr)
         return RValue_makeReal(0.0);
 
+    if (runner->gameProfile == GAME_PROFILE_DELTARUNE &&
+        el->type == RuntimeLayerElementType_Tilemap) {
+        return RValue_makeReal((GMLReal) RuntimeLayerElementType_Tile);
+    }
+
     return RValue_makeReal((GMLReal) el->type);
 }
 
 static RValue builtinLayerTileVisible(VMContext* ctx, RValue* args, int32_t argCount) {
     if (2 > argCount) return RValue_makeUndefined();
     Runner* runner = (Runner*) ctx->runner;
-    RuntimeLayerElement* el = Runner_findLayerElementById(runner, RValue_toInt32(args[0]), nullptr);
-    if (el == nullptr || el->type != RuntimeLayerElementType_Tile) return RValue_makeUndefined();
+    RuntimeLayerElement* el = findLayerTileLikeElement(runner, RValue_toInt32(args[0]), nullptr);
+    if (el == nullptr) return RValue_makeUndefined();
     el->visible = RValue_toBool(args[1]);
     return RValue_makeUndefined();
 }
@@ -8877,8 +8981,8 @@ static RValue builtinLayerTileVisible(VMContext* ctx, RValue* args, int32_t argC
 static RValue builtinLayerTileAlpha(VMContext* ctx, RValue* args, int32_t argCount) {
     if (2 > argCount) return RValue_makeUndefined();
     Runner* runner = (Runner*) ctx->runner;
-    RuntimeLayerElement* el = Runner_findLayerElementById(runner, RValue_toInt32(args[0]), nullptr);
-    if (el == nullptr || el->type != RuntimeLayerElementType_Tile) return RValue_makeUndefined();
+    RuntimeLayerElement* el = findLayerTileLikeElement(runner, RValue_toInt32(args[0]), nullptr);
+    if (el == nullptr) return RValue_makeUndefined();
     float alpha = (float) RValue_toReal(args[1]);
     if (alpha < 0.0f) alpha = 0.0f;
     if (alpha > 1.0f) alpha = 1.0f;
@@ -8886,40 +8990,51 @@ static RValue builtinLayerTileAlpha(VMContext* ctx, RValue* args, int32_t argCou
     return RValue_makeUndefined();
 }
 
-static RoomTile* findLayerTileElement(Runner* runner, int32_t elementId) {
-    RuntimeLayerElement* el = Runner_findLayerElementById(runner, elementId, nullptr);
-    if (el == nullptr || el->type != RuntimeLayerElementType_Tile)
-        return nullptr;
-    return el->tileElement;
-}
-
 static RValue builtinLayerTileGetX(VMContext* ctx, RValue* args, int32_t argCount) {
     if (1 > argCount) return RValue_makeReal(0.0);
     Runner* runner = (Runner*) ctx->runner;
-    RoomTile* tile = findLayerTileElement(runner, RValue_toInt32(args[0]));
-    return RValue_makeReal(tile != nullptr ? (GMLReal)tile->x : 0.0);
+    RuntimeLayer* owner = nullptr;
+    RuntimeLayerElement* el = findLayerTileLikeElement(runner, RValue_toInt32(args[0]), &owner);
+    if (el == nullptr) return RValue_makeReal(0.0);
+    if (el->type == RuntimeLayerElementType_Tile && el->tileElement != nullptr)
+        return RValue_makeReal((GMLReal) el->tileElement->x);
+    return RValue_makeReal(owner != nullptr ? (GMLReal) owner->xOffset : 0.0);
 }
 
 static RValue builtinLayerTileGetY(VMContext* ctx, RValue* args, int32_t argCount) {
     if (1 > argCount) return RValue_makeReal(0.0);
     Runner* runner = (Runner*) ctx->runner;
-    RoomTile* tile = findLayerTileElement(runner, RValue_toInt32(args[0]));
-    return RValue_makeReal(tile != nullptr ? (GMLReal)tile->y : 0.0);
+    RuntimeLayer* owner = nullptr;
+    RuntimeLayerElement* el = findLayerTileLikeElement(runner, RValue_toInt32(args[0]), &owner);
+    if (el == nullptr) return RValue_makeReal(0.0);
+    if (el->type == RuntimeLayerElementType_Tile && el->tileElement != nullptr)
+        return RValue_makeReal((GMLReal) el->tileElement->y);
+    return RValue_makeReal(owner != nullptr ? (GMLReal) owner->yOffset : 0.0);
 }
 
 static RValue builtinLayerTileX(VMContext* ctx, RValue* args, int32_t argCount) {
     if (2 > argCount) return RValue_makeUndefined();
     Runner* runner = (Runner*) ctx->runner;
-    RoomTile* tile = findLayerTileElement(runner, RValue_toInt32(args[0]));
-    if (tile != nullptr) tile->x = RValue_toInt32(args[1]);
+    RuntimeLayer* owner = nullptr;
+    RuntimeLayerElement* el = findLayerTileLikeElement(runner, RValue_toInt32(args[0]), &owner);
+    if (el == nullptr) return RValue_makeUndefined();
+    if (el->type == RuntimeLayerElementType_Tile && el->tileElement != nullptr)
+        el->tileElement->x = RValue_toInt32(args[1]);
+    else if (owner != nullptr)
+        owner->xOffset = (float) RValue_toReal(args[1]);
     return RValue_makeUndefined();
 }
 
 static RValue builtinLayerTileY(VMContext* ctx, RValue* args, int32_t argCount) {
     if (2 > argCount) return RValue_makeUndefined();
     Runner* runner = (Runner*) ctx->runner;
-    RoomTile* tile = findLayerTileElement(runner, RValue_toInt32(args[0]));
-    if (tile != nullptr) tile->y = RValue_toInt32(args[1]);
+    RuntimeLayer* owner = nullptr;
+    RuntimeLayerElement* el = findLayerTileLikeElement(runner, RValue_toInt32(args[0]), &owner);
+    if (el == nullptr) return RValue_makeUndefined();
+    if (el->type == RuntimeLayerElementType_Tile && el->tileElement != nullptr)
+        el->tileElement->y = RValue_toInt32(args[1]);
+    else if (owner != nullptr)
+        owner->yOffset = (float) RValue_toReal(args[1]);
     return RValue_makeUndefined();
 }
 
@@ -11337,6 +11452,10 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "layer_get_id_at_depth", builtinLayerGetIdAtDepth);
     VM_registerBuiltin(ctx, "layer_tilemap_get_id", builtinLayerTilemapGetId);
     VM_registerBuiltin(ctx, "draw_tilemap", builtinDrawTilemap);
+    VM_registerBuiltin(ctx, "tilemap_x", builtinTilemapX);
+    VM_registerBuiltin(ctx, "tilemap_y", builtinTilemapY);
+    VM_registerBuiltin(ctx, "tilemap_get_x", builtinTilemapGetX);
+    VM_registerBuiltin(ctx, "tilemap_get_y", builtinTilemapGetY);
 #endif
     VM_registerBuiltin(ctx, "layer_create", builtinLayerCreate);
     VM_registerBuiltin(ctx, "layer_destroy", builtinLayerDestroy);

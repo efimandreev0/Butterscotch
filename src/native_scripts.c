@@ -37,6 +37,13 @@ static void registerNative(const char *codeName, NativeCodeFunc func) {
     shput(nativeOverrideMap, (char*) codeName, func);
 }
 
+void NativeScripts_reset(void) {
+    shfree(nativeOverrideMap);
+    nativeOverrideMap = nullptr;
+    g_writerTimeUs = 0;
+    g_writerCalls = 0;
+}
+
 void NativeScripts_register(const char *codeName, NativeCodeFunc func) {
     shput(nativeOverrideMap, (char*) codeName, func);
 }
@@ -73,6 +80,14 @@ static int32_t findFontIndex(DataWin *dw, const char *name) {
         if (strcmp(dw->font.fonts[i].name, name) == 0) return (int32_t) i;
     }
     fprintf(stderr, "NativeScripts: WARNING - font '%s' not found\n", name);
+    return -1;
+}
+
+static int32_t findSpriteIndex(DataWin *dw, const char *name) {
+    repeat(dw->sprt.count, i) {
+        if (strcmp(dw->sprt.sprites[i].name, name) == 0) return (int32_t) i;
+    }
+    fprintf(stderr, "NativeScripts: WARNING - sprite '%s' not found\n", name);
     return -1;
 }
 
@@ -16999,9 +17014,166 @@ static void native_snowfloor_Draw0(VMContext *ctx, Runner *runner, Instance *ins
     }
 }
 
-void NativeScripts_init(VMContext *ctx, MAYBE_UNUSED Runner *runner) {
+static struct {
+    int32_t sprScrew;
+    int32_t sprScrewEnd;
+    int32_t sprBase;
+    int32_t sprPlatform;
+    int32_t sprCenter;
+    int32_t sprArrow;
+    int32_t mode;
+    int32_t spin;
+    int32_t held;
+    int32_t heldAmount;
+    int32_t startOffset;
+    int32_t screwSegHeight;
+    int32_t riseSpeed;
+    int32_t camFollowMultiplier;
+    int32_t adjustForCamera;
+    int32_t drawtutorialarrows;
+    int32_t drawtutorialarrowsAlpha;
+    int32_t idletimer;
+    int32_t cupCharExists;
+    int32_t debugHitThisFrame;
+    bool ready;
+} teacupDrawCache = {.ready = false};
+
+static void initTeacupDrawCache(DataWin *dw) {
+    teacupDrawCache.sprScrew = findSpriteIndex(dw, "spr_teacup_screw");
+    teacupDrawCache.sprScrewEnd = findSpriteIndex(dw, "spr_teacup_screw_end");
+    teacupDrawCache.sprBase = findSpriteIndex(dw, "spr_teacup_base");
+    teacupDrawCache.sprPlatform = findSpriteIndex(dw, "spr_teacup_platform");
+    teacupDrawCache.sprCenter = findSpriteIndex(dw, "spr_teacup_center");
+    teacupDrawCache.sprArrow = findSpriteIndex(dw, "spr_teacuparrow");
+    teacupDrawCache.mode = findSelfVarId(dw, "mode");
+    teacupDrawCache.spin = findSelfVarId(dw, "spin");
+    teacupDrawCache.held = findSelfVarId(dw, "held");
+    teacupDrawCache.heldAmount = findSelfVarId(dw, "heldAmount");
+    teacupDrawCache.startOffset = findSelfVarId(dw, "startOffset");
+    teacupDrawCache.screwSegHeight = findSelfVarId(dw, "screwSegHeight");
+    teacupDrawCache.riseSpeed = findSelfVarId(dw, "riseSpeed");
+    teacupDrawCache.camFollowMultiplier = findSelfVarId(dw, "camFollowMultiplier");
+    teacupDrawCache.adjustForCamera = findSelfVarId(dw, "adjustForCamera");
+    teacupDrawCache.drawtutorialarrows = findSelfVarId(dw, "drawtutorialarrows");
+    teacupDrawCache.drawtutorialarrowsAlpha = findSelfVarId(dw, "drawtutorialarrows_alpha");
+    teacupDrawCache.idletimer = findSelfVarId(dw, "idletimer");
+    teacupDrawCache.cupCharExists = findSelfVarId(dw, "cupCharExists");
+    teacupDrawCache.debugHitThisFrame = findSelfVarId(dw, "debugHitThisFrame");
+    teacupDrawCache.ready = teacupDrawCache.sprScrew >= 0 &&
+                             teacupDrawCache.sprScrewEnd >= 0 &&
+                             teacupDrawCache.sprBase >= 0 &&
+                             teacupDrawCache.sprPlatform >= 0 &&
+                             teacupDrawCache.sprCenter >= 0 &&
+                             teacupDrawCache.mode >= 0 &&
+                             teacupDrawCache.spin >= 0 &&
+                             teacupDrawCache.heldAmount >= 0 &&
+                             teacupDrawCache.screwSegHeight >= 0;
+}
+
+static inline float teacupStablePixel(float v) {
+    return floorf(v + 0.5f);
+}
+
+static inline bool selfVarTruthy(Instance *inst, int32_t varId) {
+    if (varId < 0) return false;
+    return RValue_toReal(Instance_getSelfVar(inst, varId)) != 0.0;
+}
+
+static void native_deltarune_teacup_Draw0(VMContext *ctx, Runner *runner, Instance *inst) {
+    if (runner == NULL || runner->renderer == NULL || runner->gameProfile != GAME_PROFILE_DELTARUNE) return;
+    if (!teacupDrawCache.ready) return;
+
+    Renderer *r = runner->renderer;
+    const float x = teacupStablePixel(inst->x);
+    const float y = teacupStablePixel(inst->y);
+
+    GMLReal spin = selfReal(inst, teacupDrawCache.spin);
+    GMLReal heldAmount = selfReal(inst, teacupDrawCache.heldAmount);
+    GMLReal screwSegHeight = selfReal(inst, teacupDrawCache.screwSegHeight);
+    if (screwSegHeight <= 0.0) screwSegHeight = 30.0;
+
+    int32_t mode = selfInt(inst, teacupDrawCache.mode);
+    if (mode != 0) {
+        if (selfVarTruthy(inst, teacupDrawCache.held)) {
+            GMLReal adjust = selfReal(inst, teacupDrawCache.adjustForCamera);
+            adjust += selfReal(inst, teacupDrawCache.riseSpeed) *
+                      selfReal(inst, teacupDrawCache.camFollowMultiplier);
+            Instance_setSelfVar(inst, teacupDrawCache.adjustForCamera, RValue_makeReal(adjust));
+        } else if (teacupDrawCache.adjustForCamera >= 0) {
+            Instance_setSelfVar(inst, teacupDrawCache.adjustForCamera, RValue_makeReal(0.0));
+        }
+    }
+
+    GMLReal bottomY = (GMLReal) inst->ystart + heldAmount;
+    RValue startOffset = (teacupDrawCache.startOffset >= 0)
+                             ? Instance_getSelfVar(inst, teacupDrawCache.startOffset)
+                             : (RValue){.type = RVALUE_UNDEFINED};
+    if (startOffset.type != RVALUE_UNDEFINED) {
+        GMLReal offset = RValue_toReal(startOffset);
+        if (offset > 0.0) bottomY += offset;
+    }
+
+    int32_t screwSegTotal = (int32_t) floor((bottomY - (GMLReal) inst->y) / screwSegHeight) + 1;
+    if (screwSegTotal < 0) screwSegTotal = 0;
+    if (screwSegTotal > 192) screwSegTotal = 192;
+
+    float baseY = teacupStablePixel((float) bottomY);
+    for (int32_t i = 0; i < screwSegTotal; i++) {
+        float segY = teacupStablePixel((baseY + 24.0f) - (float) (i * 30));
+        if (i == 0) {
+            Renderer_drawSpriteExt(r, teacupDrawCache.sprScrewEnd, 0,
+                                   x, segY - 2.0f, 2.0f, 2.0f,
+                                   0.0f, 0xFFFFFFu, 1.0f);
+        } else {
+            Renderer_drawSpriteExt(r, teacupDrawCache.sprScrew, 0,
+                                   x, segY, 2.0f, 2.0f,
+                                   0.0f, 0xFFFFFFu, 1.0f);
+        }
+    }
+
+    Renderer_drawSpriteExt(r, teacupDrawCache.sprBase, 0,
+                           x, teacupStablePixel(baseY + 20.0f),
+                           inst->imageXscale, inst->imageYscale,
+                           inst->imageAngle, inst->imageBlend, inst->imageAlpha);
+    Renderer_drawSpriteExt(r, teacupDrawCache.sprPlatform, 0,
+                           x, y, inst->imageXscale, inst->imageYscale,
+                           inst->imageAngle, inst->imageBlend, inst->imageAlpha);
+
+    int32_t centerFrame = (int32_t) floor(spin / 22.5);
+    Renderer_drawSpriteExt(r, teacupDrawCache.sprCenter, centerFrame,
+                           x, y, inst->imageXscale, inst->imageYscale,
+                           inst->imageAngle, inst->imageBlend, inst->imageAlpha);
+
+    if (runner->currentRoom != NULL &&
+        strcmp(runner->currentRoom->name, "room_dw_cyber_battle_maze_1") == 0 &&
+        teacupDrawCache.sprArrow >= 0) {
+        bool drawArrows = selfVarTruthy(inst, teacupDrawCache.drawtutorialarrows);
+        GMLReal alpha = selfReal(inst, teacupDrawCache.drawtutorialarrowsAlpha);
+        alpha += ((drawArrows ? 1.0 : 0.0) - alpha) * (drawArrows ? 0.15 : 0.35);
+        if (alpha < 0.0) alpha = 0.0;
+        if (alpha > 1.0) alpha = 1.0;
+        Instance_setSelfVar(inst, teacupDrawCache.drawtutorialarrowsAlpha, RValue_makeReal(alpha));
+
+        GMLReal idletimer = selfReal(inst, teacupDrawCache.idletimer);
+        float bob = (float) (GMLReal_sin(idletimer / 3.0) * 2.0);
+        Renderer_drawSpriteExt(r, teacupDrawCache.sprArrow, 0,
+                               x + 68.0f, y + 34.0f - bob,
+                               2.0f, 2.0f, 0.0f, 0xFFFFFFu, (float) alpha);
+        Renderer_drawSpriteExt(r, teacupDrawCache.sprArrow, 0,
+                               x - 72.0f, y + 34.0f + bob,
+                               -2.0f, 2.0f, 0.0f, 0xFFFFFFu, (float) alpha);
+    }
+
+    if (selfVarTruthy(inst, teacupDrawCache.cupCharExists) &&
+        selfVarTruthy(inst, teacupDrawCache.debugHitThisFrame)) {
+        Instance_setSelfVar(inst, teacupDrawCache.debugHitThisFrame, RValue_makeReal(0.0));
+    }
+}
+
+void NativeScripts_init(VMContext *ctx, Runner *runner) {
     DataWin *dw = ctx->dataWin;
 
+    NativeScripts_reset();
 
     initWriterCache(ctx, dw);
     initMinihelixCache(dw);
@@ -17135,6 +17307,11 @@ void NativeScripts_init(VMContext *ctx, MAYBE_UNUSED Runner *runner) {
     initSteamplume2Cache(dw);
     initMettnewsPartCache(dw);
     initSnowfloorCache(ctx, dw);
+    if (runner != NULL && runner->gameProfile == GAME_PROFILE_DELTARUNE) {
+        initTeacupDrawCache(dw);
+    } else {
+        teacupDrawCache.ready = false;
+    }
 
 
     VMBuiltins_register("scr_gettext", native_scr_gettext);
@@ -17426,6 +17603,10 @@ void NativeScripts_init(VMContext *ctx, MAYBE_UNUSED Runner *runner) {
     registerNative("gml_Object_obj_time_Draw_77", native_time_Draw77);
     registerNative("gml_Object_obj_time_Draw_64", native_noop);
     registerNative("gml_Object_obj_time_Draw_75", native_noop);
+
+    if (runner != NULL && runner->gameProfile == GAME_PROFILE_DELTARUNE) {
+        registerNative("gml_Object_obj_teacup_Draw_0", native_deltarune_teacup_Draw0);
+    }
 
     fprintf(stderr, "NativeScripts: Registered %d native code overrides\n", (int32_t) shlen(nativeOverrideMap));
 }

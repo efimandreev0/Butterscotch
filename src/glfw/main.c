@@ -899,7 +899,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Initialize the runner
-    Runner* runner = Runner_create(dataWin, vm, renderer, (FileSystem*) overlayFs, audioSystem);
+    Runner* runner = Runner_create(dataWin, vm, renderer, (FileSystem*) overlayFs, audioSystem, GAME_PROFILE_GENERIC);
     runner->debugMode = args.debug;
     runner->osType = args.osType;
     runner->nativeWindow = window;

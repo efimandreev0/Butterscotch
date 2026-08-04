@@ -4,7 +4,11 @@
 
 typedef struct {
     FileSystem base;
-    char *basePath;
+    char *bundlePath;
+    char *savePath;
+    char *legacyPaths[6];
+    int legacyPathCount;
+    bool isDeltarune;
 } N3dsFileSystem;
 
 N3dsFileSystem *N3dsFileSystem_create(const char *dataWinPath);

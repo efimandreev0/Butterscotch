@@ -175,6 +175,24 @@ static bool contains_ignore_case(const char *text, const char *needle) {
     return false;
 }
 
+static bool is_deltarune_root_data_path(const char *path) {
+    return contains_ignore_case(path, "deltarune/data.win") &&
+           !contains_ignore_case(path, "chapter1_windows") &&
+           !contains_ignore_case(path, "chapter2_windows") &&
+           !contains_ignore_case(path, "chapter3_windows") &&
+           !contains_ignore_case(path, "chapter4_windows");
+}
+
+static void apply_initial_launch_args_for_path(const char *path) {
+    if (is_deltarune_root_data_path(path)) {
+        // The main DELTARUNE launcher skips the "start Chapter 1?" prompt when
+        // it sees a returning_* launch parameter, and opens chapter select.
+        set_launch_args_from_string("launcher switch_-1 returning_1");
+    } else {
+        clear_launch_args();
+    }
+}
+
 static GameProfile detect_game_profile(const char *data_path, const DataWin *dw) {
     const char *game_name = (dw && dw->gen8.name) ? dw->gen8.name : "";
 
@@ -201,6 +219,116 @@ static const char *game_profile_name(GameProfile profile) {
         case GAME_PROFILE_DELTARUNE: return "DELTARUNE";
         case GAME_PROFILE_GENERIC:
         default: return "GENERIC";
+    }
+}
+
+static const char *dump_profile_dir_name(GameProfile profile) {
+    switch (profile) {
+        case GAME_PROFILE_UNDERTALE: return "Undertale";
+        case GAME_PROFILE_DELTARUNE: return "Deltarune";
+        case GAME_PROFILE_GENERIC:
+        default: return "Generic";
+    }
+}
+
+static void sanitize_dump_name(const char *in, char *out, size_t out_size) {
+    if (out_size == 0) return;
+    size_t j = 0;
+    if (in == NULL || in[0] == '\0') in = "unknown";
+    for (size_t i = 0; in[i] != '\0' && j + 1 < out_size; i++) {
+        char c = in[i];
+        bool ok = (c >= 'a' && c <= 'z') ||
+                  (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') ||
+                  c == '_' || c == '-';
+        out[j++] = ok ? c : '_';
+    }
+    out[j] = '\0';
+}
+
+static bool dump_framebuffer_ppm(const char *path, gfxScreen_t screen) {
+    u16 fbW = 0, fbH = 0;
+    u8 *fb = gfxGetFramebuffer(screen, GFX_LEFT, &fbW, &fbH);
+    if (fb == NULL || fbW == 0 || fbH == 0) return false;
+
+    FILE *f = fopen(path, "wb");
+    if (f == NULL) return false;
+
+    int outW = (int)fbH;
+    int outH = (int)fbW;
+    fprintf(f, "P6\n%d %d\n255\n", outW, outH);
+    for (int y = 0; y < outH; y++) {
+        for (int x = 0; x < outW; x++) {
+            size_t offset = ((size_t)x * (size_t)fbW + (size_t)y) * 3u;
+            u8 rgb[3] = { fb[offset + 2], fb[offset + 1], fb[offset + 0] };
+            fwrite(rgb, 1, 3, f);
+        }
+    }
+    fclose(f);
+    return true;
+}
+
+static void dump_runner_state_to_sd(Runner *run, GameProfile profile) {
+    if (run == NULL) return;
+
+    char root[256];
+    char profileDir[256];
+    snprintf(root, sizeof(root), "%s/Dumps", BASE_DIR);
+    snprintf(profileDir, sizeof(profileDir), "%s/%s", root, dump_profile_dir_name(profile));
+    mkdir(BASE_DIR, 0777);
+    mkdir(root, 0777);
+    mkdir(profileDir, 0777);
+
+    const char *roomName = (run->currentRoom && run->currentRoom->name) ? run->currentRoom->name : "no_room";
+    char safeRoom[96];
+    sanitize_dump_name(roomName, safeRoom, sizeof(safeRoom));
+
+    u64 now = osGetTime();
+    char txtPath[256];
+    char jsonPath[256];
+    char topPath[256];
+    char bottomPath[256];
+    snprintf(txtPath, sizeof(txtPath), "%s/%llu_%s_frame_%d.txt",
+             profileDir, (unsigned long long)now, safeRoom, run->frameCount);
+    snprintf(jsonPath, sizeof(jsonPath), "%s/%llu_%s_frame_%d.json",
+             profileDir, (unsigned long long)now, safeRoom, run->frameCount);
+    snprintf(topPath, sizeof(topPath), "%s/%llu_%s_frame_%d_top.ppm",
+             profileDir, (unsigned long long)now, safeRoom, run->frameCount);
+    snprintf(bottomPath, sizeof(bottomPath), "%s/%llu_%s_frame_%d_bottom.ppm",
+             profileDir, (unsigned long long)now, safeRoom, run->frameCount);
+
+    FILE *txt = fopen(txtPath, "wb");
+    if (txt != NULL) {
+        Runner_dumpDiagnostics(run, txt);
+        CtrRenderer_dumpTextureDiagnostics(run->renderer, txt, run->currentRoom);
+        fclose(txt);
+        printf("[DUMP] wrote %s\n", txtPath);
+    } else {
+        printf("[DUMP] failed to write %s\n", txtPath);
+    }
+
+    char *json = Runner_dumpStateJson(run);
+    if (json != NULL) {
+        FILE *jf = fopen(jsonPath, "wb");
+        if (jf != NULL) {
+            fputs(json, jf);
+            fclose(jf);
+            printf("[DUMP] wrote %s\n", jsonPath);
+        } else {
+            printf("[DUMP] failed to write %s\n", jsonPath);
+        }
+        free(json);
+    }
+
+    if (dump_framebuffer_ppm(topPath, GFX_TOP)) {
+        printf("[DUMP] wrote %s\n", topPath);
+    } else {
+        printf("[DUMP] failed to write %s\n", topPath);
+    }
+    if (dump_framebuffer_ppm(bottomPath, GFX_BOTTOM)) {
+        printf("[DUMP] wrote %s\n", bottomPath);
+    } else {
+        printf("[DUMP] failed to write %s\n", bottomPath);
     }
 }
 
@@ -312,7 +440,7 @@ int main(int argc, char **argv) {
 
     strncpy(g_current_data_path, launcher_game(selected_game)->path, 255);
     g_current_data_path[255] = '\0';
-    clear_launch_args();
+    apply_initial_launch_args_for_path(g_current_data_path);
 
     bool keep_playing = true;
 
@@ -382,6 +510,8 @@ int main(int argc, char **argv) {
                 CtrRenderer_prepareTextureCache(dw);
                 CtrRenderer_setCacheProgressCallback(NULL, NULL);
                 DataWin_free(dw);
+                malloc_trim(0);
+                CtrRenderer_resetSessionState();
             }
             flag = fopen(cache_flag_path, "r");
             cached = atlas_index_is_current(atlas_index_path);
@@ -439,6 +569,7 @@ int main(int argc, char **argv) {
             launcher_render_loading(&gfx, display_name, "LAUNCHING GAME!", 0, 0, 100.f);
         }
 
+        CtrRenderer_resetSessionState();
         if (gfx_ready) { launcher_gfx_destroy(&gfx); gfx_ready = false; }
 
         VMContext      *vm  = VM_create(dw);
@@ -447,8 +578,7 @@ int main(int argc, char **argv) {
         AudioSystem    *snd = (AudioSystem*)SdlMixerAudioSystem_create();//AlAudioSystem_create();//SdlMixerAudioSystem_create();
         if (snd) snd->dataWin = dw;
 
-        Runner *run = Runner_create(dw, vm, ren, (FileSystem *)fs, snd);
-        run->gameProfile = profile;
+        Runner *run = Runner_create(dw, vm, ren, (FileSystem *)fs, snd, profile);
         run->osType = (YoYoOperatingSystem)launcher_get_settings()->os_type;
 
         Runner_initFirstRoom(run);
@@ -471,7 +601,8 @@ int main(int argc, char **argv) {
 
                 LauncherPauseAction action = LAUNCHER_PAUSE_RESUME;
                 if (pauseReady) {
-                    action = launcher_run_pause(&pauseGfx);
+                    action = launcher_run_pause(&pauseGfx,
+                                               profile == GAME_PROFILE_DELTARUNE);
                     launcher_gfx_destroy(&pauseGfx);
                 }
                 // Apply any layout/theme tweaks the user made.
@@ -490,6 +621,44 @@ int main(int argc, char **argv) {
                 continue; // resume — don't process input from the chord this frame
             }
 
+            if (profile == GAME_PROFILE_DELTARUNE &&
+                launcher_get_settings()->debug_mode && (d & KEY_SELECT)) {
+                dump_runner_state_to_sd(run, profile);
+                RunnerKeyboard_clear(run->keyboard, VK_ANYKEY);
+                RunnerGamepad_clear(run->gamepads);
+                RunnerMouse_beginFrame(run->mouse);
+                continue;
+            }
+
+            if (profile == GAME_PROFILE_DELTARUNE &&
+                launcher_get_settings()->debug_mode && (d & KEY_START)) {
+                LauncherGfx confirmGfx;
+                bool confirmReady = launcher_gfx_init_borrowed(
+                    &confirmGfx,
+                    CtrRenderer_getTopTarget(ren),    LAUNCHER_TOP_W, LAUNCHER_TOP_H,
+                    CtrRenderer_getBottomTarget(ren), LAUNCHER_BOT_W, LAUNCHER_BOT_H);
+
+                bool confirmed = false;
+                if (confirmReady) {
+                    confirmed = launcher_confirm_quit_to_launcher(&confirmGfx);
+                    launcher_gfx_destroy(&confirmGfx);
+                }
+
+                launcher_apply_settings(launcher_get_settings());
+                run->osType = (YoYoOperatingSystem)launcher_get_settings()->os_type;
+                RunnerKeyboard_clear(run->keyboard, VK_ANYKEY);
+                RunnerGamepad_clear(run->gamepads);
+                RunnerMouse_beginFrame(run->mouse);
+
+                if (confirmed) {
+                    quit_to_launcher = true;
+                    g_game_change_requested = false;
+                    run->shouldExit = true;
+                    break;
+                }
+                continue;
+            }
+
             RunnerKeyboard_beginFrame(run->keyboard);
             RunnerGamepad_beginFrame(run->gamepads);
             RunnerMouse_beginFrame(run->mouse);
@@ -500,7 +669,9 @@ int main(int argc, char **argv) {
                     circlePosition cp; hidCircleRead(&cp);
                     circlePosition cs; hidCstickRead(&cs);
                     launcher_apply_3ds_gamepad(run->gamepads, d, u, h,
-                                               cp.dx, cp.dy, cs.dx, cs.dy);
+                                               cp.dx, cp.dy,
+                                               profile == GAME_PROFILE_DELTARUNE ? cs.dx : 0,
+                                               profile == GAME_PROFILE_DELTARUNE ? cs.dy : 0);
                     break;
                 }
                 case LAUNCHER_INPUT_TOUCH: {
@@ -512,9 +683,13 @@ int main(int argc, char **argv) {
                     break;
                 }
                 case LAUNCHER_INPUT_KEYBOARD:
-                default:
-                    launcher_apply_3ds_input(run->keyboard, d, u, h);
+                default: {
+                    circlePosition cs; hidCstickRead(&cs);
+                    launcher_apply_3ds_input(run->keyboard, d, u, h,
+                                             profile == GAME_PROFILE_DELTARUNE ? cs.dx : 0,
+                                             profile == GAME_PROFILE_DELTARUNE ? cs.dy : 0);
                     break;
+                }
             }
             RunnerMouse_endFrame(run->mouse);
 
@@ -632,12 +807,15 @@ int main(int argc, char **argv) {
             while (osGetTime() - t_start < 33) gspWaitForVBlank();
         }
 
+        CtrRenderer_resetSessionState();
         run->audioSystem->vtable->destroy(run->audioSystem);
         ren->vtable->destroy(ren);
         Runner_free(run);
         N3dsFileSystem_destroy(fs);
         VM_free(vm);
         DataWin_free(dw);
+        malloc_trim(0);
+        CtrRenderer_resetSessionState();
         // SDL/Mix stays alive — see SdlMixer_globalInit().
 
         if (!gfx_ready) gfx_ready = launcher_gfx_init(&gfx);
@@ -666,7 +844,7 @@ int main(int argc, char **argv) {
                 } else {
                     strncpy(g_current_data_path, launcher_game(new_selection)->path, 255);
                     g_current_data_path[255] = '\0';
-                    clear_launch_args();
+                    apply_initial_launch_args_for_path(g_current_data_path);
                 }
             }
         } else {
@@ -676,7 +854,7 @@ int main(int argc, char **argv) {
             } else {
                 strncpy(g_current_data_path, launcher_game(new_selection)->path, 255);
                 g_current_data_path[255] = '\0';
-                clear_launch_args();
+                apply_initial_launch_args_for_path(g_current_data_path);
             }
         }
     }

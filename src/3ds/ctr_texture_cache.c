@@ -130,6 +130,9 @@ static void remove_old_ready_flags(void) {
         "cache_ready_v12.flag",
         "cache_ready_v13.flag",
         "cache_ready_v14.flag",
+        "cache_ready_v15.flag",
+        "cache_ready_v16.flag",
+        "cache_ready_v17.flag",
     };
     char path[256];
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {

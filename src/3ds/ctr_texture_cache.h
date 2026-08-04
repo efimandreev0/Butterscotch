@@ -12,10 +12,10 @@
 // stale caches from a different game / older mod version are rejected
 // instead of rendering as garbage (e.g. Chinese glyph atlas leaking into
 // Deltarune sprite slots after a game switch).
-#define CTR_TEXTURE_CACHE_VERSION    14u
+#define CTR_TEXTURE_CACHE_VERSION    17u
 #define CTR_TEXTURE_CACHE_ATLAS_SIZE 256u
 #define CTR_TEXTURE_CACHE_FILE       "atlas.bin"
-#define CTR_TEXTURE_CACHE_READY_FLAG "cache_ready_v15.flag"
+#define CTR_TEXTURE_CACHE_READY_FLAG "cache_ready_v18.flag"
 
 #define CTR_TEXTURE_CACHE_FORMAT_RGBA4 4u
 #define CTR_TEXTURE_CACHE_FORMAT_LA4   9u

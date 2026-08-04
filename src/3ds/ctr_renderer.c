@@ -19,6 +19,7 @@
 #include "render2d_shader_shbin.h"
 
 extern char g_current_cache_dir[256];
+extern char g_current_data_path[256];
 
 extern DVLB_s *g_vshaderDvlb;
 extern shaderProgram_s g_shaderProg;
@@ -208,6 +209,11 @@ void CtrRenderer_setCacheProgressCallback(CtrRendererCacheProgressFn callback, v
     g_cacheProgressCallback = callback;
     g_cacheProgressUser = user;
     CtrTextureCache_setProgressCallback((CtrTextureCacheProgressFn)callback, user);
+}
+
+void CtrRenderer_resetSessionState(void) {
+    CtrRenderer_setCacheProgressCallback(NULL, NULL);
+    g_frame = 0;
 }
 
 static inline uint16_t pack_rgba4444(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
@@ -1137,6 +1143,11 @@ static bool apply_repack_index(CtrRenderer *ctx, DataWin *dw) {
 static void rebind_state(CtrRenderer *ctx);
 static void apply_projection(CtrRenderer *ctx, const C3D_Mtx *m);
 static void apply_blend(CtrRenderer *ctx, int mode);
+static void emit_blend_state(CtrRenderer *ctx);
+static void apply_depth_write_mask(CtrRenderer *ctx);
+static void apply_alpha_test_state(CtrRenderer *ctx);
+static void free_all_tilemap_caches(CtrRenderer *ctx);
+static bool cache_item_available(CtrRenderer *ctx, uint32_t id);
 
 // C3D_FrameSplit invalidates BufInfo / AttrInfo / TexEnv / AlphaBlend / projection
 // uniforms — bind_target already knows this (calls rebind_state+apply_projection
@@ -1153,7 +1164,7 @@ static void ctr_safe_frame_split(CtrRenderer *ctx) {
         // after a split, and stale blend state mangles font edges + UI overlays
         // for the rest of the frame. Safe to call: batchVerts is 0 at this point
         // (caller flushed before splitting), so the inner flush_batch is a no-op.
-        apply_blend(ctx, ctx->currentBlendMode);
+        emit_blend_state(ctx);
     }
 }
 
@@ -1192,6 +1203,7 @@ static void push_quad_uvgrad(CtrRenderer *ctx, C3D_Tex *tex,
                              const float x[4], const float y[4],
                              float u0, float v0, float u1, float v1,
                              const float c[4][4]) {
+    if (ctx->surfaceDrawSuppressed) return;
     CtrVertex *v = vbuf_reserve(ctx, 6, tex);
     #define EMIT(idx, ix, uu, vv, cc) \
         do { \
@@ -1213,6 +1225,7 @@ static void push_quad(CtrRenderer *ctx, C3D_Tex *tex,
                       float x2, float y2, float x3, float y3,
                       float u0, float v0, float u1, float v1,
                       const float col[4]) {
+    if (ctx->surfaceDrawSuppressed) return;
     float xs[4] = {x0, x1, x2, x3};
     float ys[4] = {y0, y1, y2, y3};
     float cs[4][4] = {
@@ -1235,6 +1248,7 @@ static void push_quad(CtrRenderer *ctx, C3D_Tex *tex,
 
 static void push_solid_tri(CtrRenderer *ctx, float x1, float y1, float x2, float y2,
                            float x3, float y3, const float c1[4], const float c2[4], const float c3[4]) {
+    if (ctx->surfaceDrawSuppressed) return;
     CtrVertex *v = vbuf_reserve(ctx, 3, &ctx->whiteTex);
     v[0] = (CtrVertex){x1, y1, 0, .5f, .5f, c1[0], c1[1], c1[2], c1[3]};
     v[1] = (CtrVertex){x2, y2, 0, .5f, .5f, c2[0], c2[1], c2[2], c2[3]};
@@ -1665,6 +1679,90 @@ static void load_page_dyn(CtrRenderer *ctx, DataWin *dw, int32_t idx) {
 
 // Citro3D pipeline
 
+static GPU_BLENDFACTOR gm_blend_factor_to_gpu(int32_t factor) {
+    switch (factor) {
+        case bm_zero:          return GPU_ZERO;
+        case bm_one:           return GPU_ONE;
+        case bm_src_color:     return GPU_SRC_COLOR;
+        case bm_inv_src_color: return GPU_ONE_MINUS_SRC_COLOR;
+        case bm_src_alpha:     return GPU_SRC_ALPHA;
+        case bm_inv_src_alpha: return GPU_ONE_MINUS_SRC_ALPHA;
+        case bm_dest_alpha:    return GPU_DST_ALPHA;
+        case bm_inv_dest_alpha:return GPU_ONE_MINUS_DST_ALPHA;
+        case bm_dest_color:    return GPU_DST_COLOR;
+        case bm_inv_dest_color:return GPU_ONE_MINUS_DST_COLOR;
+        case bm_src_alpha_sat: return GPU_SRC_ALPHA_SATURATE;
+        default:               return GPU_ONE;
+    }
+}
+
+static void apply_depth_write_mask(CtrRenderer *ctx) {
+    C3D_DepthTest(false, GPU_GEQUAL, ctx->writeMask ? ctx->writeMask : GPU_WRITE_ALL);
+}
+
+static void apply_alpha_test_state(CtrRenderer *ctx) {
+    C3D_AlphaTest(ctx->alphaTestEnabled, ctx->alphaTestEnabled ? GPU_GREATER : GPU_ALWAYS, ctx->alphaTestRef);
+}
+
+static void emit_blend_state(CtrRenderer *ctx) {
+    if (!ctx->blendEnabled) {
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                       GPU_ONE, GPU_ZERO,
+                       GPU_ONE, GPU_ZERO);
+        return;
+    }
+
+    if (ctx->currentBlendMode == bm_complex) {
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                       ctx->blendSrcColor, ctx->blendDstColor,
+                       ctx->blendSrcAlpha, ctx->blendDstAlpha);
+        return;
+    }
+
+    switch (ctx->currentBlendMode) {
+        case bm_add:
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                           GPU_SRC_ALPHA, GPU_ONE,
+                           GPU_SRC_ALPHA, GPU_ONE);
+            break;
+        case bm_max:
+            C3D_AlphaBlend(GPU_BLEND_MAX, GPU_BLEND_MAX,
+                           GPU_ONE, GPU_ONE,
+                           GPU_ONE, GPU_ONE);
+            break;
+        case bm_subtract:
+            if (ctx->base.gameProfile == GAME_PROFILE_DELTARUNE) {
+                // Deltarune's TP gauge uses bm_subtract as a white cutout mask.
+                // This is the v4.6/v4.7-compatible path; the raw subtract path
+                // makes the Chapter 2 tension surface collapse to transparent.
+                C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                               GPU_ZERO, GPU_ONE_MINUS_SRC_COLOR,
+                               GPU_ZERO, GPU_ONE_MINUS_SRC_ALPHA);
+            } else {
+                C3D_AlphaBlend(GPU_BLEND_SUBTRACT, GPU_BLEND_SUBTRACT,
+                               GPU_SRC_ALPHA, GPU_ONE,
+                               GPU_SRC_ALPHA, GPU_ONE);
+            }
+            break;
+        case bm_min:
+            C3D_AlphaBlend(GPU_BLEND_MIN, GPU_BLEND_MIN,
+                           GPU_ONE, GPU_ONE,
+                           GPU_ONE, GPU_ONE);
+            break;
+        case bm_reverse_subtract:
+            C3D_AlphaBlend(GPU_BLEND_REVERSE_SUBTRACT, GPU_BLEND_REVERSE_SUBTRACT,
+                           GPU_SRC_ALPHA, GPU_ONE,
+                           GPU_SRC_ALPHA, GPU_ONE);
+            break;
+        case bm_normal:
+        default:
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                           GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA,
+                           GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
+            break;
+    }
+}
+
 static void setup_pipeline(CtrRenderer *ctx) {
     if (ctx->pipelineReady) return;
 
@@ -1682,13 +1780,21 @@ static void setup_pipeline(CtrRenderer *ctx) {
     C3D_TexEnvSrc (env, C3D_Both,  GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
     C3D_TexEnvFunc(env, C3D_Both,  GPU_MODULATE);
 
-    C3D_DepthTest(false, GPU_GEQUAL, GPU_WRITE_ALL);
-    C3D_CullFace (GPU_CULL_NONE);
-    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
-                   GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA,
-                   GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
+    ctx->currentBlendMode = bm_normal;
+    ctx->blendEnabled = true;
+    ctx->blendSrcColor = GPU_SRC_ALPHA;
+    ctx->blendDstColor = GPU_ONE_MINUS_SRC_ALPHA;
+    ctx->blendSrcAlpha = GPU_SRC_ALPHA;
+    ctx->blendDstAlpha = GPU_ONE_MINUS_SRC_ALPHA;
+    ctx->writeMask = GPU_WRITE_ALL;
+    ctx->alphaTestEnabled = false;
+    ctx->alphaTestRef = 0;
 
-    ctx->currentBlendMode = 0;
+    apply_depth_write_mask(ctx);
+    C3D_CullFace (GPU_CULL_NONE);
+    apply_alpha_test_state(ctx);
+    emit_blend_state(ctx);
+
     ctx->pipelineReady    = true;
 }
 
@@ -1705,8 +1811,10 @@ static void rebind_state(CtrRenderer *ctx) {
     C3D_TexEnvSrc (env, C3D_Both,  GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
     C3D_TexEnvFunc(env, C3D_Both,  GPU_MODULATE);
 
-    C3D_DepthTest(false, GPU_GEQUAL, GPU_WRITE_ALL);
+    apply_depth_write_mask(ctx);
     C3D_CullFace (GPU_CULL_NONE);
+    apply_alpha_test_state(ctx);
+    emit_blend_state(ctx);
 }
 
 static void apply_projection(CtrRenderer *ctx, const C3D_Mtx *m) {
@@ -1819,11 +1927,12 @@ static void bind_target(CtrRenderer *ctx, C3D_RenderTarget *tgt) {
     if (!ctx->inFrame) return;
     bool switchingTarget = ctx->activeTarget && ctx->activeTarget != tgt;
     flush_batch(ctx);
-    if (switchingTarget) C3D_FrameSplit(0);
+    if (switchingTarget) ctr_safe_frame_split(ctx);
     C3D_FrameDrawOn(tgt);
     ctx->activeTarget = tgt;
     rebind_state(ctx);
     apply_projection(ctx, &ctx->currentProjection);
+    emit_blend_state(ctx);
 }
 
 static void set_viewport_logical(CtrRenderer *ctx, C3D_RenderTarget *tgt,
@@ -1851,23 +1960,8 @@ static void disable_scissor(CtrRenderer *ctx) {
 static void apply_blend(CtrRenderer *ctx, int mode) {
     flush_batch(ctx);
     ctx->currentBlendMode = mode;
-    switch (mode) {
-        case 1:
-            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
-                           GPU_SRC_ALPHA, GPU_ONE,
-                           GPU_SRC_ALPHA, GPU_ONE);
-            break;
-        case 3:
-            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
-                           GPU_ZERO, GPU_ONE_MINUS_SRC_COLOR,
-                           GPU_ZERO, GPU_ONE_MINUS_SRC_ALPHA);
-            break;
-        default:
-            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
-                           GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA,
-                           GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
-            break;
-    }
+    ctx->blendEnabled = true;
+    emit_blend_state(ctx);
 }
 
 // Frame lifecycle
@@ -1936,6 +2030,15 @@ static void ctr_init(Renderer *ren, DataWin *dw) {
 
 static void ctr_destroy(Renderer *ren) {
     CtrRenderer *ctx = (CtrRenderer *)ren;
+
+    if (ctx->inFrame) {
+        flush_batch(ctx);
+        C3D_FrameEnd(0);
+        ctx->inFrame = false;
+    }
+    gc_clear_targets();
+
+    free_all_tilemap_caches(ctx);
 
     if (ctx->atlasFile) fclose(ctx->atlasFile);
 
@@ -2027,6 +2130,8 @@ static void ctr_begin_frame(Renderer *ren, int32_t gw, int32_t gh, int32_t ww, i
 
     ctx->appFrameCleared  = true;
     ctx->targetStackDepth = 0;
+    ctx->surfaceDrawSuppressed = false;
+    ctx->surfaceDrawSuppressedDepth = 0;
 }
 
 static void ctr_end_frame(Renderer *ren) {
@@ -2225,6 +2330,550 @@ static inline bool quad_culled(const CtrRenderer *ctx,
     float maxY = fmaxf(fmaxf(y0, y1), fmaxf(y2, y3));
     if (maxY <= ctx->cullT) return true;
     return false;
+}
+
+// Deltarune's large automatic GMS2 tilemaps can disappear on 3DS when drawn as
+// many cached RGBA4 atlas slices. Compose those maps into small RGBA8 chunks so
+// the room floor/background uses a single stable GPU texture path per chunk.
+#define CTR_GMS2_TILE_INDEX_MASK  0x0007FFFFu
+#define CTR_GMS2_TILE_MIRROR_MASK 0x10000000u
+#define CTR_GMS2_TILE_FLIP_MASK   0x20000000u
+
+static void free_tilemap_cache(CtrTilemapLayerCache *cache) {
+    if (!cache) return;
+    for (uint32_t i = 0; i < cache->chunkCount; i++) {
+        CtrTilemapChunk *chunk = &cache->chunks[i];
+        if (chunk->valid) {
+            C3D_TexDelete(&chunk->tex);
+            chunk->valid = false;
+        }
+    }
+    free(cache->chunks);
+    memset(cache, 0, sizeof(*cache));
+}
+
+static void free_all_tilemap_caches(CtrRenderer *ctx) {
+    if (!ctx) return;
+    for (uint32_t i = 0; i < ctx->tilemapCacheCount; i++) {
+        free_tilemap_cache(&ctx->tilemapCaches[i]);
+    }
+    free(ctx->tilemapCaches);
+    ctx->tilemapCaches = NULL;
+    ctx->tilemapCacheCount = 0;
+}
+
+static void tilemap_set_status(CtrRenderer *ctx, const char *status) {
+    if (!ctx) return;
+    snprintf(ctx->tilemapLastStatus, sizeof(ctx->tilemapLastStatus), "%s",
+             status ? status : "unknown");
+}
+
+static uint32_t hash_tile_layer_data(const RoomLayerTilesData *data) {
+    uint32_t hash = 2166136261u;
+    if (!data || !data->tileData) return hash;
+    const uint32_t meta[] = {
+        data->tilesX, data->tilesY, (uint32_t)data->backgroundIndex
+    };
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(meta) / sizeof(meta[0])); i++) {
+        hash ^= meta[i];
+        hash *= 16777619u;
+    }
+    uint64_t count = (uint64_t)data->tilesX * (uint64_t)data->tilesY;
+    if (count > 262144u) count = 262144u;
+    for (uint64_t i = 0; i < count; i++) {
+        hash ^= data->tileData[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+static uint8_t *decode_texture_page_rgba(CtrRenderer *ctx, int32_t texturePageId,
+                                         int *outW, int *outH) {
+    if (!ctx || !ctx->base.dataWin || texturePageId < 0 ||
+        (uint32_t)texturePageId >= ctx->base.dataWin->txtr.count) {
+        return NULL;
+    }
+
+    DataWin *dw = ctx->base.dataWin;
+    Texture *tex = &dw->txtr.textures[texturePageId];
+    const uint8_t *blob = tex->blobData;
+    uint8_t *ownedBlob = NULL;
+    size_t blobSize = (size_t)tex->blobSize;
+
+    if (!blob && tex->blobOffset != 0 && tex->blobSize != 0 && g_current_data_path[0] != '\0') {
+        FILE *fp = fopen(g_current_data_path, "rb");
+        if (fp) {
+            ownedBlob = read_blob(fp, tex->blobOffset, tex->blobSize);
+            fclose(fp);
+            blob = ownedBlob;
+        }
+    }
+
+    if (!blob || blobSize == 0) {
+        free(ownedBlob);
+        return NULL;
+    }
+
+    uint8_t *pixels = ImageDecoder_decodeToRgba(
+        blob, blobSize, DataWin_isVersionAtLeast(dw, 2022, 5, 0, 0), outW, outH);
+    free(ownedBlob);
+    return pixels;
+}
+
+static void blend_rgba_pixel(uint8_t *dst, const uint8_t *src, uint8_t layerAlpha) {
+    uint32_t srcA = ((uint32_t)src[3] * (uint32_t)layerAlpha + 127u) / 255u;
+    if (srcA == 0) return;
+    if (srcA >= 255u || dst[3] == 0) {
+        dst[0] = src[0];
+        dst[1] = src[1];
+        dst[2] = src[2];
+        dst[3] = (uint8_t)srcA;
+        return;
+    }
+
+    uint32_t dstA = dst[3];
+    uint32_t invA = 255u - srcA;
+    uint32_t outA = srcA + (dstA * invA + 127u) / 255u;
+    if (outA == 0) return;
+
+    dst[0] = (uint8_t)((src[0] * srcA + dst[0] * dstA * invA / 255u) / outA);
+    dst[1] = (uint8_t)((src[1] * srcA + dst[1] * dstA * invA / 255u) / outA);
+    dst[2] = (uint8_t)((src[2] * srcA + dst[2] * dstA * invA / 255u) / outA);
+    dst[3] = (uint8_t)outA;
+}
+
+static inline uint8_t expand4(uint8_t v) {
+    return (uint8_t)((v << 4) | v);
+}
+
+static bool sample_tiled_source_page_rgba(const CtrSourcePage *page, int x, int y,
+                                          uint8_t out[4]) {
+    if (!page || !page->loaded || !page->tex.data || !out) return false;
+    if (x < 0 || y < 0 || x >= page->potW || y >= page->potH) return false;
+
+    uint32_t invY = (uint32_t)(page->potH - 1 - y);
+    uint32_t bx = (uint32_t)x >> 3;
+    uint32_t by = invY >> 3;
+    uint32_t localX = (uint32_t)x & 7u;
+    uint32_t localY = invY & 7u;
+    uint32_t blocksX = (uint32_t)page->potW >> 3;
+    uint32_t pixelIndex = (by * blocksX + bx) * 64u + morton_pos(localX, localY);
+
+    const uint8_t *data = (const uint8_t *)page->tex.data;
+    switch (page->format) {
+        case CTR_TEXTURE_CACHE_FORMAT_LA4: {
+            uint8_t px = data[pixelIndex];
+            uint8_t l = expand4(px >> 4);
+            uint8_t a = expand4(px & 0x0Fu);
+            out[0] = l; out[1] = l; out[2] = l; out[3] = a;
+            return true;
+        }
+        case CTR_TEXTURE_CACHE_FORMAT_A4: {
+            uint8_t byte = data[pixelIndex >> 1];
+            uint8_t nibble = (pixelIndex & 1u) ? (byte >> 4) : (byte & 0x0Fu);
+            out[0] = 255; out[1] = 255; out[2] = 255; out[3] = expand4(nibble);
+            return true;
+        }
+        case CTR_TEXTURE_CACHE_FORMAT_RGBA4:
+        default: {
+            uint16_t px = ((const uint16_t *)data)[pixelIndex];
+            out[0] = expand4((uint8_t)((px >> 12) & 0x0Fu));
+            out[1] = expand4((uint8_t)((px >> 8) & 0x0Fu));
+            out[2] = expand4((uint8_t)((px >> 4) & 0x0Fu));
+            out[3] = expand4((uint8_t)(px & 0x0Fu));
+            return true;
+        }
+    }
+}
+
+static bool sample_cached_tpag_rgba(CtrRenderer *ctx, uint32_t tpagIndex,
+                                    int relX, int relY, uint8_t out[4]) {
+    if (!ctx || !out || !cache_item_available(ctx, tpagIndex)) return false;
+    if (relX < 0 || relY < 0) return false;
+
+    CtrCachedTpag *entry = &ctx->cacheItems[tpagIndex];
+    for (uint32_t i = 0; i < entry->segmentCount; i++) {
+        CtrCachedSegment *seg = &ctx->cacheSegments[entry->segmentStart + i];
+        int segL = (int)seg->sourceX;
+        int segT = (int)seg->sourceY;
+        int segR = segL + (int)seg->width;
+        int segB = segT + (int)seg->height;
+        if (relX < segL || relX >= segR || relY < segT || relY >= segB) continue;
+        if (seg->atlasIndex >= ctx->sourcePageCount) return false;
+
+        int pageId = (int)(ctx->repackBasePageId + seg->atlasIndex);
+        if (!load_source_page_dyn(ctx, pageId)) return false;
+        CtrSourcePage *page = &ctx->sourcePages[seg->atlasIndex];
+        int atlasX = (int)seg->atlasX + (relX - segL);
+        int atlasY = (int)seg->atlasY + (relY - segT);
+        return sample_tiled_source_page_rgba(page, atlasX, atlasY, out);
+    }
+
+    return false;
+}
+
+static bool upload_tilemap_chunk(CtrTilemapChunk *chunk, const uint8_t *rgba) {
+    if (!chunk || !rgba || chunk->potW <= 0 || chunk->potH <= 0) return false;
+
+    size_t pixelCount = (size_t)chunk->potW * (size_t)chunk->potH;
+    uint16_t *linear = malloc(pixelCount * sizeof(uint16_t));
+    if (!linear) return false;
+
+    for (size_t i = 0; i < pixelCount; i++) {
+        const uint8_t *p = &rgba[i * 4u];
+        linear[i] = pack_rgba4444(p[0], p[1], p[2], p[3]);
+    }
+
+    uint16_t *tiled = linearAlloc(pixelCount * sizeof(uint16_t));
+    if (!tiled) {
+        free(linear);
+        return false;
+    }
+    tile_rgba4(linear, tiled, chunk->potW, chunk->potH, chunk->potW, chunk->potH);
+    free(linear);
+
+    bool ok = C3D_TexInit(&chunk->tex, (u16)chunk->potW, (u16)chunk->potH, GPU_RGBA4);
+    if (ok) {
+        C3D_TexSetFilter(&chunk->tex, GPU_NEAREST, GPU_NEAREST);
+        C3D_TexSetWrap(&chunk->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+        C3D_TexLoadImage(&chunk->tex, tiled, GPU_TEXFACE_2D, 0);
+        C3D_TexFlush(&chunk->tex);
+        chunk->valid = true;
+    }
+
+    linearFree(tiled);
+    return ok;
+}
+
+static bool compose_tilemap_chunk(CtrRenderer *ctx, CtrTilemapLayerCache *cache,
+                                  CtrTilemapChunk *chunk, const uint8_t *pagePixels,
+                                  int pageW, int pageH, const TexturePageItem *tpag,
+                                  const Background *tileset, uint8_t layerAlpha) {
+    if (!ctx || !cache || !chunk || !pagePixels || !tpag || !tileset) return false;
+
+    size_t rgbaBytes = (size_t)chunk->potW * (size_t)chunk->potH * 4u;
+    uint8_t *rgba = calloc(1, rgbaBytes);
+    if (!rgba) return false;
+
+    int startTx = chunk->x / (int)cache->tileW;
+    int startTy = chunk->y / (int)cache->tileH;
+    int endTx = (chunk->x + chunk->width + (int)cache->tileW - 1) / (int)cache->tileW;
+    int endTy = (chunk->y + chunk->height + (int)cache->tileH - 1) / (int)cache->tileH;
+    if (startTx < 0) startTx = 0;
+    if (startTy < 0) startTy = 0;
+    if (endTx > (int)cache->tilesX) endTx = (int)cache->tilesX;
+    if (endTy > (int)cache->tilesY) endTy = (int)cache->tilesY;
+
+    bool anyPixel = false;
+    uint32_t opaquePixels = 0;
+    for (int ty = startTy; ty < endTy; ty++) {
+        for (int tx = startTx; tx < endTx; tx++) {
+            uint32_t cell = cache->data->tileData[(uint32_t)ty * cache->tilesX + (uint32_t)tx];
+            uint32_t tileIndex = cell & CTR_GMS2_TILE_INDEX_MASK;
+            if (tileIndex == 0) continue;
+
+            bool mirror = (cell & CTR_GMS2_TILE_MIRROR_MASK) != 0;
+            bool flip = (cell & CTR_GMS2_TILE_FLIP_MASK) != 0;
+            uint32_t col = tileIndex % tileset->gms2TileColumns;
+            uint32_t row = tileIndex / tileset->gms2TileColumns;
+            int srcBaseX = (int)(col * (cache->tileW + 2u * tileset->gms2OutputBorderX) +
+                                 tileset->gms2OutputBorderX);
+            int srcBaseY = (int)(row * (cache->tileH + 2u * tileset->gms2OutputBorderY) +
+                                 tileset->gms2OutputBorderY);
+            int dstBaseX = tx * (int)cache->tileW;
+            int dstBaseY = ty * (int)cache->tileH;
+
+            int drawL = dstBaseX > chunk->x ? dstBaseX : chunk->x;
+            int drawT = dstBaseY > chunk->y ? dstBaseY : chunk->y;
+            int drawR = dstBaseX + (int)cache->tileW;
+            int drawB = dstBaseY + (int)cache->tileH;
+            if (drawR > chunk->x + chunk->width) drawR = chunk->x + chunk->width;
+            if (drawB > chunk->y + chunk->height) drawB = chunk->y + chunk->height;
+
+            for (int py = drawT; py < drawB; py++) {
+                int tileY = py - dstBaseY;
+                int sampleY = flip ? ((int)cache->tileH - 1 - tileY) : tileY;
+                int localSrcY = srcBaseY + sampleY;
+                int relSrcY = localSrcY - (int)tpag->targetY;
+                int absSrcY = (int)tpag->sourceY + relSrcY;
+                if (relSrcY < 0 || relSrcY >= (int)tpag->sourceHeight ||
+                    absSrcY < 0 || absSrcY >= pageH) {
+                    continue;
+                }
+
+                for (int px = drawL; px < drawR; px++) {
+                    int tileX = px - dstBaseX;
+                    int sampleX = mirror ? ((int)cache->tileW - 1 - tileX) : tileX;
+                    int localSrcX = srcBaseX + sampleX;
+                    int relSrcX = localSrcX - (int)tpag->targetX;
+                    int absSrcX = (int)tpag->sourceX + relSrcX;
+                    if (relSrcX < 0 || relSrcX >= (int)tpag->sourceWidth ||
+                        absSrcX < 0 || absSrcX >= pageW) {
+                        continue;
+                    }
+
+                    const uint8_t *src = &pagePixels[((size_t)absSrcY * (size_t)pageW + (size_t)absSrcX) * 4u];
+                    uint8_t *dst = &rgba[((size_t)(py - chunk->y) * (size_t)chunk->potW +
+                                          (size_t)(px - chunk->x)) * 4u];
+                    blend_rgba_pixel(dst, src, layerAlpha);
+                    if (src[3] != 0) {
+                        anyPixel = true;
+                        opaquePixels++;
+                    }
+                }
+            }
+        }
+    }
+
+    bool ok = anyPixel && upload_tilemap_chunk(chunk, rgba);
+    if (ok) {
+        ctx->tilemapChunksBuilt++;
+        ctx->tilemapOpaquePixels += opaquePixels;
+    }
+    free(rgba);
+    return ok;
+}
+
+static bool compose_tilemap_chunk_from_cache(CtrRenderer *ctx, CtrTilemapLayerCache *cache,
+                                             CtrTilemapChunk *chunk,
+                                             const TexturePageItem *tpag,
+                                             const Background *tileset,
+                                             uint8_t layerAlpha) {
+    if (!ctx || !cache || !chunk || !tpag || !tileset) return false;
+    if (!cache_item_available(ctx, (uint32_t)tileset->tpagIndex)) return false;
+
+    size_t rgbaBytes = (size_t)chunk->potW * (size_t)chunk->potH * 4u;
+    uint8_t *rgba = calloc(1, rgbaBytes);
+    if (!rgba) return false;
+
+    int startTx = chunk->x / (int)cache->tileW;
+    int startTy = chunk->y / (int)cache->tileH;
+    int endTx = (chunk->x + chunk->width + (int)cache->tileW - 1) / (int)cache->tileW;
+    int endTy = (chunk->y + chunk->height + (int)cache->tileH - 1) / (int)cache->tileH;
+    if (startTx < 0) startTx = 0;
+    if (startTy < 0) startTy = 0;
+    if (endTx > (int)cache->tilesX) endTx = (int)cache->tilesX;
+    if (endTy > (int)cache->tilesY) endTy = (int)cache->tilesY;
+
+    bool anyPixel = false;
+    uint32_t opaquePixels = 0;
+    uint8_t srcPx[4];
+
+    for (int ty = startTy; ty < endTy; ty++) {
+        for (int tx = startTx; tx < endTx; tx++) {
+            uint32_t cell = cache->data->tileData[(uint32_t)ty * cache->tilesX + (uint32_t)tx];
+            uint32_t tileIndex = cell & CTR_GMS2_TILE_INDEX_MASK;
+            if (tileIndex == 0) continue;
+
+            bool mirror = (cell & CTR_GMS2_TILE_MIRROR_MASK) != 0;
+            bool flip = (cell & CTR_GMS2_TILE_FLIP_MASK) != 0;
+            uint32_t col = tileIndex % tileset->gms2TileColumns;
+            uint32_t row = tileIndex / tileset->gms2TileColumns;
+            int srcBaseX = (int)(col * (cache->tileW + 2u * tileset->gms2OutputBorderX) +
+                                 tileset->gms2OutputBorderX);
+            int srcBaseY = (int)(row * (cache->tileH + 2u * tileset->gms2OutputBorderY) +
+                                 tileset->gms2OutputBorderY);
+            int dstBaseX = tx * (int)cache->tileW;
+            int dstBaseY = ty * (int)cache->tileH;
+
+            int drawL = dstBaseX > chunk->x ? dstBaseX : chunk->x;
+            int drawT = dstBaseY > chunk->y ? dstBaseY : chunk->y;
+            int drawR = dstBaseX + (int)cache->tileW;
+            int drawB = dstBaseY + (int)cache->tileH;
+            if (drawR > chunk->x + chunk->width) drawR = chunk->x + chunk->width;
+            if (drawB > chunk->y + chunk->height) drawB = chunk->y + chunk->height;
+
+            for (int py = drawT; py < drawB; py++) {
+                int tileY = py - dstBaseY;
+                int sampleY = flip ? ((int)cache->tileH - 1 - tileY) : tileY;
+                int localSrcY = srcBaseY + sampleY;
+                int relSrcY = localSrcY - (int)tpag->targetY;
+                if (relSrcY < 0 || relSrcY >= (int)tpag->sourceHeight) continue;
+
+                for (int px = drawL; px < drawR; px++) {
+                    int tileX = px - dstBaseX;
+                    int sampleX = mirror ? ((int)cache->tileW - 1 - tileX) : tileX;
+                    int localSrcX = srcBaseX + sampleX;
+                    int relSrcX = localSrcX - (int)tpag->targetX;
+                    if (relSrcX < 0 || relSrcX >= (int)tpag->sourceWidth) continue;
+
+                    if (!sample_cached_tpag_rgba(ctx, (uint32_t)tileset->tpagIndex,
+                                                relSrcX, relSrcY, srcPx)) {
+                        continue;
+                    }
+
+                    uint8_t *dst = &rgba[((size_t)(py - chunk->y) * (size_t)chunk->potW +
+                                          (size_t)(px - chunk->x)) * 4u];
+                    blend_rgba_pixel(dst, srcPx, layerAlpha);
+                    if (srcPx[3] != 0) {
+                        anyPixel = true;
+                        opaquePixels++;
+                    }
+                }
+            }
+        }
+    }
+
+    bool ok = anyPixel && upload_tilemap_chunk(chunk, rgba);
+    if (ok) {
+        ctx->tilemapChunksBuilt++;
+        ctx->tilemapOpaquePixels += opaquePixels;
+    }
+    free(rgba);
+    return ok;
+}
+
+static CtrTilemapLayerCache *build_tilemap_cache(CtrRenderer *ctx, RoomLayerTilesData *data,
+                                                 uint32_t hash) {
+    if (!ctx || !data || !data->tileData || data->backgroundIndex < 0) return NULL;
+    ctx->tilemapBuildAttempts++;
+
+    DataWin *dw = ctx->base.dataWin;
+    if (!dw || (uint32_t)data->backgroundIndex >= dw->bgnd.count) {
+        ctx->tilemapBuildFailures++;
+        tilemap_set_status(ctx, "invalid background index");
+        return NULL;
+    }
+    Background *tileset = &dw->bgnd.backgrounds[data->backgroundIndex];
+    if (tileset->tpagIndex < 0 || (uint32_t)tileset->tpagIndex >= dw->tpag.count) {
+        ctx->tilemapBuildFailures++;
+        tilemap_set_status(ctx, "invalid tileset tpag");
+        return NULL;
+    }
+    if (tileset->gms2TileWidth == 0 || tileset->gms2TileHeight == 0 ||
+        tileset->gms2TileColumns == 0) {
+        ctx->tilemapBuildFailures++;
+        tilemap_set_status(ctx, "invalid gms2 tile geometry");
+        return NULL;
+    }
+
+    TexturePageItem *tpag = &dw->tpag.items[tileset->tpagIndex];
+    int pageW = 0, pageH = 0;
+    uint8_t *pagePixels = NULL;
+    bool useCachedAtlas = cache_item_available(ctx, (uint32_t)tileset->tpagIndex);
+    if (!useCachedAtlas) {
+        pagePixels = decode_texture_page_rgba(ctx, tpag->texturePageId, &pageW, &pageH);
+        if (!pagePixels || pageW <= 0 || pageH <= 0) {
+            ImageDecoder_freeRgba(pagePixels);
+            ctx->tilemapBuildFailures++;
+            tilemap_set_status(ctx, "failed to decode source texture page");
+            return NULL;
+        }
+    }
+
+    uint32_t roomW = data->tilesX * tileset->gms2TileWidth;
+    uint32_t roomH = data->tilesY * tileset->gms2TileHeight;
+    if (roomW == 0 || roomH == 0 || roomW > 8192u || roomH > 8192u) {
+        ImageDecoder_freeRgba(pagePixels);
+        ctx->tilemapBuildFailures++;
+        tilemap_set_status(ctx, "invalid tilemap room size");
+        return NULL;
+    }
+
+    uint32_t slot = ctx->tilemapCacheCount++;
+    ctx->tilemapCaches = safeRealloc(ctx->tilemapCaches,
+                                     ctx->tilemapCacheCount * sizeof(CtrTilemapLayerCache));
+    CtrTilemapLayerCache *cache = &ctx->tilemapCaches[slot];
+    memset(cache, 0, sizeof(*cache));
+    cache->data = data;
+    cache->hash = hash;
+    cache->backgroundIndex = data->backgroundIndex;
+    cache->tilesX = data->tilesX;
+    cache->tilesY = data->tilesY;
+    cache->tileW = tileset->gms2TileWidth;
+    cache->tileH = tileset->gms2TileHeight;
+    cache->chunkSize = 128u;
+    cache->chunkCols = (roomW + cache->chunkSize - 1u) / cache->chunkSize;
+    cache->chunkRows = (roomH + cache->chunkSize - 1u) / cache->chunkSize;
+    cache->chunkCount = cache->chunkCols * cache->chunkRows;
+    cache->chunks = calloc(cache->chunkCount, sizeof(CtrTilemapChunk));
+    if (!cache->chunks) {
+        ImageDecoder_freeRgba(pagePixels);
+        free_tilemap_cache(cache);
+        ctx->tilemapBuildFailures++;
+        tilemap_set_status(ctx, "failed to allocate chunk table");
+        return NULL;
+    }
+
+    uint32_t validChunks = 0;
+    for (uint32_t cy = 0; cy < cache->chunkRows; cy++) {
+        for (uint32_t cx = 0; cx < cache->chunkCols; cx++) {
+            CtrTilemapChunk *chunk = &cache->chunks[cy * cache->chunkCols + cx];
+            chunk->x = (int)(cx * cache->chunkSize);
+            chunk->y = (int)(cy * cache->chunkSize);
+            chunk->width = (int)fminf((float)(roomW - (uint32_t)chunk->x), (float)cache->chunkSize);
+            chunk->height = (int)fminf((float)(roomH - (uint32_t)chunk->y), (float)cache->chunkSize);
+            chunk->potW = next_pow2(chunk->width);
+            chunk->potH = next_pow2(chunk->height);
+            bool chunkOk = useCachedAtlas
+                ? compose_tilemap_chunk_from_cache(ctx, cache, chunk, tpag, tileset, 255u)
+                : compose_tilemap_chunk(ctx, cache, chunk, pagePixels, pageW, pageH,
+                                        tpag, tileset, 255u);
+            if (chunkOk) {
+                validChunks++;
+            }
+        }
+    }
+
+    ImageDecoder_freeRgba(pagePixels);
+    if (validChunks == 0) {
+        free_tilemap_cache(cache);
+        ctx->tilemapBuildFailures++;
+        tilemap_set_status(ctx, "built zero visible chunks");
+        return NULL;
+    }
+
+    cache->valid = true;
+    ctx->tilemapBuildSuccesses++;
+    tilemap_set_status(ctx, useCachedAtlas ? "chunk cache ready from atlas"
+                                           : "chunk cache ready from source");
+    return cache;
+}
+
+static CtrTilemapLayerCache *get_tilemap_cache(CtrRenderer *ctx, RoomLayerTilesData *data) {
+    uint32_t hash = hash_tile_layer_data(data);
+    for (uint32_t i = 0; i < ctx->tilemapCacheCount; i++) {
+        CtrTilemapLayerCache *cache = &ctx->tilemapCaches[i];
+        if (cache->valid && cache->data == data && cache->hash == hash &&
+            cache->backgroundIndex == data->backgroundIndex) {
+            return cache;
+        }
+    }
+    return build_tilemap_cache(ctx, data, hash);
+}
+
+bool CtrRenderer_drawGms2TileLayer(Renderer *ren, RoomLayerTilesData *data,
+                                   float layerOffsetX, float layerOffsetY, float alpha) {
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+    if (!ctx || !data || !data->tileData || alpha <= 0.f) return false;
+    if (alpha > 1.f) alpha = 1.f;
+
+    CtrTilemapLayerCache *cache = get_tilemap_cache(ctx, data);
+    if (!cache || !cache->valid || !cache->chunks) return false;
+
+    float col[4] = {1.f, 1.f, 1.f, alpha};
+    bool drew = false;
+    ctx->tilemapDrawCalls++;
+    for (uint32_t i = 0; i < cache->chunkCount; i++) {
+        CtrTilemapChunk *chunk = &cache->chunks[i];
+        if (!chunk->valid) continue;
+        float x0 = (float)chunk->x + layerOffsetX;
+        float y0 = (float)chunk->y + layerOffsetY;
+        float x1 = x0 + (float)chunk->width;
+        float y1 = y0 + (float)chunk->height;
+        if (quad_culled(ctx, x0, y0, x1, y0, x1, y1, x0, y1)) continue;
+
+        push_quad(ctx, &chunk->tex,
+                  x0, y0, x1, y0, x1, y1, x0, y1,
+                  0.f, 0.f,
+                  (float)chunk->width / (float)chunk->potW,
+                  (float)chunk->height / (float)chunk->potH,
+                  col);
+        drew = true;
+        ctx->tilemapChunksDrawn++;
+    }
+
+    return drew;
 }
 
 // Region drawing
@@ -2556,6 +3205,61 @@ static void ctr_draw_tiled(Renderer *ren, int32_t id, float ox, float oy,
         for (float dx = sX; dx < eX; dx += tw) {
             ren->vtable->drawSprite(ren, id, dx + ox * fabsf(sx), dy + oy * fabsf(sy),
                                     ox, oy, sx, sy, 0.f, col, a);
+        }
+    }
+}
+
+static void ctr_draw_tiled_part(Renderer *ren, int32_t id,
+                                int32_t srcX, int32_t srcY,
+                                int32_t srcW, int32_t srcH,
+                                float dstX, float dstY,
+                                float dstW, float dstH,
+                                uint32_t col, float a) {
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+    if (id < 0 || (uint32_t)id >= ren->dataWin->tpag.count) return;
+    if (srcW <= 0 || srcH <= 0 || dstW <= 0.f || dstH <= 0.f) return;
+    if (!isfinite(dstX) || !isfinite(dstY) || !isfinite(dstW) ||
+        !isfinite(dstH) || !isfinite(a)) {
+        return;
+    }
+
+    float c[4];
+    col2fv(col, a, c);
+    if (c[3] <= 0.f) return;
+
+    float endX = dstX + dstW;
+    float endY = dstY + dstH;
+    float startX = dstX;
+    float startY = dstY;
+
+    if (ctx->cullEnabled) {
+        if (endX <= ctx->cullL || startX >= ctx->cullR ||
+            endY <= ctx->cullT || startY >= ctx->cullB) {
+            return;
+        }
+        if (startX < ctx->cullL) {
+            float skip = floorf((ctx->cullL - startX) / (float)srcW);
+            if (skip > 0.f) startX += skip * (float)srcW;
+        }
+        if (startY < ctx->cullT) {
+            float skip = floorf((ctx->cullT - startY) / (float)srcH);
+            if (skip > 0.f) startY += skip * (float)srcH;
+        }
+    }
+
+    for (float y = startY; y < endY; y += (float)srcH) {
+        float h = (float)srcH;
+        if (y + h > endY) h = endY - y;
+        if (h <= 0.f) continue;
+
+        for (float x = startX; x < endX; x += (float)srcW) {
+            float w = (float)srcW;
+            if (x + w > endX) w = endX - x;
+            if (w <= 0.f) continue;
+
+            draw_region(ctx, (uint32_t)id,
+                        (float)srcX, (float)srcY, w, h,
+                        x, y, x + w, y, x + w, y + h, x, y + h, c);
         }
     }
 }
@@ -2997,6 +3701,102 @@ static void mark_hot_fonts(CtrRenderer *ctx, DataWin *dw) {
     }
 }
 
+static void mark_sprite_by_name(CtrRenderer *ctx, DataWin *dw, const char *spriteName) {
+    if (!ctx || !dw || !spriteName) return;
+    for (uint32_t i = 0; i < dw->sprt.count; i++) {
+        const char *name = dw->sprt.sprites[i].name;
+        if (name && strcmp(name, spriteName) == 0) {
+            mark_spr(ctx, dw, (int)i);
+            return;
+        }
+    }
+}
+
+// Keep only the frame that a fixed draw path actually submits.  Several
+// Deltarune teacup assets spread their unused animation frames across many
+// source atlas pages; pinning the whole sprite can starve the room cache.
+static void mark_sprite_frame_by_name(CtrRenderer *ctx, DataWin *dw,
+                                      const char *spriteName, uint32_t frame) {
+    if (!ctx || !dw || !spriteName) return;
+    for (uint32_t i = 0; i < dw->sprt.count; i++) {
+        Sprite *sprite = &dw->sprt.sprites[i];
+        if (!sprite->name || strcmp(sprite->name, spriteName) != 0) continue;
+        if (frame < sprite->textureCount) mark_res(ctx, sprite->tpagIndices[frame]);
+        return;
+    }
+}
+
+static bool room_contains_object_named(const Room *room, DataWin *dw, const char *objectName) {
+    if (!room || !dw || !objectName) return false;
+    for (uint32_t i = 0; i < room->gameObjectCount; i++) {
+        int objectIndex = room->gameObjects[i].objectDefinition;
+        if (objectIndex < 0 || (uint32_t)objectIndex >= dw->objt.count) continue;
+        const char *name = dw->objt.objects[objectIndex].name;
+        if (name && strcmp(name, objectName) == 0) return true;
+    }
+    return false;
+}
+
+static void mark_deltarune_critical_sprites(CtrRenderer *ctx, DataWin *dw, const Room *room) {
+    static const char *tensionSprites[] = {
+        "spr_tensionbar",
+        "spr_tensionbar_cutout",
+        "spr_tensionmarker",
+        "spr_tplogo",
+    };
+    for (uint32_t i = 0; i < sizeof(tensionSprites) / sizeof(tensionSprites[0]); i++) {
+        mark_sprite_by_name(ctx, dw, tensionSprites[i]);
+    }
+    if (room_contains_object_named(room, dw, "obj_teacup")) {
+        // obj_teacup Draw always uses frame 0 for these support pieces.
+        mark_sprite_frame_by_name(ctx, dw, "spr_teacup_screw", 0);
+        mark_sprite_frame_by_name(ctx, dw, "spr_teacup_screw_end", 0);
+        mark_sprite_frame_by_name(ctx, dw, "spr_teacup_base", 0);
+        mark_sprite_frame_by_name(ctx, dw, "spr_teacup_platform", 0);
+        // The rotating center deliberately selects spin div 22.5 (0..7).
+        mark_sprite_by_name(ctx, dw, "spr_teacup_center");
+    }
+}
+
+static uint32_t queue_sprite_prefetch(CtrRenderer *ctx, DataWin *dw, int id);
+
+static char ascii_tolower_char(char ch) {
+    if (ch >= 'A' && ch <= 'Z') return (char)(ch + ('a' - 'A'));
+    return ch;
+}
+
+static bool ascii_contains_ignore_case(const char *haystack, const char *needle) {
+    if (!haystack || !needle || !needle[0]) return false;
+    for (const char *h = haystack; *h; h++) {
+        const char *hs = h;
+        const char *ns = needle;
+        while (*hs && *ns && ascii_tolower_char(*hs) == ascii_tolower_char(*ns)) {
+            hs++;
+            ns++;
+        }
+        if (*ns == '\0') return true;
+    }
+    return false;
+}
+
+static bool ctr_is_deltarune_asset_set(const DataWin *dw) {
+    if (!dw) return false;
+    return ascii_contains_ignore_case(dw->filePath, "deltarune") ||
+           ascii_contains_ignore_case(dw->filePath, "chapter1_windows") ||
+           ascii_contains_ignore_case(dw->filePath, "chapter2_windows") ||
+           ascii_contains_ignore_case(dw->filePath, "chapter3_windows") ||
+           ascii_contains_ignore_case(dw->filePath, "chapter4_windows") ||
+           ascii_contains_ignore_case(dw->gen8.name, "deltarune");
+}
+
+static bool ctr_is_deltarune_profile(CtrRenderer *ctx, DataWin *dw) {
+    if (ctx) {
+        if (ctx->base.gameProfile == GAME_PROFILE_DELTARUNE) return true;
+        if (ctx->base.gameProfile == GAME_PROFILE_UNDERTALE) return false;
+    }
+    return ctr_is_deltarune_asset_set(dw);
+}
+
 static void mark_tile(CtrRenderer *ctx, DataWin *dw, const RoomTile *tile) {
     if (!tile) return;
     if (tile->useSpriteDefinition) {
@@ -3013,6 +3813,18 @@ static void mark_obj_and_parents(CtrRenderer *ctx, DataWin *dw, int id) {
         mark_spr(ctx, dw, obj->spriteId);
         id = obj->parentId;
     }
+}
+
+static uint32_t queue_obj_and_parents(CtrRenderer *ctx, DataWin *dw, int id) {
+    uint32_t queued = 0;
+    int guard = 0;
+    while (id >= 0 && (uint32_t)id < dw->objt.count && guard++ < 64) {
+        GameObject *obj = &dw->objt.objects[id];
+        queued += queue_sprite_prefetch(ctx, dw, obj->spriteId);
+        if (ctx->prefetchQueueCount >= CTR_PREFETCH_QUEUE_CAP) break;
+        id = obj->parentId;
+    }
+    return queued;
 }
 
 static void mark_room_layer(CtrRenderer *ctx, DataWin *dw, const RoomLayer *layer) {
@@ -3037,6 +3849,71 @@ static void mark_room_layer(CtrRenderer *ctx, DataWin *dw, const RoomLayer *laye
         default:
             break;
     }
+}
+
+static uint32_t collect_tpag_source_pages(CtrRenderer *ctx, int tpagIndex, bool *sourceLoadMap) {
+    if (!ctx || !sourceLoadMap || tpagIndex < 0 || (uint32_t)tpagIndex >= ctx->pageCount) return 0;
+
+    mark_res(ctx, tpagIndex);
+    if ((uint32_t)tpagIndex >= ctx->originalTpagCount ||
+        !cache_item_available(ctx, (uint32_t)tpagIndex)) {
+        return 0;
+    }
+
+    CtrCachedTpag *entry = &ctx->cacheItems[tpagIndex];
+    uint32_t newlyMarked = 0;
+    for (uint32_t i = 0; i < entry->segmentCount; i++) {
+        CtrCachedSegment *seg = &ctx->cacheSegments[entry->segmentStart + i];
+        if (seg->atlasIndex >= ctx->sourcePageCount) continue;
+        if (!sourceLoadMap[seg->atlasIndex]) newlyMarked++;
+        sourceLoadMap[seg->atlasIndex] = true;
+        ctx->sourcePages[seg->atlasIndex].keepResident = true;
+    }
+    return newlyMarked;
+}
+
+static uint32_t load_deltarune_tilemap_pages_first(CtrRenderer *ctx, DataWin *dw, Room *room) {
+    if (!ctx || !dw || !room || ctx->sourcePageCount == 0) return 0;
+
+    bool *sourceLoadMap = calloc(ctx->sourcePageCount, sizeof(bool));
+    if (!sourceLoadMap) return 0;
+
+    uint32_t sourceNeedCount = 0;
+    uint32_t dynamicLoadCount = 0;
+
+    for (uint32_t i = 0; i < room->layerCount; i++) {
+        RoomLayer *layer = &room->layers[i];
+        if (!layer->visible || layer->type != RoomLayerType_Tiles || !layer->tilesData) continue;
+        int bgIndex = layer->tilesData->backgroundIndex;
+        if (bgIndex < 0 || (uint32_t)bgIndex >= dw->bgnd.count) continue;
+        int tpagIndex = dw->bgnd.backgrounds[bgIndex].tpagIndex;
+        if (tpagIndex < 0 || (uint32_t)tpagIndex >= ctx->pageCount) continue;
+
+        sourceNeedCount += collect_tpag_source_pages(ctx, tpagIndex, sourceLoadMap);
+        if ((uint32_t)tpagIndex >= ctx->originalTpagCount) {
+            load_page_dyn(ctx, dw, tpagIndex);
+            dynamicLoadCount++;
+        }
+    }
+
+    uint32_t sourceReadyCount = 0;
+    ctx->preloadingAtlases = true;
+    for (uint32_t i = 0; i < ctx->sourcePageCount; i++) {
+        if (!sourceLoadMap[i]) continue;
+        if (load_source_page_dyn(ctx, (int32_t)(ctx->repackBasePageId + i))) {
+            sourceReadyCount++;
+        }
+    }
+    ctx->preloadingAtlases = false;
+
+    CTR_DIAG("CTR cache: Deltarune tilemap priority preload %lu/%lu atlas textures, %lu dynamic; linear free %.2f MB\n",
+             (unsigned long)sourceReadyCount,
+             (unsigned long)sourceNeedCount,
+             (unsigned long)dynamicLoadCount,
+             (double)linearSpaceFree() / (1024.0 * 1024.0));
+
+    free(sourceLoadMap);
+    return sourceReadyCount;
 }
 
 static void load_marked_room_pages(CtrRenderer *ctx, DataWin *dw) {
@@ -3101,6 +3978,89 @@ static void load_marked_room_pages(CtrRenderer *ctx, DataWin *dw) {
     }
 }
 
+void CtrRenderer_dumpTextureDiagnostics(Renderer *ren, FILE *out, const Room *room) {
+    if (!ren || !out) return;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+    DataWin *dw = ren->dataWin;
+
+    fprintf(out, "\n[3ds-texture-cache]\n");
+    fprintf(out, "profile=%d pageCount=%lu originalTpagCount=%lu sourcePageCount=%lu repackBase=%lu cacheItems=%lu cacheSegments=%lu linearFree=%.2fMB room=%ld/%s lazyLoadsThisRoom=%lu\n",
+            (int)ren->gameProfile,
+            (unsigned long)ctx->pageCount,
+            (unsigned long)ctx->originalTpagCount,
+            (unsigned long)ctx->sourcePageCount,
+            (unsigned long)ctx->repackBasePageId,
+            (unsigned long)ctx->cacheItemCount,
+            (unsigned long)ctx->cacheSegmentCount,
+            (double)linearSpaceFree() / (1024.0 * 1024.0),
+            (long)ctx->currentRoomIndex,
+            ctx->currentRoomName,
+            (unsigned long)ctx->lazyLoadsThisRoom);
+    fprintf(out, "tilemapChunks caches=%lu buildAttempts=%lu buildOk=%lu buildFail=%lu chunksBuilt=%lu opaquePixels=%lu drawCalls=%lu chunksDrawn=%lu status=%s\n",
+            (unsigned long)ctx->tilemapCacheCount,
+            (unsigned long)ctx->tilemapBuildAttempts,
+            (unsigned long)ctx->tilemapBuildSuccesses,
+            (unsigned long)ctx->tilemapBuildFailures,
+            (unsigned long)ctx->tilemapChunksBuilt,
+            (unsigned long)ctx->tilemapOpaquePixels,
+            (unsigned long)ctx->tilemapDrawCalls,
+            (unsigned long)ctx->tilemapChunksDrawn,
+            ctx->tilemapLastStatus[0] ? ctx->tilemapLastStatus : "none");
+
+    if (!dw || !room) return;
+
+    for (uint32_t i = 0; i < room->layerCount; i++) {
+        const RoomLayer *layer = &room->layers[i];
+        if (layer->type != RoomLayerType_Tiles || !layer->tilesData) continue;
+
+        int bgIndex = layer->tilesData->backgroundIndex;
+        int tpagIndex = -1;
+        const char *bgName = "<invalid>";
+        if (bgIndex >= 0 && (uint32_t)bgIndex < dw->bgnd.count) {
+            const Background *bg = &dw->bgnd.backgrounds[bgIndex];
+            tpagIndex = bg->tpagIndex;
+            bgName = bg->name ? bg->name : "<unnamed>";
+        }
+
+        bool cacheValid = (tpagIndex >= 0) && cache_item_available(ctx, (uint32_t)tpagIndex);
+        uint32_t segmentCount = cacheValid ? ctx->cacheItems[tpagIndex].segmentCount : 0;
+        fprintf(out, "tileLayer[%lu] id=%lu name=%s visible=%d bg=%d/%s tpag=%d cacheValid=%d segments=%lu\n",
+                (unsigned long)i,
+                (unsigned long)layer->id,
+                layer->name ? layer->name : "<unnamed>",
+                layer->visible,
+                bgIndex,
+                bgName,
+                tpagIndex,
+                cacheValid ? 1 : 0,
+                (unsigned long)segmentCount);
+
+        if (!cacheValid) continue;
+        CtrCachedTpag *entry = &ctx->cacheItems[tpagIndex];
+        for (uint32_t s = 0; s < entry->segmentCount; s++) {
+            CtrCachedSegment *seg = &ctx->cacheSegments[entry->segmentStart + s];
+            CtrSourcePage *src = seg->atlasIndex < ctx->sourcePageCount
+                               ? &ctx->sourcePages[seg->atlasIndex]
+                               : NULL;
+            fprintf(out, "  segment[%lu] atlas=%lu src=(%u,%u %ux%u) atlasPos=(%u,%u) loaded=%d keep=%d failed=%d fmt=%lu bytes=%lu lastFrame=%lu\n",
+                    (unsigned long)s,
+                    (unsigned long)seg->atlasIndex,
+                    seg->sourceX,
+                    seg->sourceY,
+                    seg->width,
+                    seg->height,
+                    seg->atlasX,
+                    seg->atlasY,
+                    src ? src->loaded : 0,
+                    src ? src->keepResident : 0,
+                    src ? src->loadFailed : 0,
+                    src ? (unsigned long)src->format : 0ul,
+                    src ? (unsigned long)src->dataSize : 0ul,
+                    src ? (unsigned long)src->lastFrame : 0ul);
+        }
+    }
+}
+
 void CtrRenderer_prefetchTexturePage(Renderer *ren, int32_t tpagIdx) {
     CtrRenderer *ctx = (CtrRenderer *)ren;
     if (!ctx || !ren || !ren->dataWin) return;
@@ -3125,10 +4085,21 @@ static void ctr_on_room(Renderer *ren, int32_t rm) {
     DataWin *dw = ren->dataWin;
     if (rm < 0 || (uint32_t)rm >= dw->room.count) return;
     Room *room = &dw->room.rooms[rm];
+    bool deltaruneProfile = ctr_is_deltarune_profile(ctx, dw);
+    bool conservativeObjectPrefetch = deltaruneProfile;
 
     ctx->prefetchQueueCount = 0;
     ctx->currentRoomIndex = rm;
     ctx->lazyLoadsThisRoom = 0;
+    free_all_tilemap_caches(ctx);
+    ctx->tilemapBuildAttempts = 0;
+    ctx->tilemapBuildSuccesses = 0;
+    ctx->tilemapBuildFailures = 0;
+    ctx->tilemapChunksBuilt = 0;
+    ctx->tilemapOpaquePixels = 0;
+    ctx->tilemapDrawCalls = 0;
+    ctx->tilemapChunksDrawn = 0;
+    tilemap_set_status(ctx, "room changed");
     snprintf(ctx->currentRoomName, sizeof(ctx->currentRoomName), "%s",
              room->name ? room->name : "?");
 
@@ -3148,18 +4119,34 @@ static void ctr_on_room(Renderer *ren, int32_t rm) {
         mark_tile(ctx, dw, &room->tiles[i]);
     for (uint32_t i = 0; i < room->layerCount; i++)
         mark_room_layer(ctx, dw, &room->layers[i]);
-    for (uint32_t i = 0; i < room->gameObjectCount; i++) {
-        int id = room->gameObjects[i].objectDefinition;
-        mark_obj_and_parents(ctx, dw, id);
+    if (!conservativeObjectPrefetch) {
+        for (uint32_t i = 0; i < room->gameObjectCount; i++) {
+            int id = room->gameObjects[i].objectDefinition;
+            mark_obj_and_parents(ctx, dw, id);
+        }
     }
 
     mark_hot_fonts(ctx, dw);
+    if (deltaruneProfile) {
+        mark_deltarune_critical_sprites(ctx, dw, room);
+    }
 
     unload_nonresident_source_pages(ctx);
+    uint32_t tilemapPriorityLoaded = deltaruneProfile
+        ? load_deltarune_tilemap_pages_first(ctx, dw, room)
+        : 0;
     load_marked_room_pages(ctx, dw);
     uint32_t warmupQueued = queue_room_warmup_pages(ctx, rm);
     uint32_t hotQueued = 0;
+    if (conservativeObjectPrefetch) {
+        for (uint32_t i = 0; i < room->gameObjectCount; i++) {
+            int id = room->gameObjects[i].objectDefinition;
+            hotQueued += queue_obj_and_parents(ctx, dw, id);
+            if (ctx->prefetchQueueCount >= CTR_PREFETCH_QUEUE_CAP) break;
+        }
+    }
     uint32_t warmupLoaded = process_prefetch_queue(ctx, CTR_PREFETCH_ROOM_BUDGET);
+    (void)tilemapPriorityLoaded;
     (void)warmupQueued;
     (void)hotQueued;
     (void)warmupLoaded;
@@ -3206,7 +4193,7 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
             // draws don't use stale BufInfo/AttrInfo from before the split.
             rebind_state(ctx);
             apply_projection(ctx, &ctx->currentProjection);
-            apply_blend(ctx, ctx->currentBlendMode);
+            emit_blend_state(ctx);
         }
 
         return (int32_t)slot;
@@ -3229,7 +4216,7 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
         C3D_FrameDrawOn(oldTgt);
         rebind_state(ctx);
         apply_projection(ctx, &ctx->currentProjection);
-        apply_blend(ctx, ctx->currentBlendMode);
+        emit_blend_state(ctx);
     }
 
     return (int32_t)slot;
@@ -3269,10 +4256,15 @@ static bool ctr_surface_get_size(Renderer *ren, int32_t surfaceId, int32_t *w, i
 static bool ctr_surface_set_target(Renderer *ren, int32_t surfaceId) {
     CtrRenderer *ctx = (CtrRenderer *)ren;
     CtrSurface *surf = get_surface(ctx, surfaceId);
-    if (!surf || ctx->targetStackDepth >= CTR_TARGET_STACK_DEPTH) return false;
+    if (!surf || ctx->targetStackDepth >= CTR_TARGET_STACK_DEPTH) {
+        if (ctx->base.gameProfile == GAME_PROFILE_DELTARUNE) {
+            ctx->surfaceDrawSuppressed = true;
+            ctx->surfaceDrawSuppressedDepth = ctx->targetStackDepth;
+        }
+        return false;
+    }
 
     flush_batch(ctx);
-    C3D_FrameSplit(0);
 
     CtrTargetState *st = &ctx->targetStack[ctx->targetStackDepth++];
     st->target     = ctx->activeTarget ? ctx->activeTarget : ctx->appTarget;
@@ -3281,6 +4273,11 @@ static bool ctr_surface_set_target(Renderer *ren, int32_t surfaceId) {
     st->viewport[2]= ctx->currentViewport[2];
     st->viewport[3]= ctx->currentViewport[3];
     st->projection = ctx->currentProjection;
+    st->cullEnabled = ctx->cullEnabled;
+    st->cullL = ctx->cullL;
+    st->cullT = ctx->cullT;
+    st->cullR = ctx->cullR;
+    st->cullB = ctx->cullB;
 
     bind_target(ctx, surf->target);
     set_viewport_logical(ctx, surf->target, 0, 0, surf->width, surf->height);
@@ -3288,15 +4285,27 @@ static bool ctr_surface_set_target(Renderer *ren, int32_t surfaceId) {
     C3D_Mtx proj;
     make_ortho_topleft(&proj, (float)surf->width, (float)surf->height);
     apply_projection(ctx, &proj);
+    ctx->cullEnabled = true;
+    ctx->cullL = 0.0f;
+    ctx->cullT = 0.0f;
+    ctx->cullR = (float) surf->width;
+    ctx->cullB = (float) surf->height;
+    ctx->surfaceDrawSuppressed = false;
+    ctx->surfaceDrawSuppressedDepth = 0;
     return true;
 }
 
 static void ctr_surface_reset_target(Renderer *ren) {
     CtrRenderer *ctx = (CtrRenderer *)ren;
+    if (ctx->surfaceDrawSuppressed &&
+        ctx->targetStackDepth == ctx->surfaceDrawSuppressedDepth) {
+        ctx->surfaceDrawSuppressed = false;
+        ctx->surfaceDrawSuppressedDepth = 0;
+        return;
+    }
     if (ctx->targetStackDepth <= 0) return;
 
     flush_batch(ctx);
-    C3D_FrameSplit(0);
 
     CtrTargetState st = ctx->targetStack[--ctx->targetStackDepth];
     C3D_RenderTarget *tgt = st.target ? st.target : ctx->appTarget;
@@ -3305,12 +4314,20 @@ static void ctr_surface_reset_target(Renderer *ren) {
     set_viewport_logical(ctx, tgt,
                          st.viewport[0], st.viewport[1], st.viewport[2], st.viewport[3]);
     apply_projection(ctx, &st.projection);
+    ctx->cullEnabled = st.cullEnabled;
+    ctx->cullL = st.cullL;
+    ctx->cullT = st.cullT;
+    ctx->cullR = st.cullR;
+    ctx->cullB = st.cullB;
+    ctx->surfaceDrawSuppressed = false;
+    ctx->surfaceDrawSuppressedDepth = 0;
 }
 
 static void ctr_draw_surface(Renderer *ren, int32_t surfaceId,
                              float x, float y, float xscale, float yscale,
                              float angleDeg, uint32_t color, float alpha) {
     CtrRenderer *ctx = (CtrRenderer *)ren;
+    if (ctx->surfaceDrawSuppressed) return;
     float c[4]; col2fv(color, alpha, c);
     if (c[3] <= 0.f) return;
 
@@ -3378,6 +4395,7 @@ static void ctr_clear_target(Renderer *ren, uint32_t color, float alpha) {
     CtrRenderer *ctx = (CtrRenderer *)ren;
     flush_batch(ctx);
     if (!ctx->inFrame || !ctx->activeTarget) return;
+    if (ctx->surfaceDrawSuppressed) return;
 
     uint8_t r = BGR_R(color), g = BGR_G(color), b = BGR_B(color), aa = clamp_u8(alpha);
     uint32_t rgba = ((uint32_t)r << 24) | ((uint32_t)g << 16) | ((uint32_t)b << 8) | aa;
@@ -3601,37 +4619,48 @@ static void ctr_gpu_blend_mode(Renderer *ren, int32_t mode) {
 }
 
 static void ctr_gpu_blend_mode_ext(Renderer *ren, int32_t sfactor, int32_t dfactor) {
-    (void)ren;
-    (void)sfactor;
-    (void)dfactor;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+    flush_batch(ctx);
+    ctx->currentBlendMode = bm_complex;
+    ctx->blendEnabled = true;
+    ctx->blendSrcColor = gm_blend_factor_to_gpu(sfactor);
+    ctx->blendDstColor = gm_blend_factor_to_gpu(dfactor);
+    ctx->blendSrcAlpha = ctx->blendSrcColor;
+    ctx->blendDstAlpha = ctx->blendDstColor;
+    emit_blend_state(ctx);
 }
 
 static void ctr_gpu_blend_enable(Renderer *ren, bool enable) {
     CtrRenderer *ctx = (CtrRenderer *)ren;
-    if (enable) {
-        apply_blend(ctx, ctx->currentBlendMode);
-    } else {
-        flush_batch(ctx);
-        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
-    }
+    flush_batch(ctx);
+    ctx->blendEnabled = enable;
+    emit_blend_state(ctx);
 }
 
 static void ctr_gpu_alpha_test_enable(Renderer *ren, bool enable) {
-    (void)ren;
-    (void)enable;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+    flush_batch(ctx);
+    ctx->alphaTestEnabled = enable;
+    apply_alpha_test_state(ctx);
 }
 
 static void ctr_gpu_alpha_test_ref(Renderer *ren, uint8_t ref) {
-    (void)ren;
-    (void)ref;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+    flush_batch(ctx);
+    ctx->alphaTestRef = ref;
+    apply_alpha_test_state(ctx);
 }
 
 static void ctr_gpu_color_write_enable(Renderer *ren, bool r, bool g, bool b, bool a) {
-    (void)ren;
-    (void)r;
-    (void)g;
-    (void)b;
-    (void)a;
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+    GPU_WRITEMASK mask = GPU_WRITE_DEPTH;
+    if (r) mask = (GPU_WRITEMASK)(mask | GPU_WRITE_RED);
+    if (g) mask = (GPU_WRITEMASK)(mask | GPU_WRITE_GREEN);
+    if (b) mask = (GPU_WRITEMASK)(mask | GPU_WRITE_BLUE);
+    if (a) mask = (GPU_WRITEMASK)(mask | GPU_WRITE_ALPHA);
+    flush_batch(ctx);
+    ctx->writeMask = mask;
+    apply_depth_write_mask(ctx);
 }
 
 static void ctr_set_blend(Renderer *ren, int32_t mode) {
@@ -3676,6 +4705,7 @@ static RendererVtable vtable = {
     .gpuSetAlphaTestRef = ctr_gpu_alpha_test_ref,
     .gpuSetColorWriteEnable = ctr_gpu_color_write_enable,
     .drawTile = ctr_draw_tile,                   .drawTiled = ctr_draw_tiled,
+    .drawTiledPart = ctr_draw_tiled_part,
     .drawCircle = ctr_draw_circle,               .drawEllipse = ctr_draw_ellipse,
     .drawRoundrect = ctr_draw_rr,
     .onRoomChanged = ctr_on_room,
