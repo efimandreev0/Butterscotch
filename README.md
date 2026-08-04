@@ -1,3 +1,6 @@
+# Attention
+This project was maded with AI help
+
 # Butterscotch 3DS EPdN
 
 Nintendo 3DS builds and compatibility work for Butterscotch, focused on running
