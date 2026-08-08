@@ -33,7 +33,53 @@ jobs:
             sudo dkp-pacman -Syu --noconfirm || true
             sudo dkp-pacman -S --noconfirm makerom bannertool 3ds-dev || true
           else
-            echo "dkp-pacman not available; the installer may have failed. Exiting early."; exit 1
+            echo "dkp-pacman not available; trying fallback: download prebuilt makerom/bannertool into tools-local/bin"
+            mkdir -p tools-local/bin || true
+            export PATH="$PWD/tools-local/bin:$PATH"
+            # candidate URLs for makerom/bannertool (try multiple common locations)
+            MAKEROM_URLS=(
+              "https://github.com/devkitPro/makerom/releases/latest/download/makerom"
+              "https://github.com/smealum/makerom/releases/latest/download/makerom"
+              "https://github.com/ihaveamac/makerom/releases/latest/download/makerom"
+            )
+            BANNERT_URLS=(
+              "https://github.com/devkitPro/bannertool/releases/latest/download/bannertool"
+              "https://github.com/smealum/bannertool/releases/latest/download/bannertool"
+            )
+            set +e
+            for u in "${MAKEROM_URLS[@]}"; do
+              echo "Trying $u"
+              curl -fsSL -o tools-local/bin/makerom "$u" && break
+            done
+            for u in "${BANNERT_URLS[@]}"; do
+              echo "Trying $u"
+              curl -fsSL -o tools-local/bin/bannertool "$u" && break
+            done
+            set -e
+            if [ -f tools-local/bin/makerom ]; then chmod +x tools-local/bin/makerom; fi
+            if [ -f tools-local/bin/bannertool ]; then chmod +x tools-local/bin/bannertool; fi
+            if ! command -v makerom >/dev/null 2>&1 || ! command -v bannertool >/dev/null 2>&1; then
+              echo "Fallback binaries not found. Will attempt to build makerom/bannertool from source."
+              # Attempt to build makerom and bannertool from source
+              sudo apt-get update || true
+              sudo apt-get install -y git build-essential cmake libssl-dev zlib1g-dev libbz2-dev liblzma-dev || true
+              mkdir -p /tmp/devkit-tools && cd /tmp/devkit-tools
+              if [ ! -d makerom-src ]; then
+                git clone https://github.com/smealum/makerom.git makerom-src || true
+              fi
+              if [ -d makerom-src ]; then
+                cd makerom-src
+                mkdir -p build && cd build
+                cmake .. || true
+                make -j$(nproc) || true
+                if [ -f makerom ]; then mv makerom "$GITHUB_WORKSPACE/tools-local/bin/makerom" || true; fi
+              fi
+              cd "$GITHUB_WORKSPACE"
+            fi
+            # final check
+            if ! command -v makerom >/dev/null 2>&1 || ! command -v bannertool >/dev/null 2>&1; then
+              echo "makerom or bannertool still missing after fallbacks; aborting"; exit 1
+            fi
           fi
 
       - name: Configure and build CIA
