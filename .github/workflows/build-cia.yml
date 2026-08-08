@@ -15,15 +15,18 @@ jobs:
         run: |
           set -eux
           # Use curl with retries and show output for debugging
-          curl -fsSL -o install-devkitpro-pacman https://apt.devkitpro.org/install-devkitpro-pacman
-          chmod +x install-devkitpro-pacman
-          sudo bash ./install-devkitpro-pacman || true
+          # Try to download installer; if it fails (403) proceed to fallbacks
+          if ! curl -sSL -o install-devkitpro-pacman https://apt.devkitpro.org/install-devkitpro-pacman; then
+            echo "installer download failed; will try fallbacks"
+          else
+            chmod +x install-devkitpro-pacman
+            sudo bash ./install-devkitpro-pacman || true
+          fi
           # Verify dkp-pacman exists
           if ! command -v dkp-pacman >/dev/null 2>&1; then
-            echo "dkp-pacman not available after installer; aborting"
-            ls -la
+            echo "dkp-pacman not available after installer; proceeding to fallbacks"
+            ls -la || true
             cat install-devkitpro-pacman || true
-            exit 1
           fi
 
       - name: Update pacman & install 3DS tools
