@@ -52,12 +52,21 @@ jobs:
             set +e
             for u in "${MAKEROM_URLS[@]}"; do
               echo "Trying $u"
-              curl -fsSL -o tools-local/bin/makerom "$u" && break
+              curl -fsSL -o tools-local/bin/makerom "$u" && break || true
             done
             for u in "${BANNERT_URLS[@]}"; do
               echo "Trying $u"
-              curl -fsSL -o tools-local/bin/bannertool "$u" && break
+              curl -fsSL -o tools-local/bin/bannertool "$u" && break || true
             done
+            # Try downloading release assets via gh (if available)
+            if [ ! -f tools-local/bin/makerom ]; then
+              echo "Trying gh release download for devkitPro/makerom"
+              gh release download --repo devkitPro/makerom --pattern 'makerom' --dir tools-local/bin || true
+            fi
+            if [ ! -f tools-local/bin/bannertool ]; then
+              echo "Trying gh release download for devkitPro/bannertool"
+              gh release download --repo devkitPro/bannertool --pattern 'bannertool' --dir tools-local/bin || true
+            fi
             set -e
             if [ -f tools-local/bin/makerom ]; then chmod +x tools-local/bin/makerom; fi
             if [ -f tools-local/bin/bannertool ]; then chmod +x tools-local/bin/bannertool; fi
