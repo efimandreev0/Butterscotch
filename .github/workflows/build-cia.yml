@@ -13,9 +13,18 @@ jobs:
 
       - name: Install devkitPro pacman (deb installer)
         run: |
-          wget -q -O install-devkitpro-pacman https://apt.devkitpro.org/install-devkitpro-pacman
+          set -eux
+          # Use curl with retries and show output for debugging
+          curl -fsSL -o install-devkitpro-pacman https://apt.devkitpro.org/install-devkitpro-pacman
           chmod +x install-devkitpro-pacman
-          sudo ./install-devkitpro-pacman || true
+          sudo bash ./install-devkitpro-pacman || true
+          # Verify dkp-pacman exists
+          if ! command -v dkp-pacman >/dev/null 2>&1; then
+            echo "dkp-pacman not available after installer; aborting"
+            ls -la
+            cat install-devkitpro-pacman || true
+            exit 1
+          fi
 
       - name: Update pacman & install 3DS tools
         run: |
