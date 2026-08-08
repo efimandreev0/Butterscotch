@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.13)
 include_guard(GLOBAL)
 
-include(dkp-impl-helpers)
-include(dkp-custom-target)
+include(${CMAKE_CURRENT_LIST_DIR}/dkp-impl-helpers.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/dkp-custom-target.cmake)
 
 function(dkp_add_embedded_binary_library target)
 	if (NOT ${ARGC} GREATER 1)

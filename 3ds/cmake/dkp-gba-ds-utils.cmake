@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.13)
 include_guard(GLOBAL)
 
-include(dkp-impl-helpers)
+include(${CMAKE_CURRENT_LIST_DIR}/dkp-impl-helpers.cmake)
 
 macro(__grit_parse_options_common)
 	set(GRIT_ARGS -g)

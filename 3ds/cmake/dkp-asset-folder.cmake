@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.13)
 include_guard(GLOBAL)
 
-include(dkp-custom-target)
+include(${CMAKE_CURRENT_LIST_DIR}/dkp-custom-target.cmake)
 
 function(dkp_add_asset_target target folder)
 	get_filename_component(folder "${folder}" ABSOLUTE)

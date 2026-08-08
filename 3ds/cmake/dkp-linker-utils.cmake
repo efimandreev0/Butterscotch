@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.13)
 include_guard(GLOBAL)
 
-include(dkp-impl-helpers)
+include(${CMAKE_CURRENT_LIST_DIR}/dkp-impl-helpers.cmake)
 
 function(dkp_target_generate_symbol_list target)
 	__dkp_target_derive_name(prefix ${target} "")
