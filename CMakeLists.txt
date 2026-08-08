@@ -3,10 +3,11 @@ cmake_minimum_required(VERSION 3.21)
 if(PLATFORM STREQUAL "3ds")
     if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
         if(NOT DEFINED ENV{DEVKITPRO})
-            message(FATAL_ERROR "Please define DEVKITPRO environment variable to point to your SDK path!")
+            # Use local toolchain file as fallback
+            set(CMAKE_TOOLCHAIN_FILE "${CMAKE_SOURCE_DIR}/3ds/cmake/3DS.cmake" CACHE PATH "toolchain file")
+        else()
+            set(CMAKE_TOOLCHAIN_FILE "$ENV{DEVKITPRO}/cmake/3DS.cmake" CACHE PATH "toolchain file")
         endif()
-
-        set(CMAKE_TOOLCHAIN_FILE "$ENV{DEVKITPRO}/cmake/3DS.cmake" CACHE PATH "toolchain file")
     endif()
 endif()
 
