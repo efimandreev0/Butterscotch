@@ -36,68 +36,50 @@ jobs:
             sudo dkp-pacman -Syu --noconfirm || true
             sudo dkp-pacman -S --noconfirm makerom bannertool 3ds-dev || true
           else
-            echo "dkp-pacman not available; trying fallback: download prebuilt makerom/bannertool into tools-local/bin"
+            echo "dkp-pacman not available; using prebuilt tools from repo and manual setup"
             mkdir -p tools-local/bin || true
             export PATH="$PWD/tools-local/bin:$PATH"
-            # candidate URLs for makerom/bannertool (try multiple common locations)
-            MAKEROM_URLS=(
-              "https://github.com/devkitPro/makerom/releases/latest/download/makerom"
-              "https://github.com/smealum/makerom/releases/latest/download/makerom"
-              "https://github.com/ihaveamac/makerom/releases/latest/download/makerom"
-            )
-            BANNERT_URLS=(
-              "https://github.com/devkitPro/bannertool/releases/latest/download/bannertool"
-              "https://github.com/smealum/bannertool/releases/latest/download/bannertool"
-            )
-            set +e
-            for u in "${MAKEROM_URLS[@]}"; do
-              echo "Trying $u"
-              curl -sSL -o tools-local/bin/makerom "$u" || true
-              if [ -f tools-local/bin/makerom ]; then break; fi
-            done
-            for u in "${BANNERT_URLS[@]}"; do
-              echo "Trying $u"
-              curl -sSL -o tools-local/bin/bannertool "$u" || true
-              if [ -f tools-local/bin/bannertool ]; then break; fi
-            done
-            # Try downloading release assets via gh (if available)
-            if [ ! -f tools-local/bin/makerom ]; then
-              echo "Trying gh release download for devkitPro/makerom"
-              gh release download --repo devkitPro/makerom --pattern 'makerom' --dir tools-local/bin || true
+            # Use prebuilt tools already in repo
+            if [ -f tools-local/bin/makerom ] && [ -f tools-local/bin/bannertool ]; then
+              echo "Found prebuilt tools in repo"
+              chmod +x tools-local/bin/makerom tools-local/bin/bannertool
+            else
+              echo "Prebuilt tools not found in repo; attempting to download"
+              set +e
+              curl -sSL -o tools-local/bin/makerom "https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.19.0/makerom" || true
+              if [ ! -f tools-local/bin/makerom ]; then
+                git clone https://github.com/carstene1ns/3ds-bannertool.git /tmp/bannertool-src
+                mkdir -p /tmp/bannertool-src/build
+                cd /tmp/bannertool-src/build
+                cmake .. || true
+                cmake --build . || true
+                if [ -f bannertool ]; then cp bannertool "$GITHUB_WORKSPACE/tools-local/bin/bannertool" || true; fi
+                cd "$GITHUB_WORKSPACE"
+              fi
+              set -e
             fi
-            if [ ! -f tools-local/bin/bannertool ]; then
-              echo "Trying gh release download for devkitPro/bannertool"
-              gh release download --repo devkitPro/bannertool --pattern 'bannertool' --dir tools-local/bin || true
-            fi
-            set -e
             if [ -f tools-local/bin/makerom ]; then chmod +x tools-local/bin/makerom; fi
             if [ -f tools-local/bin/bannertool ]; then chmod +x tools-local/bin/bannertool; fi
             if ! command -v makerom >/dev/null 2>&1 || ! command -v bannertool >/dev/null 2>&1; then
-              echo "Fallback binaries not found. Will attempt to build makerom/bannertool from source."
-              # Attempt to build makerom and bannertool from source
-              sudo apt-get update || true
-              sudo apt-get install -y git build-essential cmake libssl-dev zlib1g-dev libbz2-dev liblzma-dev || true
-              mkdir -p /tmp/devkit-tools && cd /tmp/devkit-tools
-              if [ ! -d makerom-src ]; then
-                git clone https://github.com/smealum/makerom.git makerom-src || true
-              fi
-              if [ -d makerom-src ]; then
-                cd makerom-src
-                mkdir -p build && cd build
-                cmake .. || true
-                make -j$(nproc) || true
-                if [ -f makerom ]; then mv makerom "$GITHUB_WORKSPACE/tools-local/bin/makerom" || true; fi
-              fi
-              cd "$GITHUB_WORKSPACE"
-            fi
-            # final check
-            if ! command -v makerom >/dev/null 2>&1 || ! command -v bannertool >/dev/null 2>&1; then
-              echo "makerom or bannertool still missing after fallbacks; aborting"; exit 1
+              echo "Tools still missing; aborting"; exit 1
             fi
           fi
 
+      - name: Setup DEVKITPRO environment
+        run: |
+          # Set DEVKITPRO to a local directory for the build
+          export DEVKITPRO=${{ github.workspace }}/devkitpro
+          mkdir -p "$DEVKITPRO"
+          echo "DEVKITPRO=$DEVKITPRO" >> $GITHUB_ENV
+           
+          # For now, we rely on system packages or bundled dependencies
+          # The 3DS build requires arm-none-eabi-gcc toolchain
+          sudo apt-get update || true
+          sudo apt-get install -y gcc-arm-none-eabi || true
+
       - name: Configure and build CIA
         run: |
+          export PATH="${GITHUB_WORKSPACE}/tools-local/bin:$PATH"
           mkdir -p build-3ds
           cd build-3ds
           cmake -DPLATFORM=3ds ..
