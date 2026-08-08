@@ -117,6 +117,24 @@ endif()
 add_executable(butterscotch ${SOURCES} ${PLATFORM_SOURCES})
 target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
+# Include bzip2 sources for platforms that may not have system libbz2 (e.g., 3DS cross builds)
+if(PLATFORM STREQUAL "3ds")
+    set(BZIP2_SOURCES
+        vendor/bzip2/blocksort.c
+        vendor/bzip2/bzlib.c
+        vendor/bzip2/compress.c
+        vendor/bzip2/crctable.c
+        vendor/bzip2/decompress.c
+        vendor/bzip2/huffman.c
+        vendor/bzip2/randtable.c
+    )
+    target_sources(butterscotch PRIVATE ${BZIP2_SOURCES})
+    target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/vendor/bzip2)
+    if(NOT MSVC)
+        set_source_files_properties(${BZIP2_SOURCES} PROPERTIES COMPILE_FLAGS "-w")
+    endif()
+endif()
+
 # stb_ds
 target_include_directories(butterscotch PUBLIC vendor/stb/ds)
 
@@ -476,7 +494,6 @@ elseif(PLATFORM STREQUAL "3ds")
         SDL
         citro3d
         ctru
-        bz2
         m
         3ds_shaders
     )
