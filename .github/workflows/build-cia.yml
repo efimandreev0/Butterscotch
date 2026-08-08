@@ -65,21 +65,16 @@ jobs:
             fi
           fi
 
-      - name: Setup DEVKITPRO environment
+      - name: Setup build environment
         run: |
-          # Set DEVKITPRO to a local directory for the build
-          export DEVKITPRO=${{ github.workspace }}/devkitpro
-          mkdir -p "$DEVKITPRO"
-          echo "DEVKITPRO=$DEVKITPRO" >> $GITHUB_ENV
-           
-          # For now, we rely on system packages or bundled dependencies
-          # The 3DS build requires arm-none-eabi-gcc toolchain
+          # Install build-essential and make for local builds
           sudo apt-get update || true
-          sudo apt-get install -y gcc-arm-none-eabi || true
+          sudo apt-get install -y build-essential cmake gcc-arm-none-eabi || true
 
       - name: Configure and build CIA
         run: |
           export PATH="${GITHUB_WORKSPACE}/tools-local/bin:$PATH"
+          # Don't set DEVKITPRO — let cmake use local toolchain instead
           mkdir -p build-3ds
           cd build-3ds
           cmake -DPLATFORM=3ds ..
