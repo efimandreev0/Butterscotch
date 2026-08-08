@@ -1,0 +1,88 @@
+name: Build CIA
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build-cia:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install devkitPro pacman (deb installer)
+        run: |
+          set -eux
+          # Use curl with retries and show output for debugging
+          # Try to download installer; if it fails (403) proceed to fallbacks
+          if ! curl -sSL -o install-devkitpro-pacman https://apt.devkitpro.org/install-devkitpro-pacman; then
+            echo "installer download failed; will try fallbacks"
+          else
+            chmod +x install-devkitpro-pacman
+            sudo bash ./install-devkitpro-pacman || true
+          fi
+          # Verify dkp-pacman exists
+          if ! command -v dkp-pacman >/dev/null 2>&1; then
+            echo "dkp-pacman not available after installer; proceeding to fallbacks"
+            ls -la || true
+            cat install-devkitpro-pacman || true
+          fi
+
+      - name: Update pacman & install 3DS tools
+        run: |
+          # dkp-pacman should be available after the installer; try to update and install makerom/bannertool
+          if command -v dkp-pacman >/dev/null 2>&1; then
+            sudo dkp-pacman -Syu --noconfirm || true
+            sudo dkp-pacman -S --noconfirm makerom bannertool 3ds-dev || true
+          else
+            echo "dkp-pacman not available; using prebuilt tools from repo and manual setup"
+            mkdir -p tools-local/bin || true
+            export PATH="$PWD/tools-local/bin:$PATH"
+            # Use prebuilt tools already in repo
+            if [ -f tools-local/bin/makerom ] && [ -f tools-local/bin/bannertool ]; then
+              echo "Found prebuilt tools in repo"
+              chmod +x tools-local/bin/makerom tools-local/bin/bannertool
+            else
+              echo "Prebuilt tools not found in repo; attempting to download"
+              set +e
+              curl -sSL -o tools-local/bin/makerom "https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.19.0/makerom" || true
+              if [ ! -f tools-local/bin/makerom ]; then
+                git clone https://github.com/carstene1ns/3ds-bannertool.git /tmp/bannertool-src
+                mkdir -p /tmp/bannertool-src/build
+                cd /tmp/bannertool-src/build
+                cmake .. || true
+                cmake --build . || true
+                if [ -f bannertool ]; then cp bannertool "$GITHUB_WORKSPACE/tools-local/bin/bannertool" || true; fi
+                cd "$GITHUB_WORKSPACE"
+              fi
+              set -e
+            fi
+            if [ -f tools-local/bin/makerom ]; then chmod +x tools-local/bin/makerom; fi
+            if [ -f tools-local/bin/bannertool ]; then chmod +x tools-local/bin/bannertool; fi
+            if ! command -v makerom >/dev/null 2>&1 || ! command -v bannertool >/dev/null 2>&1; then
+              echo "Tools still missing; aborting"; exit 1
+            fi
+          fi
+
+      - name: Setup build environment
+        run: |
+          # Install build-essential and make for local builds
+          sudo apt-get update || true
+          sudo apt-get install -y build-essential cmake gcc-arm-none-eabi || true
+
+      - name: Configure and build CIA
+        run: |
+          export PATH="${GITHUB_WORKSPACE}/tools-local/bin:$PATH"
+          # Don't set DEVKITPRO — let cmake use local toolchain instead
+          mkdir -p build-3ds
+          cd build-3ds
+          cmake -DPLATFORM=3ds ..
+          cmake --build . --target butterscotch_cia -j$(nproc)
+
+      - name: Upload CIA artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: butterscotch-cia
+          path: build-3ds/butterscotch.cia

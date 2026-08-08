@@ -56,6 +56,7 @@ typedef struct {
     Mix_Chunk **chunks;
     Mix_Music **music;
     uint8_t   **musicBuf;   // raw ogg/mp3 bytes backing a Mix_Music
+    char     **musicTmpPaths; // optional temp file paths when Mix_LoadMUS_RW fails
     void      **sfxBuf;     // linearAlloc'd PCM backing a Mix_QuickLoad_RAW chunk
     float      *soundGains;
     float      *pitches;

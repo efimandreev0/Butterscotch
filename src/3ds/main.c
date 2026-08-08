@@ -20,7 +20,7 @@
 #include "render2d_shader_shbin.h"
 #include "launcher.h"
 
-//u32 __ctru_heap_size        = 35 * 1024 * 1024;
+u32 __ctru_heap_size        = 12 * 1024 * 1024; // keep main heap modest to avoid svc allocation failures
 u32 __ctru_linear_heap_size = 48 * 1024 * 1024;
 u32 __stacksize__           = 64 * 1024;
 

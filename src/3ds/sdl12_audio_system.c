@@ -9,6 +9,7 @@
 #include <malloc.h>
 #include <SDL/SDL.h>
 #include <SDL/SDL_mixer.h>
+#include <unistd.h>
 
 #include "stb_ds.h"
 
@@ -872,6 +873,35 @@ static bool load_music_from_entry(SysMixer *sm, int id, AudioEntry *ent, const c
     if (!music) {
         fprintf(stderr, "[AUDIO] Mix_LoadMUS_RW failed for '%s': %s\n",
                 snd && snd->name ? snd->name : "?", Mix_GetError());
+        // Fallback: write to a temporary file in the same directory as the archive
+        const char *dir = strrchr(archive, '/');
+        char tmpPath[1024];
+        if (dir) {
+            int dirlen = (int)(dir - archive);
+            snprintf(tmpPath, sizeof(tmpPath), "%.*s/butterscotch_tmp_music_%d.ogg", dirlen, archive, id);
+        } else {
+            snprintf(tmpPath, sizeof(tmpPath), "butterscotch_tmp_music_%d.ogg", id);
+        }
+        FILE *tf = fopen(tmpPath, "wb");
+        if (tf) {
+            if (fwrite(mb, 1, ent->dataSize, tf) == ent->dataSize) {
+                fclose(tf);
+                music = Mix_LoadMUS(tmpPath);
+                if (music) {
+                    sm->music[id] = music;
+                    sm->musicBuf[id] = mb;
+                    sm->musicTmpPaths[id] = strdup(tmpPath);
+                    evict_old_music(sm, id);
+                    return true;
+                } else {
+                    fprintf(stderr, "[AUDIO] Mix_LoadMUS fallback failed for '%s' at '%s': %s\n",
+                            snd && snd->name ? snd->name : "?", tmpPath, Mix_GetError());
+                }
+            } else {
+                fclose(tf);
+            }
+            unlink(tmpPath);
+        }
         free(mb);
         return false;
     }
@@ -982,6 +1012,7 @@ static void sys_init(AudioSystem *sys, DataWin *dw, FileSystem *fs) {
     sm->chunks     = calloc(cnt, sizeof(Mix_Chunk *));
     sm->music      = calloc(cnt, sizeof(Mix_Music *));
     sm->musicBuf   = calloc(cnt, sizeof(uint8_t *));
+    sm->musicTmpPaths = calloc(cnt, sizeof(char *));
     sm->sfxBuf     = calloc(cnt, sizeof(void *));
     sm->soundGains = calloc(cnt, sizeof(float));
     sm->lastUsed   = calloc(cnt, sizeof(uint32_t));
@@ -1032,6 +1063,18 @@ static void sys_destroy(AudioSystem *sys) {
 
     free(sm->chunks);
     free(sm->music);
+    {
+        uint32_t __cnt = sm->base.dataWin ? sm->base.dataWin->sond.count : 0;
+        if (sm->musicTmpPaths) {
+            for (uint32_t __i = 0; __i < __cnt; __i++) {
+                if (sm->musicTmpPaths[__i]) {
+                    unlink(sm->musicTmpPaths[__i]);
+                    free(sm->musicTmpPaths[__i]);
+                }
+            }
+        }
+        free(sm->musicTmpPaths);
+    }
     free(sm->musicBuf);
     free(sm->sfxBuf);
     free(sm->soundGains);
