@@ -1,0 +1,42 @@
+name: Build CIA
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build-cia:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install devkitPro pacman (deb installer)
+        run: |
+          wget -q -O install-devkitpro-pacman https://apt.devkitpro.org/install-devkitpro-pacman
+          chmod +x install-devkitpro-pacman
+          sudo ./install-devkitpro-pacman || true
+
+      - name: Update pacman & install 3DS tools
+        run: |
+          # dkp-pacman should be available after the installer; try to update and install makerom/bannertool
+          if command -v dkp-pacman >/dev/null 2>&1; then
+            sudo dkp-pacman -Syu --noconfirm || true
+            sudo dkp-pacman -S --noconfirm makerom bannertool 3ds-dev || true
+          else
+            echo "dkp-pacman not available; the installer may have failed. Exiting early."; exit 1
+          fi
+
+      - name: Configure and build CIA
+        run: |
+          mkdir -p build-3ds
+          cd build-3ds
+          cmake -DPLATFORM=3ds ..
+          cmake --build . --target butterscotch_cia -j$(nproc)
+
+      - name: Upload CIA artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: butterscotch-cia
+          path: build-3ds/butterscotch.cia
